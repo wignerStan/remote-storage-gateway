@@ -12,6 +12,13 @@ impl<H: proxy_pingora::http_ingress::Handler> Process<H> {
     pub fn new(worker: Arc<proxy_pingora::http_ingress::Worker<H>>, runtime: Runtime) -> Self {
         Self { worker, runtime }
     }
+    /// Close one mounted axis while preserving the listener and independent axes.
+    pub async fn close_axis(&self, name: &str) -> Result<(), Vec<String>> {
+        self.runtime
+            .require::<crate::composition::AxisRuntime>(name)
+            .map_err(|e| vec![e])?;
+        self.runtime.close_resources(&[name]).await
+    }
 }
 #[async_trait::async_trait]
 impl<H: proxy_pingora::http_ingress::Handler> proxy_pingora::http_ingress::Application

@@ -625,6 +625,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "file-access"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1173,6 +1181,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "network-sockets"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "file-access",
+ "socket2",
+ "tokio",
+]
+
+[[package]]
 name = "nix"
 version = "0.24.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1562,6 +1580,7 @@ dependencies = [
  "action-router",
  "async-trait",
  "network-actions",
+ "network-sockets",
  "pingora-core",
  "plugin-lifecycle",
  "plugin-loading",
@@ -1739,6 +1758,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-bridge",
+ "network-sockets",
  "pingora-core",
  "pingora-error",
  "pingora-http",

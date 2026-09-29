@@ -1,4 +1,5 @@
 //! Generic worker composition, independent of provider business and release policy.
+pub mod composition;
 pub mod entry;
 pub mod management;
 mod process;

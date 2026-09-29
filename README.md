@@ -30,13 +30,41 @@ HTTP/gRPC route allowlist. Action contracts are distinct from transport bindings
 entry registration belongs to plugin composition. PG/cache Tool dependencies are
 injected directly in the plugin axis. There is no universal RequestPlan layer.
 
-`entry::install` binds an internal listener, registers worker management and
-application-supplied plugin actions transactionally, and delays serving until
-composition commits. Closure revokes routes, signals the listener, drains calls,
-and releases resources. TCP is loopback-only. A Unix listener never removes an
-existing socket, symlink or regular file to take its place. Cleanup removes only
-the inode this installation created; stale sockets require explicit operator
-cleanup. Socket mode/group are deployment inputs, not business names in the host.
+`entry::install` binds one shared internal listener and installs worker management
+under the reserved `worker` namespace. `SharedEntry::install_actions` and
+`install_native_actions` register each axis's actions into that same router as
+reversible resources in its own composition. Serving begins after `activate`;
+additional owners can register while the entry is live.
+
+`composition::mount_axis` mounts a committed child runtime as an explicit parent
+resource. Each child keeps its own local resource names, bindings and useflow;
+cross-axis/shared dependencies belong in the parent resource schema. Several axes
+can therefore use the same internal resource names without sharing ownership.
+The parent composition fixes its mounts at commit; the shared entry does not itself
+hot-add child runtimes to that committed parent. `Process::close_axis` closes a
+mounted runtime in dependency order. Live dependents prevent unsafe closure.
+
+Closing an axis withdraws only its routes, not the listener or another axis's
+routes. In-flight unary calls and streaming producers retain leases until they
+really finish; route revocation notifies streaming responses and interrupts
+backpressure waits. The entry reserves each namespace through draining, then
+allows reuse. Failed registration releases its reservation; old generations
+cannot revoke replacement routes. Contract IDs are local to the namespace, while
+actual HTTP paths/gRPC names stay explicit and globally unique. A conflicting
+batch fails atomically. These namespaces express ownership, not permissions.
+
+Whole-host closure stops registration, withdraws all routes, signals the listener,
+and drains calls before releasing resources. A closed entry rejects new axes.
+Socket bind, endpoint validation, Unix mode/group, stale-path policy and
+inode-checked cleanup come from infra's `network-sockets`. This project selects
+the compiled local-listener policy and owns its serving lease; it has no duplicate
+socket implementation. Stale recovery is explicit and never removes a live
+listener or a non-socket path. Socket mode/group are deployment inputs.
+
+The worker notifier exposes typed socket decisions at ingress use/reuse
+boundaries. An application Handler projects those into its installed chain;
+infra applies closure without leaking raw descriptors to plugins. This scope
+does not transfer ownership of a shared management listener to a business axis.
 
 ## Native boundary
 

@@ -9,6 +9,7 @@ description = "Plugin-composed Pingora worker process and shared management entr
 resolver = "2"
 
 [dependencies]
+network-sockets = { path = "../infra/rust/crates/networking/sockets" }
 action-router = { path = "../infra/rust/crates/networking/action-router" }
 network-actions = { path = "../infra/rust/crates/networking/actions" }
 plugin-lifecycle = { path = "../infra/rust/crates/plugins/lifecycle" }
