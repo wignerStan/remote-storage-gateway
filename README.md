@@ -64,13 +64,22 @@ For a client implemented in another language, reuse infra's framed stdio primiti
 and provider adapter; do not add a front proxy or tunnel ordinary Tool calls
 through the notification chain.
 
-## Common Tool plugins
+## Curated optional Tool plugins
 
-`just build-plugins` builds PostgreSQL and the combined Redis + memory cache Tool
-from the existing sibling infra checkout and places their `.so` artifacts in
-`plugins/`. Their implementation is not copied here. `plugins/packages.json`
-describes this Tool-only composition. A business release adds its own Object leaf:
-Sub2API's base bundle has one Go Object plus these two Tool artifacts.
+`plugins/packages.json` catalogs PostgreSQL, Redis + memory cache and the browser
+client. These are optional builtin distributions, each a separate loadable `.so`;
+the generic worker does not statically link, automatically load or require them.
+Their implementations stay in the single infra checkout.
+
+Choose `just build-postgres`, `just build-cache` or `just build-browser` to build
+only that Tool into `plugins/`. `just build-plugins` is an explicit convenience
+selection of all three. Listing a package does not grant a capability: deployments
+select artifacts, and loaded instances independently declare their provider bindings.
+
+Sub2API's base business bundle contains only its Go Object. Its OAuth business
+bundle contains two Go Objects. The application deployment separately selects
+the needed curated Tools and injects their capabilities. Missing required bindings
+fail before loading; there is no implicit backend fallback.
 
 The worker and its release application must resolve the same infra checkout;
 use the existing sibling `infra` workspace rather than a second clone. The host

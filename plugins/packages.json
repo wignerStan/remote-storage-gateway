@@ -1,5 +1,4 @@
 {
-  "root": "storage-cache-bundle",
   "packages": [
     {
       "id": "storage-postgres",
@@ -32,19 +31,19 @@
       "variant": "native"
     },
     {
-      "id": "storage-cache-bundle",
-      "variant": "native",
-      "leaf": null,
-      "requires": [
-        {
-          "package": "storage-postgres",
-          "variant": "native"
+      "id": "networking-browser",
+      "leaf": {
+        "artifact": {
+          "abi_version": 1,
+          "entry": "infra_plugin_v1_entry",
+          "file": "libbrowser_client_plugin.so",
+          "language": "rust",
+          "unload": "explicit"
         },
-        {
-          "package": "caching-redis",
-          "variant": "native"
-        }
-      ]
+        "type": "tool"
+      },
+      "requires": [],
+      "variant": "native"
     }
   ]
 }
