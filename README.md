@@ -30,8 +30,10 @@ HTTP/gRPC route allowlist. Action contracts are distinct from transport bindings
 entry registration belongs to plugin composition. PG/cache Tool dependencies are
 injected directly in the plugin axis. There is no universal RequestPlan layer.
 
-`entry::install` binds one shared internal listener and installs worker management
-under the reserved `worker` namespace. `SharedEntry::install_actions` and
+`entry::install` binds one selected internal endpoint. `Registration::worker_control`
+explicitly chooses whether that listener installs worker management under the
+reserved `worker` namespace. Use `None` for a plugin-only listener: it receives
+no worker actions automatically. `SharedEntry::install_actions` and
 `install_native_actions` register each axis's actions into that same router as
 reversible resources in its own composition. Serving begins after `activate`;
 additional owners can register while the entry is live.
@@ -44,14 +46,24 @@ The parent composition fixes its mounts at commit; the shared entry does not its
 hot-add child runtimes to that committed parent. `Process::close_axis` closes a
 mounted runtime in dependency order. Live dependents prevent unsafe closure.
 
-Closing an axis withdraws only its routes, not the listener or another axis's
-routes. In-flight unary calls and streaming producers retain leases until they
+On a shared listener, closing an action owner withdraws only its routes, not the
+listener or another owner's routes. An axis can instead own its own entry/UDS;
+closing that axis withdraws and drains its routes, then releases its listener. In-flight unary calls and streaming producers retain leases until they
 really finish; route revocation notifies streaming responses and interrupts
 backpressure waits. The entry reserves each namespace through draining, then
 allows reuse. Failed registration releases its reservation; old generations
 cannot revoke replacement routes. Contract IDs are local to the namespace, while
-actual HTTP paths/gRPC names stay explicit and globally unique. A conflicting
+actual HTTP paths/gRPC names stay explicit and unique within that listener. A conflicting
 batch fails atomically. These namespaces express ownership, not permissions.
+
+Different axes use different HTTP/gRPC bindings on a shared listener **or**
+separate TCP/Unix endpoints with independent routers. Sharing entry implementation
+does not require sharing a listening socket. Independent listeners may use the
+same action/contract names; their publication and shutdown ownership stays local.
+The `axis_endpoints` regression uses two Unix sockets in one parent composition,
+checks that a duplicate socket bind cannot replace its owner, and closes one axis
+while the other continues serving. No host-entry-to-plugin-entry forwarding hop
+is introduced.
 
 Whole-host closure stops registration, withdraws all routes, signals the listener,
 and drains calls before releasing resources. A closed entry rejects new axes.
@@ -63,8 +75,9 @@ listener or a non-socket path. Socket mode/group are deployment inputs.
 
 The worker notifier exposes typed socket decisions at ingress use/reuse
 boundaries. An application Handler projects those into its installed chain;
-infra applies closure without leaking raw descriptors to plugins. This scope
-does not transfer ownership of a shared management listener to a business axis.
+infra applies closure without leaking raw descriptors to plugins. The same worker flow also exposes infra dial, keyed pool and byte-bridge controls;
+see [worker networking](../infra/rust/crates/networking/proxy/pingora/src/worker/README.md).
+These explicit operation hooks do not transfer ownership of a shared management listener to a business axis.
 
 ## Native boundary
 

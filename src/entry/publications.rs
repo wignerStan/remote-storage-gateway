@@ -36,15 +36,17 @@ pub(super) struct State {
     slots: BTreeMap<String, Slot>,
 }
 impl State {
-    pub(super) fn with_worker(worker: action_router::Registration) -> Arc<Mutex<Self>> {
+    pub(super) fn new(worker: Option<action_router::Registration>) -> Arc<Mutex<Self>> {
         let mut state = Self::default();
-        state.slots.insert(
-            "worker".into(),
-            Slot {
-                generation: Arc::new(()),
-                publication: Some(Arc::new(Publication::Local(worker))),
-            },
-        );
+        if let Some(worker) = worker {
+            state.slots.insert(
+                "worker".into(),
+                Slot {
+                    generation: Arc::new(()),
+                    publication: Some(Arc::new(Publication::Local(worker))),
+                },
+            );
+        }
         Arc::new(Mutex::new(state))
     }
 }

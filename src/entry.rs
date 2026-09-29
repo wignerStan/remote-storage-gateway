@@ -36,7 +36,8 @@ impl SharedEntry {
 }
 /// Application-selected contracts are independent of the worker's notifier surface.
 pub struct Registration {
-    pub control: Arc<proxy_pingora::worker::WorkerControl>,
+    /// Some installs worker management; None exposes only explicitly registered actions.
+    pub worker_control: Option<Arc<proxy_pingora::worker::WorkerControl>>,
     pub endpoint: LocalEndpoint,
     pub permissions: SocketPermissions,
 }
@@ -50,11 +51,11 @@ pub async fn install(
     composition
         .install(resource, async move {
             let Registration {
-                control,
+                worker_control,
                 endpoint,
                 permissions,
             } = registration;
-            // Bind before registering anything; existing sockets/files are never removed.
+            // Bind before registering routes; pathname ownership follows the socket primitive.
             let (bound, socket) = socket::bind(endpoint, permissions).await?;
             let local_address = match &bound {
                 BoundListener::Tcp(listener) => {
@@ -65,12 +66,16 @@ pub async fn install(
             let router = Router::new();
             let carrier = ActionService::new(router.clone(), 1024 * 1024, Duration::from_secs(120))
                 .map_err(|e| e.to_string())?;
-            let worker_actions = router
-                .with_contract_namespace("worker")
-                .map_err(|e| e.to_string())?
-                .register(crate::management::actions(&control))
-                .map_err(|e| e.to_string())?;
-            let publications = publications::State::with_worker(worker_actions);
+            let worker_actions = worker_control
+                .map(|control| {
+                    router
+                        .with_contract_namespace("worker")
+                        .map_err(|e| e.to_string())?
+                        .register(crate::management::actions(&control))
+                        .map_err(|e| e.to_string())
+                })
+                .transpose()?;
+            let publications = publications::State::new(worker_actions);
             let (start, started) = oneshot::channel();
             let (stop, mut stopped) = oneshot::channel();
             let task = tokio::spawn(async move {

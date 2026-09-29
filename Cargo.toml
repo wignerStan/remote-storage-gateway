@@ -23,4 +23,7 @@ tokio = { version = "1", features = ["net", "sync", "rt-multi-thread", "macros",
 tracing = "0.1"
 
 [dev-dependencies]
+tonic = { version = "0.14", features = ["transport"] }
+tower = { version = "0.5", features = ["util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 tempfile = "3"
