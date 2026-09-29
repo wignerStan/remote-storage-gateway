@@ -1,0 +1,50 @@
+{
+  "root": "storage-cache-bundle",
+  "packages": [
+    {
+      "id": "storage-postgres",
+      "leaf": {
+        "artifact": {
+          "abi_version": 1,
+          "entry": "infra_plugin_v1_entry",
+          "file": "libstorage_postgres_plugin.so",
+          "language": "rust",
+          "unload": "explicit"
+        },
+        "type": "tool"
+      },
+      "requires": [],
+      "variant": "native"
+    },
+    {
+      "id": "caching-redis",
+      "leaf": {
+        "artifact": {
+          "abi_version": 1,
+          "entry": "infra_plugin_v1_entry",
+          "file": "libcache_redis_plugin.so",
+          "language": "rust",
+          "unload": "explicit"
+        },
+        "type": "tool"
+      },
+      "requires": [],
+      "variant": "native"
+    },
+    {
+      "id": "storage-cache-bundle",
+      "variant": "native",
+      "leaf": null,
+      "requires": [
+        {
+          "package": "storage-postgres",
+          "variant": "native"
+        },
+        {
+          "package": "caching-redis",
+          "variant": "native"
+        }
+      ]
+    }
+  ]
+}
