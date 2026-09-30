@@ -79,6 +79,30 @@ infra applies closure without leaking raw descriptors to plugins. The same worke
 see [worker networking](../infra/rust/crates/networking/proxy/pingora/src/worker/README.md).
 These explicit operation hooks do not transfer ownership of a shared management listener to a business axis.
 
+Callback order is fixed at chain construction. Adapters can declare supported
+hooks with `Callbacks::supports`; the chain builds a per-hook index once and
+skips unrelated callbacks before creating their futures or entering an ABI.
+Each participating callback borrows the same facts. The first decision or error
+stops dispatch. Completion stays with the admitting callback and can start only
+once, including when its first attempt fails or is cancelled; this is not a
+guarantee that completion finishes.
+
+Run `just bdd` to see `DECISION`, `WHY`, and `FACTS` for authentication, admission,
+dial, completion, and a refused completion retry over a real TCP exchange.
+The scenario buffers its trace and prints once. Shared infra credential policy
+hashes API/auth credentials and selected session cookies while preserving ordinary
+route/theme/affinity cookies. Additional credential field and session-cookie names
+are explicit policy inputs. Runtime notifier traces use the
+`proxy_pingora::worker::notifier` target and contain callback indices and decisions,
+without serializing request facts.
+
+The reusable `diagnostic-output` runtime provides separate sinks for diagnostic
+traces, `proxy_pingora::access` records, and opt-in `proxy_pingora::body_dump`
+records. Assembly configures access-file retention independently from body dumps
+and retains the logging guard through shutdown. Trace verbosity does not enable
+body capture. The HTTP carrier emits access metadata without headers, queries or
+bodies; consumed sessions keep unavailable status/byte counts explicitly unknown.
+
 ## Native boundary
 
 The synchronous C ABI is the required effect boundary for Go Object plugins.
