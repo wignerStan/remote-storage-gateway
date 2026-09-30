@@ -1,4 +1,5 @@
 //! Application reverse-proxy policy over Pingora's native duplex HTTP engine.
+mod body;
 mod carrier;
 mod headers;
 mod policy;
@@ -100,10 +101,10 @@ pub struct RequestFacts {
     /// Not serialized by default; ABI adapters select an explicit allowlist.
     #[serde(skip)]
     pub headers: http::HeaderMap,
-    /// Per-request native transforms, configured before upstream finalization.
+    /// Request setup slot, moved into the carrier before upstream finalization.
     #[serde(skip)]
     pub request_body: ChunkChain,
-    /// Per-response native transforms, configured before downstream finalization.
+    /// Response setup slot, moved into the carrier before downstream finalization.
     #[serde(skip)]
     pub response_body: ChunkChain,
 }
@@ -192,6 +193,8 @@ pub struct ProxyContext {
     connected: bool,
     upstream_request: Option<RequestHeader>,
     request_has_body: bool,
+    request_body: ChunkChain,
+    response_body: ChunkChain,
     response_variable: bool,
     response_framing: Option<headers::ResponseFraming>,
     upgraded: bool,

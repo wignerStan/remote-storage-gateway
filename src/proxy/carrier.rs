@@ -17,6 +17,8 @@ impl ProxyHttp for NativeProxy {
             connected: false,
             upstream_request: None,
             request_has_body: false,
+            request_body: ChunkChain::default(),
+            response_body: ChunkChain::default(),
             response_variable: false,
             response_framing: None,
             upgraded: false,
@@ -54,13 +56,10 @@ impl ProxyHttp for NativeProxy {
                 .begin(ENDPOINT, &mut request, facts)
                 .await
                 .map_err(|_| refusal(403, "request denied by installed notifier"))?;
-            let variable = !exchange
-                .facts_mut()
-                .request_body
-                .seal()
-                .map_err(lifecycle_error)?;
-            if request.headers.contains_key("upgrade") && !exchange.facts().request_body.is_empty()
-            {
+            let (request_body, preserves_length) =
+                body::take_plan(&mut exchange.facts_mut().request_body)?;
+            let variable = !preserves_length;
+            if request.headers.contains_key("upgrade") && !request_body.is_empty() {
                 return Err(refusal(
                     400,
                     "HTTP body transforms cannot process an upgrade",
@@ -107,22 +106,20 @@ impl ProxyHttp for NativeProxy {
                 variable,
                 ctx.request_has_body,
             )?;
-            exchange
-                .facts()
-                .request_body
-                .ensure_ready()
-                .map_err(lifecycle_error)?;
+            body::ensure_closed(&exchange.facts().request_body)?;
             snapshot_request(&request, exchange.facts_mut());
-            Ok((exchange, request))
+            Ok((exchange, request, request_body))
         };
-        let (exchange, request) = tokio::time::timeout(self.config.io_timeout, prepare)
-            .instrument(ctx.span.clone())
-            .await
-            .map_err(|_| refusal(504, "request callback deadline exceeded"))??;
+        let (exchange, request, request_body) =
+            tokio::time::timeout(self.config.io_timeout, prepare)
+                .instrument(ctx.span.clone())
+                .await
+                .map_err(|_| refusal(504, "request callback deadline exceeded"))??;
         if !self.control.accepting() {
             return Err(refusal(503, "worker admission closed during callbacks"));
         }
         ctx.upstream_request = Some(request);
+        ctx.request_body = request_body;
         ctx.exchange = Some(exchange);
         Ok(false)
     }
@@ -243,10 +240,10 @@ impl ProxyHttp for NativeProxy {
         }
         ctx.dump
             .observe(body.as_deref().unwrap_or_default(), end, ctx.request_id);
-        if ctx.exchange()?.facts().request_body.is_empty() {
+        if ctx.request_body.is_empty() {
             return Ok(());
         }
-        let result = ctx.exchange()?.facts_mut().request_body.filter(body, end);
+        let result = ctx.request_body.filter(body, end);
         if result.is_err() {
             ctx.exchange()?.fail();
         }
@@ -265,6 +262,7 @@ impl ProxyHttp for NativeProxy {
         {
             return Err(refusal(502, "unsolicited upstream protocol upgrade"));
         }
+        headers::validate_transfer_coding(&response.headers, 502)?;
         let original = headers::ResponseFraming::capture(response);
         ctx.exchange()?.facts_mut().status = Some(response.status.as_u16());
         let span = ctx.span.clone();
@@ -276,10 +274,10 @@ impl ProxyHttp for NativeProxy {
         .await
         .map_err(|_| refusal(504, "response callback deadline exceeded"))?
         .map_err(lifecycle_error)?;
+        body::ensure_closed(&ctx.exchange()?.facts().request_body)?;
         original.validate(response, &session.req_header().method)?;
         if response.status.as_u16() == 101
-            && (!ctx.exchange()?.facts().response_body.is_empty()
-                || !ctx.exchange()?.facts().request_body.is_empty())
+            && (!ctx.exchange()?.facts().response_body.is_empty() || !ctx.request_body.is_empty())
         {
             ctx.exchange()?.fail();
             return Err(refusal(
@@ -287,12 +285,10 @@ impl ProxyHttp for NativeProxy {
                 "HTTP body transforms cannot process an upgrade",
             ));
         }
-        ctx.response_variable = !ctx
-            .exchange()?
-            .facts_mut()
-            .response_body
-            .seal()
-            .map_err(lifecycle_error)?;
+        let (response_body, preserves_length) =
+            body::take_plan(&mut ctx.exchange()?.facts_mut().response_body)?;
+        ctx.response_body = response_body;
+        ctx.response_variable = !preserves_length;
         ctx.upgraded = response.status.as_u16() == 101;
         if ctx.upgraded {
             ctx.dump.finish(ctx.request_id);
@@ -333,13 +329,10 @@ impl ProxyHttp for NativeProxy {
         .await
         .map_err(|_| refusal(504, "downstream callback deadline exceeded"))?
         .map_err(lifecycle_error)?;
-        ctx.exchange()?
-            .facts()
-            .response_body
-            .ensure_ready()
-            .map_err(lifecycle_error)?;
+        body::ensure_closed(&ctx.exchange()?.facts().request_body)?;
+        body::ensure_closed(&ctx.exchange()?.facts().response_body)?;
         ctx.exchange()?.facts_mut().status = Some(response.status.as_u16());
-        headers::response_head(
+        let close_delimited = headers::response_head(
             response,
             ctx.response_framing
                 .as_ref()
@@ -347,7 +340,13 @@ impl ProxyHttp for NativeProxy {
             &session.req_header().method,
             session.req_header().version,
             ctx.response_variable,
-        )
+        )?;
+        if close_delimited {
+            // Pingora stamps Connection before initializing its body writer.
+            // Disable reuse now so an HTTP/1.0 EOF body also advertises close.
+            session.set_keepalive(None);
+        }
+        Ok(())
     }
     fn response_body_filter(
         &self,
@@ -359,10 +358,10 @@ impl ProxyHttp for NativeProxy {
         if !ctx.response_received || ctx.upgraded {
             return Ok(None);
         }
-        if ctx.exchange()?.facts().response_body.is_empty() {
+        if ctx.response_body.is_empty() {
             return Ok(None);
         }
-        let result = ctx.exchange()?.facts_mut().response_body.filter(body, end);
+        let result = ctx.response_body.filter(body, end);
         if result.is_err() {
             ctx.exchange()?.fail();
         }
