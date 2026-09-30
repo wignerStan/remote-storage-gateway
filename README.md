@@ -96,6 +96,21 @@ are explicit policy inputs. Runtime notifier traces use the
 `proxy_pingora::worker::notifier` target and contain callback indices and decisions,
 without serializing request facts.
 
+For managed HTTP requests, `RequestFlow::execute_http` runs protocol validation,
+header/metadata transforms, authentication, routing/admission, request-body setup,
+upstream encoding, one installed egress call, upstream-response hooks,
+response-body setup and downstream encoding. All interested transform callbacks
+run in order on the same owned request/context. The returned `HttpExchange`
+retains stream ownership; call `finish` only after downstream delivery completes.
+Failures stop later hooks, and dropping the exchange cancels without reporting
+successful completion. The carrier retains raw protocol parsing responsibility.
+
+Body setup configures native pull-time transforms; it never collects or serializes
+a body to notify plugins. The C ABI carries bounded non-streaming metadata/control
+frames and explicit resource handles while async response streams stay with the
+native host/egress owner. Borrowed frame views can be passed through synchronous
+callbacks without copying; they cannot outlive their invocation.
+
 The reusable `diagnostic-output` runtime provides separate sinks for diagnostic
 traces, `proxy_pingora::access` records, and opt-in `proxy_pingora::body_dump`
 records. Assembly configures access-file retention independently from body dumps
