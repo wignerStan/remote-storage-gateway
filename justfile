@@ -3,6 +3,10 @@ check:
     cargo test --locked
     go test tools/plugin-contract/main.go tools/plugin-contract/main_test.go
 
+# Show the callback decisions and reasons from a real TCP workflow.
+bdd:
+    cargo test --locked --test notifier_workflow -- --nocapture
+
 # Curated, optional runtime-loadable Tools; no static linkage into the worker.
 build-postgres:
     cargo build --locked --release --manifest-path ../infra/rust/Cargo.toml -p storage-postgres-plugin
