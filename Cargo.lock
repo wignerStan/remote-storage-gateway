@@ -1673,11 +1673,13 @@ version = "0.1.0"
 dependencies = [
  "action-router",
  "async-trait",
+ "bytes",
  "diagnostic-output",
  "hyper-util",
  "network-actions",
  "network-sockets",
  "pingora-core",
+ "pingora-http",
  "plugin-lifecycle",
  "plugin-loading",
  "proxy-pingora",
