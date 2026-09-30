@@ -6,5 +6,5 @@ pub(super) async fn bind(
     endpoint: LocalEndpoint,
     permissions: SocketPermissions,
 ) -> Result<(BoundListener, Option<UnixSocketLease>), String> {
-    network_sockets::bind_local(endpoint, permissions, StaleUnixSocketPolicy::Refuse).await
+    network_sockets::bind_local(endpoint, permissions, StaleUnixSocketPolicy::RemoveIfStale).await
 }
