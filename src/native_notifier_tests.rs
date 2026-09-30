@@ -1,0 +1,415 @@
+//! The native fixture records exactly the metadata received across the C ABI.
+use super::*;
+use plugin_abi::{Expected, Language, Limits, PluginType, UnloadPolicy};
+use serde_json::{json, Value};
+use std::{path::Path, process::Command};
+
+const CONTINUE: &str = r#"{"version":1,"decision":"continue"}"#;
+
+struct Fixture {
+    notifier: NativeNotifier,
+    function: Arc<Function>,
+    _directory: tempfile::TempDir,
+}
+impl Fixture {
+    async fn new(reply: &str, hooks: &[&str], headers: &[&str]) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let artifact = directory.path().join("metadata.so");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(Command::new("cc")
+            .args(["-shared", "-fPIC", "-std=c11", "-I"])
+            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("tests/fixtures/metadata_callback.c"))
+            .arg("-o")
+            .arg(&artifact)
+            .status()
+            .unwrap()
+            .success());
+        let config: NativeCallback = serde_json::from_value(json!({
+            "path":artifact, "package":"worker.metadata.test", "hooks":hooks,
+            "headers":headers, "timeout_ms":2000, "max_inflight":1,
+        }))
+        .unwrap();
+        let function = Arc::new(
+            unsafe {
+                Function::load(
+                    config.path.clone(),
+                    Expected::v1(
+                        &config.package,
+                        &config.variant,
+                        PluginType::Function,
+                        Language::Rust,
+                        UnloadPolicy::Explicit,
+                    ),
+                    Limits::new(FRAME_LIMIT, FRAME_LIMIT).unwrap(),
+                    reply.as_bytes().to_vec(),
+                    1,
+                )
+            }
+            .await
+            .unwrap(),
+        );
+        let notifier = NativeNotifier::new(Arc::clone(&function), &config).unwrap();
+        Self {
+            notifier,
+            function,
+            _directory: directory,
+        }
+    }
+    async fn reply(&self, reply: &str) {
+        self.function
+            .call_with_reply(
+                "set_reply",
+                reply.as_bytes().to_vec(),
+                Duration::from_secs(2),
+                (),
+                |_| (),
+            )
+            .await
+            .unwrap();
+    }
+    async fn metadata(&self) -> Value {
+        self.function
+            .call_with_reply("inspect", vec![], Duration::from_secs(2), (), |bytes| {
+                serde_json::from_slice::<Value>(bytes)
+            })
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    async fn shutdown(self) {
+        self.function.shutdown().await.unwrap();
+    }
+}
+
+fn request() -> RequestHeader {
+    let mut request =
+        RequestHeader::build("POST", b"/resource?private-query=hidden", None).unwrap();
+    request.insert_header("host", "origin.example").unwrap();
+    request.append_header("x-visible", "first").unwrap();
+    request.append_header("x-visible", "second").unwrap();
+    request
+        .insert_header("authorization", "Bearer private-credential")
+        .unwrap();
+    request
+        .insert_header("cookie", "session=private-cookie")
+        .unwrap();
+    request.insert_header("x-remove", "original").unwrap();
+    request
+}
+fn facts(request: &RequestHeader) -> RequestFacts {
+    RequestFacts {
+        request_id: 42,
+        method: request.method.to_string(),
+        path: request.uri.path().into(),
+        status: None,
+        upstream_reused: false,
+        completed: false,
+        headers: request.headers.clone(),
+    }
+}
+
+#[tokio::test]
+async fn native_callback_receives_only_metadata_and_explicit_repeated_headers() {
+    let fixture = Fixture::new(CONTINUE, &["pre_ingress", "pre_routing"], &["X-Visible"]).await;
+    let mut request = request();
+    let mut facts = facts(&request);
+    facts.headers.clear();
+    fixture
+        .notifier
+        .pre_ingress(1, &mut request, &mut facts)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.metadata().await["headers"],
+        json!([["x-visible", "first"], ["x-visible", "second"]])
+    );
+    fixture
+        .notifier
+        .pre_routing(1, &mut request, &mut facts)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.metadata().await,
+        json!({
+            "version":1, "hook":"pre_routing", "request_id":42,
+            "method":"POST", "path":"/resource", "status":null,
+            "upstream_reused":false, "completed":false,
+            "headers":[["x-visible","first"],["x-visible","second"]],
+        })
+    );
+    // Exact schema equality excludes bodies, private query and undeclared credentials.
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_request_and_response_patches_apply_only_after_full_validation() {
+    let patch = r#"{"version":1,"decision":"continue","remove_headers":["x-remove"],"set_headers":[["x-added","patched"]]}"#;
+    let fixture = Fixture::new(patch, &["routing", "upstream_response"], &["x-visible"]).await;
+    let mut request = request();
+    let mut facts = facts(&request);
+    fixture
+        .notifier
+        .routing(1, &mut request, &mut facts)
+        .await
+        .unwrap();
+    assert!(!request.headers.contains_key("x-remove"));
+    assert_eq!(request.headers["x-added"], "patched");
+    assert_eq!(request.headers["host"], "origin.example");
+    assert_eq!(
+        facts.headers, request.headers,
+        "request patch must update later authentication facts"
+    );
+    let mut response = ResponseHeader::build(201, None).unwrap();
+    response.insert_header("x-remove", "original").unwrap();
+    response
+        .insert_header("x-visible", "response-only")
+        .unwrap();
+    facts.status = Some(201);
+    facts.upstream_reused = true;
+    fixture
+        .notifier
+        .upstream_response(1, &mut response, &(), &mut facts)
+        .await
+        .unwrap();
+    assert!(!response.headers.contains_key("x-remove"));
+    assert_eq!(response.headers["x-added"], "patched");
+    let metadata = fixture.metadata().await;
+    assert_eq!(metadata["hook"], "upstream_response");
+    assert_eq!(metadata["status"], 201);
+    assert_eq!(metadata["upstream_reused"], true);
+    assert_eq!(
+        metadata["headers"],
+        json!([["x-visible", "response-only"]]),
+        "response stages must project the actual response head"
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_invalid_denied_or_failed_reply_never_partially_mutates_headers() {
+    let fixture = Fixture::new(CONTINUE, &["routing", "upstream_response"], &[]).await;
+    let mut replies = vec![
+        "not-json".to_owned(),
+        r#"{"version":2,"decision":"continue","remove_headers":["x-remove"]}"#.into(),
+        r#"{"version":1,"decision":"deny","set_headers":[["x-added","bad"]]}"#.into(),
+        r#"{"version":1,"decision":"continue","body":"undeclared"}"#.into(),
+        r#"{"version":1,"decision":"continue","set_headers":[["x-added","ok"],["bad name","no"]],"remove_headers":["x-remove"]}"#.into(),
+        r#"{"version":1,"decision":"continue","set_headers":[["x-added","ok"],["x-invalid","bad\r\nvalue"]],"remove_headers":["x-remove"]}"#.into(),
+        "FAIL".into(),
+    ];
+    for name in [
+        "HOST",
+        "Content-Length",
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+        "proxy-connection",
+        "upgrade",
+        "trailer",
+        "te",
+    ] {
+        for remove in [false, true] {
+            let patch = if remove {
+                json!({"remove_headers":["x-remove",name]})
+            } else {
+                json!({"set_headers":[["x-added","ok"],[name,"bad"]],"remove_headers":["x-remove"]})
+            };
+            let mut reply = json!({"version":1,"decision":"continue"});
+            reply
+                .as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            replies.push(reply.to_string());
+        }
+    }
+    replies.push(
+        json!({"version":1,"decision":"continue","remove_headers":vec!["x-remove";65]}).to_string(),
+    );
+    for reply in replies {
+        fixture.reply(&reply).await;
+        let mut request = request();
+        let mut facts = facts(&request);
+        let original = request.headers.clone();
+        assert!(
+            fixture
+                .notifier
+                .routing(1, &mut request, &mut facts)
+                .await
+                .is_err(),
+            "accepted {reply}"
+        );
+        assert_eq!(request.headers, original, "partially applied {reply}");
+        let mut response = ResponseHeader::build(200, None).unwrap();
+        response.insert_header("x-remove", "original").unwrap();
+        let original = response.headers.clone();
+        assert!(fixture
+            .notifier
+            .upstream_response(1, &mut response, &(), &mut facts)
+            .await
+            .is_err());
+        assert_eq!(
+            response.headers, original,
+            "partially applied response {reply}"
+        );
+    }
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn hook_interest_and_acceptance_are_exact_and_nonpatch_stages_reject_mutations() {
+    let fixture = Fixture::new(
+        CONTINUE,
+        &["authenticate", "admit", "before_upstream_send"],
+        &[],
+    )
+    .await;
+    for hook in [
+        CallbackHook::Authenticate,
+        CallbackHook::Admit,
+        CallbackHook::BeforeUpstreamSend,
+    ] {
+        assert!(fixture.notifier.supports(hook));
+    }
+    for hook in [
+        CallbackHook::PreIngress,
+        CallbackHook::PreRouting,
+        CallbackHook::Routing,
+        CallbackHook::PrepareRequestBody,
+        CallbackHook::UpstreamResponse,
+        CallbackHook::PrepareResponseBody,
+        CallbackHook::BeforeDownstreamWrite,
+        CallbackHook::Notify,
+        CallbackHook::Socket,
+        CallbackHook::BeforeDial,
+        CallbackHook::Pool,
+        CallbackHook::BeforeBridge,
+    ] {
+        assert!(
+            !fixture.notifier.supports(hook),
+            "unexpected interest in {hook:?}"
+        );
+    }
+    let request = request();
+    let facts = facts(&request);
+    assert_eq!(
+        fixture.notifier.authenticate(1, &facts).await.unwrap(),
+        None
+    );
+    assert_eq!(fixture.notifier.admit(1, &facts).await.unwrap(), None);
+    let before = fixture.metadata().await;
+    assert_eq!(fixture.notifier.complete(&facts).await.unwrap(), 0);
+    assert_eq!(
+        fixture.metadata().await,
+        before,
+        "unregistered completion entered native code"
+    );
+    fixture.reply(r#"{"version":1,"decision":"accept"}"#).await;
+    assert_eq!(
+        fixture.notifier.authenticate(1, &facts).await.unwrap(),
+        Some(())
+    );
+    assert_eq!(fixture.notifier.admit(1, &facts).await.unwrap(), Some(()));
+    fixture
+        .reply(r#"{"version":1,"decision":"accept","remove_headers":["x-remove"]}"#)
+        .await;
+    assert!(fixture.notifier.authenticate(1, &facts).await.is_err());
+    assert!(fixture.notifier.admit(1, &facts).await.is_err());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn selected_completion_enters_native_code_once_and_forbids_patches() {
+    let fixture = Fixture::new(CONTINUE, &["complete"], &["x-visible"]).await;
+    let request = request();
+    let mut facts = facts(&request);
+    facts.completed = true;
+    facts.status = Some(204);
+    assert_eq!(fixture.notifier.complete(&facts).await.unwrap(), 0);
+    let metadata = fixture.metadata().await;
+    assert_eq!(metadata["hook"], "complete");
+    assert_eq!(metadata["completed"], true);
+    assert_eq!(metadata["status"], 204);
+    fixture
+        .reply(r#"{"version":1,"decision":"continue","set_headers":[["x-added","bad"]]}"#)
+        .await;
+    assert!(fixture.notifier.complete(&facts).await.is_err());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn callback_input_size_and_textual_header_checks_fail_before_native_entry() {
+    let fixture = Fixture::new(CONTINUE, &["routing"], &["x-visible"]).await;
+    let mut request = request();
+    let mut facts = facts(&request);
+    fixture
+        .notifier
+        .routing(1, &mut request, &mut facts)
+        .await
+        .unwrap();
+    let previous = fixture.metadata().await;
+    facts.path = "x".repeat(FRAME_LIMIT);
+    let original = request.headers.clone();
+    assert!(fixture
+        .notifier
+        .routing(1, &mut request, &mut facts)
+        .await
+        .is_err());
+    assert_eq!(request.headers, original);
+    assert_eq!(fixture.metadata().await, previous);
+    facts.path = "/resource".into();
+    request
+        .headers
+        .insert("x-visible", http::HeaderValue::from_bytes(b"\xff").unwrap());
+    let original = request.headers.clone();
+    assert!(fixture
+        .notifier
+        .routing(1, &mut request, &mut facts)
+        .await
+        .is_err());
+    assert_eq!(request.headers, original);
+    assert_eq!(fixture.metadata().await, previous);
+    fixture.shutdown().await;
+}
+
+#[test]
+fn configuration_rejects_invalid_hooks_header_names_bounds_and_body_capture_settings() {
+    let base = json!({"upstream":"http://origin.example", "callbacks":[{
+        "path":"/trusted/metadata.so", "package":"worker.metadata.test", "hooks":["routing"]
+    }]});
+    let valid: crate::config::Config = serde_json::from_value(base.clone()).unwrap();
+    valid.validate().unwrap();
+    for (field, value) in [
+        ("hooks", json!([])),
+        ("hooks", json!(["routing", "routing"])),
+        ("hooks", json!(["request_body_dump"])),
+        ("headers", json!(["bad name"])),
+        ("headers", json!(vec!["x-visible"; 65])),
+        ("max_inflight", json!(0)),
+        ("max_inflight", json!(1025)),
+        ("timeout_ms", json!(0)),
+        ("timeout_ms", json!(300001)),
+        ("path", json!("")),
+        ("package", json!("")),
+        ("variant", json!("")),
+    ] {
+        let mut invalid = base.clone();
+        invalid["callbacks"][0][field] = value;
+        let config: crate::config::Config = serde_json::from_value(invalid).unwrap();
+        assert!(
+            config.validate().is_err(),
+            "accepted invalid callback {field}"
+        );
+    }
+    for logging in [
+        json!({"body_max_bytes":1}),
+        json!({"body_file":{"directory":"logs", "keep_files":2}}),
+        json!({"body_file":{"directory":"logs","keep_files":2},"body_max_bytes":1048577}),
+        json!({"queue_capacity":0}),
+    ] {
+        let mut invalid = base.clone();
+        invalid["logging"] = logging;
+        let config: crate::config::Config = serde_json::from_value(invalid).unwrap();
+        assert!(config.validate().is_err());
+    }
+}
