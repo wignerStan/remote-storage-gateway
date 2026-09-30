@@ -248,8 +248,11 @@ Body setup configures native pull-time transforms; it never collects or serializ
 a body to notify plugins. Compiled callbacks register `stream_transfer::chunk::ChunkTransform`
 implementations through `facts.request_body.push(...)` and
 `facts.response_body.push(...)` during the respective preparation stages. The
-worker seals each chain before final header callbacks. Late registration, transform
-errors, or a violated length promise poison the chain. At most 64 transforms run
+worker seals each chain and moves it into carrier-owned state before final header
+callbacks. Facts retain closed empty setup slots; later metadata callbacks cannot
+replace an active upload or response processor. Late registration or replacement
+fails before publishing the affected head. Transform errors or a violated length
+promise poison the chain. At most 64 transforms run
 in registration order per direction, using the borrowed `Option<Bytes>` slot;
 the dispatcher creates no payload copies, intermediate buffers, or per-chunk
 futures. Transforms may allocate when their own operation requires it.
@@ -258,6 +261,10 @@ The default transform length policy is variable. The worker removes stale fixed
 lengths/digests and selects streaming framing. A transform that declares
 `preserves_length` must preserve length on every invocation. Header callbacks
 cannot override the body's original fixed length or sealed framing policy.
+HTTP/1.0 variable uploads use HTTP/1.1 chunking upstream; variable responses to
+HTTP/1.0 clients use connection-close framing. Transfer codings other than a
+single `chunked` declaration are rejected before forwarding because the native
+carrier does not decode them.
 Header-only messages do not provide a payload/EOF transform call, so transforms
 must not synthesize bodies or require EOF side effects for those messages.
 Transforms on protocol upgrades are rejected; opaque tunnel bytes remain native.
