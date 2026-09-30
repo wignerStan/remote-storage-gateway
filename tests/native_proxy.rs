@@ -9,8 +9,8 @@ use std::{
     future::Future,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -266,9 +266,11 @@ async fn request_and_response_bodies_move_before_eof_with_native_backpressure() 
         let upload_seen = Arc::clone(&upload_seen);
         let release = Arc::clone(&release);
         async move {
-            assert!(head(&mut socket)
-                .await
-                .starts_with(b"POST /upload HTTP/1.1"));
+            assert!(
+                head(&mut socket)
+                    .await
+                    .starts_with(b"POST /upload HTTP/1.1")
+            );
             let mut chunk = [0; 1024];
             socket.read_exact(&mut chunk).await.unwrap();
             assert_eq!(chunk, [b'x'; 1024]);

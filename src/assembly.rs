@@ -1,13 +1,13 @@
 //! Process assembly selects and installs infra owners before opening the data path.
 use crate::{
     config::{Config, Language},
-    native_notifier::{NativeNotifier, FRAME_LIMIT},
+    native_notifier::{FRAME_LIMIT, NativeNotifier},
     proxy::{NativeProxy, ProxyContract},
 };
 use plugin_abi::{Expected, Limits, PluginType, UnloadPolicy};
 use plugin_lifecycle::{Composition, Resource, ResourceSchema, Reversal};
 use plugin_loading::Function;
-use proxy_pingora::worker::{surface::Callbacks, WorkerControl};
+use proxy_pingora::worker::{WorkerControl, surface::Callbacks};
 use std::sync::Arc;
 
 const NOTIFIERS: Resource = Resource {
@@ -161,11 +161,11 @@ pub async fn assemble(config: Config) -> Result<NativeProxy, String> {
             return Err(error);
         }
     };
-    if let Some(entry) = entry {
-        if let Err(error) = entry.activate() {
-            let _ = runtime.shutdown().await;
-            return Err(error);
-        }
+    if let Some(entry) = entry
+        && let Err(error) = entry.activate()
+    {
+        let _ = runtime.shutdown().await;
+        return Err(error);
     }
     Ok(proxy.with_body_dump_limit(body_limit).with_runtime(runtime))
 }

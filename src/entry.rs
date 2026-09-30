@@ -1,7 +1,7 @@
 //! Reversible shared management entry owned by the plugin composition.
 mod publications;
 use action_router::{Publication, PublicationRegistry, Router};
-use network_actions::{listener::ActionListener, ActionService};
+use network_actions::{ActionService, listener::ActionListener};
 use network_sockets::{LocalEndpoint, SocketPermissions, StaleUnixSocketPolicy};
 use plugin_lifecycle::{Composition, Resource, Reversal};
 use std::{sync::Arc, time::Duration};

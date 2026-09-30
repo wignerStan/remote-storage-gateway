@@ -11,8 +11,8 @@ use plugin_lifecycle::{
 };
 use std::{
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -220,13 +220,15 @@ async fn one_listener_serves_two_axes_and_closing_a_streaming_axis_preserves_oth
             .output,
         b"42"
     );
-    assert!(client
-        .call(proto::CallRequest {
-            binding: "worker.get".into(),
-            input: b"{}".to_vec()
-        })
-        .await
-        .is_ok());
+    assert!(
+        client
+            .call(proto::CallRequest {
+                binding: "worker.get".into(),
+                input: b"{}".to_vec()
+            })
+            .await
+            .is_ok()
+    );
     // A namespace can be reused after its old calls and resources drain.
     let reopened = axis(
         &entry,
@@ -283,21 +285,25 @@ async fn conflicts_roll_back_only_the_attempted_namespace_and_shutdown_rejects_n
         bindings: vec![binding(name)],
         handler: Arc::new(|_: &[u8], _: &Context| Ok(b"2".to_vec())),
     };
-    assert!(entry
-        .install_actions(
-            &mut failed,
-            local,
-            "collision",
-            vec![action("orphan"), action("alpha.status")]
-        )
-        .await
-        .is_err());
+    assert!(
+        entry
+            .install_actions(
+                &mut failed,
+                local,
+                "collision",
+                vec![action("orphan"), action("alpha.status")]
+            )
+            .await
+            .is_err()
+    );
     failed.rollback().await.unwrap_err();
     let mut duplicate = Composition::new(ResourceSchema::new(&[local]).unwrap());
-    assert!(entry
-        .install_actions(&mut duplicate, local, "alpha", vec![action("other")])
-        .await
-        .is_err());
+    assert!(
+        entry
+            .install_actions(&mut duplicate, local, "alpha", vec![action("other")])
+            .await
+            .is_err()
+    );
     let _ = duplicate.rollback().await;
     let mut client = proto::actions_client::ActionsClient::connect(format!(
         "http://{}",
@@ -305,13 +311,15 @@ async fn conflicts_roll_back_only_the_attempted_namespace_and_shutdown_rejects_n
     ))
     .await
     .unwrap();
-    assert!(client
-        .call(proto::CallRequest {
-            binding: "orphan".into(),
-            input: b"null".to_vec()
-        })
-        .await
-        .is_err());
+    assert!(
+        client
+            .call(proto::CallRequest {
+                binding: "orphan".into(),
+                input: b"null".to_vec()
+            })
+            .await
+            .is_err()
+    );
     assert_eq!(
         client
             .call(proto::CallRequest {
@@ -339,9 +347,11 @@ async fn conflicts_roll_back_only_the_attempted_namespace_and_shutdown_rejects_n
     one.shutdown().await.unwrap();
     root.shutdown().await.unwrap();
     let mut late = Composition::new(ResourceSchema::new(&[local]).unwrap());
-    assert!(entry
-        .install_actions(&mut late, local, "late", vec![action("late")])
-        .await
-        .is_err());
+    assert!(
+        entry
+            .install_actions(&mut late, local, "late", vec![action("late")])
+            .await
+            .is_err()
+    );
     let _ = late.rollback().await;
 }

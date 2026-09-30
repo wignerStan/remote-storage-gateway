@@ -127,17 +127,19 @@ async fn independent_axis_uds_and_identical_action_names_do_not_conflict() {
     );
     // A colliding bind cannot replace an existing owner or its live socket.
     let mut duplicate = Composition::new(ResourceSchema::new(&[ENTRY]).unwrap());
-    assert!(entry::install(
-        &mut duplicate,
-        ENTRY,
-        entry::Registration {
-            worker_control: None,
-            endpoint: LocalEndpoint::Unix(a_path.clone()),
-            permissions: SocketPermissions::default(),
-        }
-    )
-    .await
-    .is_err());
+    assert!(
+        entry::install(
+            &mut duplicate,
+            ENTRY,
+            entry::Registration {
+                worker_control: None,
+                endpoint: LocalEndpoint::Unix(a_path.clone()),
+                permissions: SocketPermissions::default(),
+            }
+        )
+        .await
+        .is_err()
+    );
     let _ = duplicate.rollback().await;
     assert_eq!(
         ca.call(request("status"))

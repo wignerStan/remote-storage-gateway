@@ -12,7 +12,9 @@ fn main() -> ExitCode {
 }
 fn start(args: Vec<std::ffi::OsString>) -> Result<(), String> {
     if args.len() == 1 && matches!(args[0].to_str(), Some("--help" | "-h")) {
-        println!("pingora-worker --config <file.json> [--check-config]\n\nRuns the native proxy, configured callbacks and optional loopback management entry.\n--check-config validates configuration without opening listeners or loading plugins.");
+        println!(
+            "pingora-worker --config <file.json> [--check-config]\n\nRuns the native proxy, configured callbacks and optional loopback management entry.\n--check-config validates configuration without opening listeners or loading plugins."
+        );
         return Ok(());
     }
     let mut path = None;

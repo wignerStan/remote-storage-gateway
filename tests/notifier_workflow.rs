@@ -2,15 +2,15 @@
 use diagnostic_output::CredentialPolicy;
 use network_sockets::{DialRequest, DialTarget};
 use proxy_pingora::worker::{
+    RequestFlow,
     surface::{
         CallbackHook, Callbacks, Contract, DialDecision, Egress, Exposure, NotifierChain, Rejection,
     },
-    RequestFlow,
 };
 use serde_json::json;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
 use test_support::workflow::WorkflowTrace;

@@ -10,14 +10,14 @@ use pingora_core::{
 use pingora_http::ResponseHeader;
 use proxy_pingora::http_ingress::{Application, Handler, Ingress, Worker};
 use proxy_pingora::worker::{
-    surface::{CallbackHook, Callbacks, Contract, Egress, Exposure, NotifierChain, Rejection},
     RequestFlow,
+    surface::{CallbackHook, Callbacks, Contract, Egress, Exposure, NotifierChain, Rejection},
 };
 use std::{
     num::NonZeroUsize,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -25,7 +25,7 @@ use test_support::workflow::WorkflowTrace;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{watch, Notify},
+    sync::{Notify, watch},
 };
 
 #[derive(Default)]
@@ -639,10 +639,12 @@ async fn streaming_scenario() {
     probe.upstream_first_chunk.notified().await;
     assert_eq!(probe.completions.load(Ordering::SeqCst), 0);
     client.write_all(b"efgh").await.unwrap();
-    assert!(read_head(&mut client)
-        .await
-        .unwrap()
-        .starts_with(b"HTTP/1.1 200"));
+    assert!(
+        read_head(&mut client)
+            .await
+            .unwrap()
+            .starts_with(b"HTTP/1.1 200")
+    );
     let mut chunk = [0; 4];
     client.read_exact(&mut chunk).await.unwrap();
     assert_eq!(&chunk, b"WXYZ");
@@ -705,11 +707,13 @@ async fn auth_and_transform_rejections_do_not_poll_body_or_call_egress() {
         assert_eq!(probe.response_polls.load(Ordering::SeqCst), 0);
         assert_eq!(probe.egress_calls.load(Ordering::SeqCst), 0);
         assert_eq!(probe.completions.load(Ordering::SeqCst), 0);
-        assert!(!probe
-            .events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(phase, _)| *phase == "encoding_egress"));
+        assert!(
+            !probe
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(phase, _)| *phase == "encoding_egress")
+        );
     }
 }

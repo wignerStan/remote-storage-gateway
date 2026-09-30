@@ -12,18 +12,18 @@ use proxy_pingora::{
     http_egress::HttpEgress,
     http_ingress::ProxyLifecycle,
     worker::{
+        CarrierExchange, HttpLifecycle, WorkerControl,
         surface::{
             Callbacks, Contract, DialDecision, Exposure, NotifierChain, PoolDecision, PoolPhase,
             Rejection,
         },
-        CarrierExchange, HttpLifecycle, WorkerControl,
     },
 };
 use std::{
     hash::{Hash, Hasher},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -470,11 +470,11 @@ impl ProxyHttp for NativeProxy {
         ctx.dump.finish(ctx.request_id);
         let status = session.response_written().map(|head| head.status.as_u16());
         let mut completed = false;
-        if error.is_none() {
-            if let Some(mut exchange) = ctx.exchange.take() {
-                exchange.facts_mut().completed = true;
-                completed = exchange.finish().instrument(ctx.span.clone()).await.is_ok();
-            }
+        if error.is_none()
+            && let Some(mut exchange) = ctx.exchange.take()
+        {
+            exchange.facts_mut().completed = true;
+            completed = exchange.finish().instrument(ctx.span.clone()).await.is_ok();
         }
         tracing::info!(target: "proxy_pingora::access", request_id = ctx.request_id, status, completed,
             elapsed_ms = ctx.started.elapsed().as_millis() as u64,

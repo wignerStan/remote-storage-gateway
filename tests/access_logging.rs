@@ -1,5 +1,5 @@
 //! Real carrier completion reaches the independently configured file sink.
-use diagnostic_output::runtime::{build_logging, FileLogConfig, LoggingConfig};
+use diagnostic_output::runtime::{FileLogConfig, LoggingConfig, build_logging};
 use pingora_core::{protocols::http::ServerSession, server::ShutdownWatch};
 use proxy_pingora::http_ingress::{Handler, Response, Worker};
 use serde_json::Value;

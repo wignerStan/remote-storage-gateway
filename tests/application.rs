@@ -1,7 +1,7 @@
 //! Real process assembly, native callback loading, logging and signal shutdown.
 #![cfg(unix)]
-use network_actions::proto::{actions_client::ActionsClient, CallRequest};
-use serde_json::{json, Value};
+use network_actions::proto::{CallRequest, actions_client::ActionsClient};
+use serde_json::{Value, json};
 use std::{
     fs,
     net::TcpListener as ReservedPort,
@@ -69,9 +69,11 @@ fn cli_help_and_check_validate_without_loading_plugins_or_opening_listeners() {
     let directory = tempfile::tempdir().unwrap();
     let mut help = Process::spawn(directory.path(), &["--help"]);
     assert!(help.wait().success(), "{}", help.errors());
-    assert!(fs::read_to_string(&help.stdout)
-        .unwrap()
-        .contains("--check-config"));
+    assert!(
+        fs::read_to_string(&help.stdout)
+            .unwrap()
+            .contains("--check-config")
+    );
 
     // Occupied listener ports and a missing selected artifact must not affect checking.
     let data = ReservedPort::bind("127.0.0.1:0").unwrap();
@@ -89,9 +91,11 @@ fn cli_help_and_check_validate_without_loading_plugins_or_opening_listeners() {
     let args = ["--config", config.to_str().unwrap(), "--check-config"];
     let mut check = Process::spawn(directory.path(), &args);
     assert!(check.wait().success(), "{}", check.errors());
-    assert!(fs::read_to_string(&check.stdout)
-        .unwrap()
-        .contains("configuration valid"));
+    assert!(
+        fs::read_to_string(&check.stdout)
+            .unwrap()
+            .contains("configuration valid")
+    );
     assert!(
         !access.exists() && !body.exists(),
         "configuration checking created log sinks"
@@ -126,15 +130,17 @@ fn records(directory: &Path) -> (String, Vec<Value>) {
 fn callback_artifact(directory: &Path) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let artifact = directory.join("metadata.so");
-    assert!(Command::new("cc")
-        .args(["-shared", "-fPIC", "-std=c11", "-I"])
-        .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
-        .arg(root.join("tests/fixtures/metadata_callback.c"))
-        .arg("-o")
-        .arg(&artifact)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("cc")
+            .args(["-shared", "-fPIC", "-std=c11", "-I"])
+            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("tests/fixtures/metadata_callback.c"))
+            .arg("-o")
+            .arg(&artifact)
+            .status()
+            .unwrap()
+            .success()
+    );
     artifact
 }
 
@@ -234,11 +240,13 @@ async fn executable_loads_callback_proxies_post_and_drains_separate_logs_on_sigt
     }).await.unwrap();
     origin_task.await.unwrap();
     drop(client);
-    assert!(Command::new("kill")
-        .args(["-TERM", &process.child.id().to_string()])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &process.child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
     assert!(process.wait().success(), "{}", process.errors());
     let (access_text, access) = records(&access_dir);
     let (body_text, dumps) = records(&body_dir);

@@ -1,12 +1,13 @@
 [package]
 name = "pingora-worker"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.98.1"
 license = "MIT"
 description = "Plugin-composed Pingora worker process and shared management entry"
 
 [workspace]
-resolver = "2"
+resolver = "3"
 
 [dependencies]
 text-processing = { path = "../infra/rust/crates/text/processing", features = ["json"] }

@@ -1,7 +1,7 @@
 //! The native fixture records exactly the metadata received across the C ABI.
 use super::*;
 use plugin_abi::{Expected, Language, Limits, PluginType, UnloadPolicy};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{path::Path, process::Command};
 
 const CONTINUE: &str = r#"{"version":1,"decision":"continue"}"#;
@@ -16,15 +16,17 @@ impl Fixture {
         let directory = tempfile::tempdir().unwrap();
         let artifact = directory.path().join("metadata.so");
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(Command::new("cc")
-            .args(["-shared", "-fPIC", "-std=c11", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
-            .arg(root.join("tests/fixtures/metadata_callback.c"))
-            .arg("-o")
-            .arg(&artifact)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("cc")
+                .args(["-shared", "-fPIC", "-std=c11", "-I"])
+                .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+                .arg(root.join("tests/fixtures/metadata_callback.c"))
+                .arg("-o")
+                .arg(&artifact)
+                .status()
+                .unwrap()
+                .success()
+        );
         let config: NativeCallback = serde_json::from_value(json!({
             "path":artifact, "package":"worker.metadata.test", "hooks":hooks,
             "headers":headers, "timeout_ms":2000, "max_inflight":1,
@@ -248,11 +250,13 @@ async fn native_invalid_denied_or_failed_reply_never_partially_mutates_headers()
         let mut response = ResponseHeader::build(200, None).unwrap();
         response.insert_header("x-remove", "original").unwrap();
         let original = response.headers.clone();
-        assert!(fixture
-            .notifier
-            .upstream_response(1, &mut response, &(), &mut facts)
-            .await
-            .is_err());
+        assert!(
+            fixture
+                .notifier
+                .upstream_response(1, &mut response, &(), &mut facts)
+                .await
+                .is_err()
+        );
         assert_eq!(
             response.headers, original,
             "partially applied response {reply}"
@@ -355,11 +359,13 @@ async fn callback_input_size_and_textual_header_checks_fail_before_native_entry(
     let previous = fixture.metadata().await;
     facts.path = "x".repeat(FRAME_LIMIT);
     let original = request.headers.clone();
-    assert!(fixture
-        .notifier
-        .routing(1, &mut request, &mut facts)
-        .await
-        .is_err());
+    assert!(
+        fixture
+            .notifier
+            .routing(1, &mut request, &mut facts)
+            .await
+            .is_err()
+    );
     assert_eq!(request.headers, original);
     assert_eq!(fixture.metadata().await, previous);
     facts.path = "/resource".into();
@@ -367,11 +373,13 @@ async fn callback_input_size_and_textual_header_checks_fail_before_native_entry(
         .headers
         .insert("x-visible", http::HeaderValue::from_bytes(b"\xff").unwrap());
     let original = request.headers.clone();
-    assert!(fixture
-        .notifier
-        .routing(1, &mut request, &mut facts)
-        .await
-        .is_err());
+    assert!(
+        fixture
+            .notifier
+            .routing(1, &mut request, &mut facts)
+            .await
+            .is_err()
+    );
     assert_eq!(request.headers, original);
     assert_eq!(fixture.metadata().await, previous);
     fixture.shutdown().await;
