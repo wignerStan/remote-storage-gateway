@@ -50,7 +50,28 @@ struct Metadata<'a> {
     status: Option<u16>,
     upstream_reused: bool,
     completed: bool,
-    headers: Vec<(&'a str, &'a str)>,
+    headers: SelectedHeaders<'a>,
+}
+/// Serialize the allowlist directly into the bounded frame, without collecting
+/// an intermediate header list for each callback invocation.
+struct SelectedHeaders<'a> {
+    source: &'a http::HeaderMap,
+    names: &'a [http::header::HeaderName],
+}
+impl Serialize for SelectedHeaders<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{Error, SerializeSeq};
+        let mut sequence = serializer.serialize_seq(None)?;
+        for name in self.names {
+            for value in self.source.get_all(name) {
+                let value = value.to_str().map_err(|_| {
+                    S::Error::custom("selected callback header is not textual metadata")
+                })?;
+                sequence.serialize_element(&(name.as_str(), value))?;
+            }
+        }
+        sequence.end()
+    }
 }
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -150,14 +171,14 @@ impl NativeNotifier {
         let interests = config.hooks.iter().fold(0, |bits, hook| {
             bits | (1 << HOOKS.iter().position(|known| known == hook).unwrap())
         });
-        let headers = config
-            .headers
-            .iter()
-            .map(|name| {
-                http::header::HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|_| "invalid callback header name".to_string())
-            })
-            .collect::<Result<_, _>>()?;
+        let mut headers = Vec::with_capacity(config.headers.len());
+        for name in &config.headers {
+            let name = http::header::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| "invalid callback header name".to_string())?;
+            if !headers.contains(&name) {
+                headers.push(name);
+            }
+        }
         Ok(Self {
             function,
             interests,
@@ -180,17 +201,6 @@ impl NativeNotifier {
         facts: &RequestFacts,
         source: &http::HeaderMap,
     ) -> Result<Reply, String> {
-        let mut headers = Vec::new();
-        for name in &self.headers {
-            for value in source.get_all(name) {
-                headers.push((
-                    name.as_str(),
-                    value
-                        .to_str()
-                        .map_err(|_| "selected callback header is not textual metadata")?,
-                ));
-            }
-        }
         let metadata = Metadata {
             version: 1,
             hook,
@@ -200,10 +210,13 @@ impl NativeNotifier {
             status: facts.status,
             upstream_reused: facts.upstream_reused,
             completed: facts.completed,
-            headers,
+            headers: SelectedHeaders {
+                source,
+                names: &self.headers,
+            },
         };
-        let input =
-            serde_json::to_vec(&metadata).map_err(|_| "could not encode notifier metadata")?;
+        let input = text_processing::json::to_vec_bounded(&metadata, FRAME_LIMIT)
+            .map_err(|_| "could not encode bounded notifier metadata")?;
 
         let result = self
             .function

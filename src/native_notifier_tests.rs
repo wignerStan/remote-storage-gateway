@@ -111,7 +111,12 @@ fn facts(request: &RequestHeader) -> RequestFacts {
 
 #[tokio::test]
 async fn native_callback_receives_only_metadata_and_explicit_repeated_headers() {
-    let fixture = Fixture::new(CONTINUE, &["pre_ingress", "pre_routing"], &["X-Visible"]).await;
+    let fixture = Fixture::new(
+        CONTINUE,
+        &["pre_ingress", "pre_routing"],
+        &["X-Visible", "x-visible"],
+    )
+    .await;
     let mut request = request();
     let mut facts = facts(&request);
     facts.headers.clear();
