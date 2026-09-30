@@ -25,6 +25,9 @@ enum Mode {
     RewriteLength,
     ChangeUpgrade,
     DenyDial,
+    ReplaceRequestBeforeSend,
+    ReplaceResponseBeforeWrite,
+    ReplaceRequestAfterResponse,
 }
 struct Hooks {
     seen: Arc<Seen>,
@@ -121,7 +124,7 @@ impl Callbacks<ProxyContract> for Hooks {
         _: u8,
         request: &mut RequestHeader,
         _: &(),
-        _: &mut RequestFacts,
+        facts: &mut RequestFacts,
     ) -> Result<(), String> {
         self.seen.record("before_send");
         match self.mode {
@@ -129,6 +132,7 @@ impl Callbacks<ProxyContract> for Hooks {
             Mode::RewriteLength => {
                 request.insert_header("content-length", "1").unwrap();
             }
+            Mode::ReplaceRequestBeforeSend => facts.request_body = sealed_drop_first(),
             _ => {}
         }
         Ok(())
@@ -171,11 +175,14 @@ impl Callbacks<ProxyContract> for Hooks {
         _: u8,
         response: &mut ResponseHeader,
         _: &(),
-        _: &mut RequestFacts,
+        facts: &mut RequestFacts,
     ) -> Result<(), String> {
         self.seen.record("upstream_response");
         if matches!(self.mode, Mode::ChangeUpgrade) {
             response.set_status(101).unwrap();
+        }
+        if matches!(self.mode, Mode::ReplaceRequestAfterResponse) {
+            facts.request_body = sealed_drop_first();
         }
         Ok(())
     }
@@ -200,9 +207,12 @@ impl Callbacks<ProxyContract> for Hooks {
         _: u8,
         _: &mut ResponseHeader,
         _: &(),
-        _: &mut RequestFacts,
+        facts: &mut RequestFacts,
     ) -> Result<(), String> {
         self.seen.record("before_write");
+        if matches!(self.mode, Mode::ReplaceResponseBeforeWrite) {
+            facts.response_body = sealed_drop_first();
+        }
         Ok(())
     }
     async fn complete(&self, facts: &RequestFacts) -> Result<u32, String> {
@@ -320,6 +330,12 @@ impl ChunkTransform for DropFirst {
         Ok(())
     }
 }
+fn sealed_drop_first() -> stream_transfer::chunk::ChunkChain {
+    let mut chain = stream_transfer::chunk::ChunkChain::default();
+    chain.push(DropFirst(false)).unwrap();
+    assert!(!chain.seal().unwrap());
+    chain
+}
 async fn chunk(socket: &mut TcpStream) -> Vec<u8> {
     let mut line = Vec::new();
     while !line.ends_with(b"\r\n") {
@@ -337,6 +353,15 @@ async fn chunk(socket: &mut TcpStream) -> Vec<u8> {
 
 #[tokio::test]
 async fn variable_body_transforms_stream_before_eof_with_original_ingress_length() {
+    assert_variable_body_streaming("1.1").await;
+}
+
+#[tokio::test]
+async fn http10_variable_bodies_upgrade_upload_and_close_delimit_response() {
+    assert_variable_body_streaming("1.0").await;
+}
+
+async fn assert_variable_body_streaming(version: &str) {
     let upload_seen = Arc::new(tokio::sync::Notify::new());
     let release_response = Arc::new(tokio::sync::Notify::new());
     let upload = upload_seen.clone();
@@ -379,17 +404,30 @@ async fn variable_body_transforms_stream_before_eof_with_original_ingress_length
     .await;
     timeout(WAIT, async {
         let mut client = TcpStream::connect(worker.address).await.unwrap();
-        client.write_all(b"POST /upload HTTP/1.1\r\nHost: local\r\nConnection: close\r\nContent-Length: 6\r\n\r\nabc").await.unwrap();
+        let connection = if version == "1.0" { "keep-alive" } else { "close" };
+        client.write_all(format!("POST /upload HTTP/{version}\r\nHost: local\r\nConnection: {connection}\r\nContent-Length: 6\r\n\r\nabc").as_bytes()).await.unwrap();
         upload_seen.notified().await; // No upload EOF has been sent yet.
         client.write_all(b"def").await.unwrap();
         let response = String::from_utf8(head(&mut client).await).unwrap().to_ascii_lowercase();
-        assert!(response.starts_with("http/1.1 200"));
-        assert!(response.contains("transfer-encoding: chunked"));
+        assert!(response.starts_with(&format!("http/{version} 200")), "{response}");
+        assert!(response.contains("connection: close"), "{response}");
         assert!(!response.contains("content-length:"));
-        let mut body = chunk(&mut client).await;
+        let mut body = if version == "1.0" {
+            assert!(!response.contains("transfer-encoding:"), "{response}");
+            let mut bytes = vec![0; 2];
+            client.read_exact(&mut bytes).await.unwrap();
+            bytes
+        } else {
+            assert!(response.contains("transfer-encoding: chunked"), "{response}");
+            chunk(&mut client).await
+        };
         assert_eq!(body, b"yz");
         release_response.notify_one(); // Response EOF is still blocked upstream.
-        loop { let bytes = chunk(&mut client).await; if bytes.is_empty() { break; } body.extend(bytes); }
+        if version == "1.0" {
+            client.read_to_end(&mut body).await.unwrap();
+        } else {
+            loop { let bytes = chunk(&mut client).await; if bytes.is_empty() { break; } body.extend(bytes); }
+        }
         assert_eq!(body, b"yzuvw");
         timeout(WAIT, seen.completed.notified()).await.unwrap();
     }).await.unwrap();
@@ -557,4 +595,110 @@ async fn admission_closing_during_finalization_prevents_network_and_completion()
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn replacing_a_sealed_request_body_before_send_never_connects_origin() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let origin = origin(count.clone()).await;
+    let seen = Arc::new(Seen::default());
+    let worker = worker_with_callbacks(
+        settings(origin.address, None, "", false),
+        hooks(&seen, Mode::ReplaceRequestBeforeSend),
+    )
+    .await;
+    let response = get(worker.address).await;
+    assert!(!response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    let stages = seen.stages.lock().unwrap();
+    assert!(stages.contains(&"before_send"));
+    assert!(!stages.contains(&"pool_gate"));
+    assert!(!stages.contains(&"dial_gate"));
+    assert!(!stages.contains(&"complete"));
+}
+
+#[tokio::test]
+async fn replacing_a_sealed_response_body_before_write_cannot_publish_success() {
+    assert_late_body_replacement_refused(Mode::ReplaceResponseBeforeWrite, "before_write").await;
+}
+
+#[tokio::test]
+async fn replacing_request_body_after_upstream_response_cannot_publish_success() {
+    assert_late_body_replacement_refused(Mode::ReplaceRequestAfterResponse, "upstream_response")
+        .await;
+}
+
+async fn assert_late_body_replacement_refused(mode: Mode, stage: &'static str) {
+    let count = Arc::new(AtomicUsize::new(0));
+    let origin = origin(count.clone()).await;
+    let seen = Arc::new(Seen::default());
+    let worker = worker_with_callbacks(
+        settings(origin.address, None, "", false),
+        hooks(&seen, mode),
+    )
+    .await;
+    let response = get(worker.address).await;
+    assert!(!response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    let stages = seen.stages.lock().unwrap();
+    assert!(
+        stages.contains(&stage),
+        "replacement hook did not run: {stages:?}"
+    );
+    assert!(
+        !stages.contains(&"complete"),
+        "replaced body plan completed: {stages:?}"
+    );
+}
+
+#[tokio::test]
+async fn unsupported_native_upload_transfer_codings_never_connect_origin() {
+    for coding in ["gzip, chunked", "chunked, gzip", "chunked, chunked"] {
+        let count = Arc::new(AtomicUsize::new(0));
+        let origin = origin(count.clone()).await;
+        let seen = Arc::new(Seen::default());
+        let worker = worker_with_callbacks(
+            settings(origin.address, None, "", false),
+            hooks(&seen, Mode::Observe),
+        )
+        .await;
+        let response = timeout(WAIT, async {
+            let mut client = TcpStream::connect(worker.address).await.unwrap();
+            client.write_all(format!("POST /upload HTTP/1.1\r\nHost: local\r\nConnection: close\r\nTransfer-Encoding: {coding}\r\n\r\n1\r\nx\r\n0\r\n\r\n").as_bytes()).await.unwrap();
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).await.unwrap();
+            response
+        }).await.unwrap();
+        assert!(
+            !response.starts_with(b"HTTP/1.1 200"),
+            "accepted {coding}: {response:?}"
+        );
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "connected origin for {coding}"
+        );
+        assert!(!seen.stages.lock().unwrap().contains(&"complete"));
+    }
+}
+
+#[tokio::test]
+async fn unsupported_origin_transfer_coding_is_rejected_before_response_callbacks() {
+    let origin = listen(|mut socket| async move {
+        let _ = head(&mut socket).await;
+        socket.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n").await.unwrap();
+    }).await;
+    let seen = Arc::new(Seen::default());
+    let worker = worker_with_callbacks(
+        settings(origin.address, None, "", false),
+        hooks(&seen, Mode::Observe),
+    )
+    .await;
+    let response = get(worker.address).await;
+    assert!(!response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+    let stages = seen.stages.lock().unwrap();
+    assert!(stages.contains(&"socket_gate"));
+    assert!(!stages.contains(&"upstream_response"));
+    assert!(!stages.contains(&"before_write"));
+    assert!(!stages.contains(&"complete"));
 }
