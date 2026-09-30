@@ -5,7 +5,7 @@ check:
 
 # Show the callback decisions and reasons from a real TCP workflow.
 bdd:
-    cargo test --locked --test notifier_workflow --test notifier_lifecycle -- --nocapture
+    cargo test --locked --test notifier_workflow --test notifier_lifecycle --test native_proxy -- --nocapture
 
 # Curated, optional runtime-loadable Tools; no static linkage into the worker.
 build-postgres:

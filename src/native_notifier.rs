@@ -3,9 +3,12 @@ use crate::{
     config::NativeCallback,
     proxy::{ProxyContract, RequestFacts},
 };
+use network_sockets::{DialRequest, DialTarget, SocketDecision, SocketPhase};
 use pingora_http::{RequestHeader, ResponseHeader};
 use plugin_loading::Function;
-use proxy_pingora::worker::surface::{CallbackHook, Callbacks};
+use proxy_pingora::worker::surface::{
+    CallbackHook, Callbacks, DialDecision, PoolDecision, PoolPhase,
+};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 
@@ -26,6 +29,9 @@ const HOOKS: &[&str] = &[
     "prepare_response_body",
     "before_downstream_write",
     "complete",
+    "before_dial",
+    "pool",
+    "socket",
 ];
 pub fn validate_hooks(hooks: &[String]) -> Result<(), String> {
     if hooks.is_empty() || hooks.len() > HOOKS.len() {
@@ -51,7 +57,57 @@ struct Metadata<'a> {
     upstream_reused: bool,
     completed: bool,
     headers: SelectedHeaders<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network: Option<NetworkMetadata<'a>>,
 }
+#[derive(Clone, Copy)]
+enum HttpMetadata<'a> {
+    Request(&'a RequestHeader),
+    Response(&'a ResponseHeader),
+}
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum NetworkMetadata<'a> {
+    BeforeDial {
+        target: TargetMetadata<'a>,
+        timeout_ms: u128,
+        tcp_nodelay: bool,
+    },
+    Pool {
+        phase: PoolMetadata,
+    },
+    Socket {
+        phase: SocketMetadata,
+    },
+}
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum TargetMetadata<'a> {
+    Host {
+        name: &'a str,
+        port: u16,
+    },
+    Tcp {
+        address: std::net::SocketAddr,
+    },
+    #[cfg(unix)]
+    Unix {
+        path: &'a std::path::Path,
+    },
+}
+#[derive(Serialize)]
+#[serde(tag = "name", rename_all = "snake_case")]
+enum PoolMetadata {
+    BeforeCheckout,
+    BeforeReturn { reused: bool, healthy: bool },
+}
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SocketMetadata {
+    BeforeUse,
+    BeforeReuse,
+}
+
 /// Serialize the allowlist directly into the bounded frame, without collecting
 /// an intermediate header list for each callback invocation.
 struct SelectedHeaders<'a> {
@@ -91,11 +147,19 @@ struct Reply {
     remove_headers: Vec<String>,
 }
 impl Reply {
-    fn check(self) -> Result<Self, String> {
+    fn check(self, hook: &str) -> Result<Self, String> {
+        if !HOOKS.contains(&hook) {
+            return Err("unsupported notifier stage".into());
+        }
+        let network = matches!(hook, "before_dial" | "pool" | "socket");
+        let patchable = !network && !matches!(hook, "authenticate" | "admit" | "complete");
+        if !patchable && (!self.set_headers.is_empty() || !self.remove_headers.is_empty()) {
+            return Err("this notifier stage does not permit header patches".into());
+        }
         if self.version != 1 || self.set_headers.len() + self.remove_headers.len() > 64 {
             return Err("invalid notifier reply version or patch count".into());
         }
-        if matches!(self.decision, Decision::Deny) {
+        if !network && matches!(self.decision, Decision::Deny) {
             return Err("native notifier denied the request".into());
         }
         for name in self
@@ -201,15 +265,38 @@ impl NativeNotifier {
         facts: &RequestFacts,
         source: &http::HeaderMap,
     ) -> Result<Reply, String> {
+        self.invoke_metadata(hook, facts, source, None, None).await
+    }
+    async fn invoke_metadata(
+        &self,
+        hook: &'static str,
+        facts: &RequestFacts,
+        source: &http::HeaderMap,
+        network: Option<NetworkMetadata<'_>>,
+        head: Option<HttpMetadata<'_>>,
+    ) -> Result<Reply, String> {
+        if !HOOKS.contains(&hook) {
+            return Err("unsupported notifier stage".into());
+        }
         let metadata = Metadata {
             version: 1,
             hook,
             request_id: facts.request_id,
-            method: &facts.method,
-            path: &facts.path,
-            status: facts.status,
+            method: match head {
+                Some(HttpMetadata::Request(request)) => request.method.as_str(),
+                _ => &facts.method,
+            },
+            path: match head {
+                Some(HttpMetadata::Request(request)) => request.uri.path(),
+                _ => &facts.path,
+            },
+            status: match head {
+                Some(HttpMetadata::Response(response)) => Some(response.status.as_u16()),
+                _ => facts.status,
+            },
             upstream_reused: facts.upstream_reused,
             completed: facts.completed,
+            network,
             headers: SelectedHeaders {
                 source,
                 names: &self.headers,
@@ -223,11 +310,19 @@ impl NativeNotifier {
             .call_with_reply(hook, input, self.timeout, (), |bytes| {
                 serde_json::from_slice::<Reply>(bytes)
                     .map_err(|_| "invalid notifier metadata reply".to_string())
-                    .and_then(Reply::check)
+                    .and_then(|reply| reply.check(hook))
             })
             .await
             .map_err(|_| "native notifier call failed".to_string())?;
-        tracing::trace!(target: "proxy_pingora::worker::notifier", hook, outcome = if result.is_ok() { "continue" } else { "error" }, "native metadata decision");
+        let outcome = match &result {
+            Ok(reply) => match reply.decision {
+                Decision::Continue => "continue",
+                Decision::Accept => "accept",
+                Decision::Deny => "deny",
+            },
+            Err(_) => "error",
+        };
+        tracing::trace!(target: "proxy_pingora::worker::notifier", hook, outcome, "native metadata decision");
         result
     }
     async fn request_hook(
@@ -236,13 +331,15 @@ impl NativeNotifier {
         request: &mut RequestHeader,
         facts: &mut RequestFacts,
     ) -> Result<(), String> {
-        let reply = self.invoke_headers(hook, facts, &request.headers).await?;
-        let changed = !reply.set_headers.is_empty() || !reply.remove_headers.is_empty();
-        reply.request(request)?;
-        if changed {
-            facts.headers = request.headers.clone();
-        }
-        Ok(())
+        self.invoke_metadata(
+            hook,
+            facts,
+            &request.headers,
+            None,
+            Some(HttpMetadata::Request(request)),
+        )
+        .await?
+        .request(request)
     }
     async fn response_hook(
         &self,
@@ -250,9 +347,15 @@ impl NativeNotifier {
         response: &mut ResponseHeader,
         facts: &RequestFacts,
     ) -> Result<(), String> {
-        self.invoke_headers(hook, facts, &response.headers)
-            .await?
-            .response(response)
+        self.invoke_metadata(
+            hook,
+            facts,
+            &response.headers,
+            None,
+            Some(HttpMetadata::Response(response)),
+        )
+        .await?
+        .response(response)
     }
 }
 #[async_trait::async_trait]
@@ -269,6 +372,9 @@ impl Callbacks<ProxyContract> for NativeNotifier {
             CallbackHook::UpstreamResponse => "upstream_response",
             CallbackHook::PrepareResponseBody => "prepare_response_body",
             CallbackHook::BeforeDownstreamWrite => "before_downstream_write",
+            CallbackHook::BeforeDial => "before_dial",
+            CallbackHook::Pool => "pool",
+            CallbackHook::Socket => "socket",
             _ => return false,
         };
         self.interested(name)
@@ -366,6 +472,101 @@ impl Callbacks<ProxyContract> for NativeNotifier {
             self.invoke("complete", facts).await?.no_patch()?;
         }
         Ok(0)
+    }
+    async fn before_dial(
+        &self,
+        _: u8,
+        request: &DialRequest,
+        facts: &RequestFacts,
+    ) -> Result<Option<DialDecision>, String> {
+        request
+            .validate()
+            .map_err(|_| "invalid native dial metadata")?;
+        let target = match &request.target {
+            // Host targets describe resolver inputs, never URLs with credentials.
+            DialTarget::Host { name, port } => {
+                if name.contains(['@', '/', '?', '#']) {
+                    return Err("native dial host must not contain URL or credential syntax".into());
+                }
+                TargetMetadata::Host { name, port: *port }
+            }
+            DialTarget::Tcp(address) => TargetMetadata::Tcp { address: *address },
+            #[cfg(unix)]
+            DialTarget::Unix(path) => TargetMetadata::Unix { path },
+        };
+        let decision = self
+            .invoke_metadata(
+                "before_dial",
+                facts,
+                &facts.headers,
+                Some(NetworkMetadata::BeforeDial {
+                    target,
+                    timeout_ms: request.timeout.as_millis(),
+                    tcp_nodelay: request.tcp_nodelay,
+                }),
+                None,
+            )
+            .await?
+            .no_patch()?;
+        Ok(match decision {
+            Decision::Accept => Some(DialDecision::Allow),
+            Decision::Deny => Some(DialDecision::Deny),
+            Decision::Continue => None,
+        })
+    }
+    async fn pool(
+        &self,
+        _: u8,
+        phase: PoolPhase,
+        facts: &RequestFacts,
+    ) -> Result<Option<PoolDecision>, String> {
+        let phase = match phase {
+            PoolPhase::BeforeCheckout => PoolMetadata::BeforeCheckout,
+            PoolPhase::BeforeReturn {
+                reused, healthy, ..
+            } => PoolMetadata::BeforeReturn { reused, healthy },
+        };
+        let decision = self
+            .invoke_metadata(
+                "pool",
+                facts,
+                &facts.headers,
+                Some(NetworkMetadata::Pool { phase }),
+                None,
+            )
+            .await?
+            .no_patch()?;
+        Ok(match decision {
+            Decision::Accept => Some(PoolDecision::Reuse),
+            Decision::Deny => Some(PoolDecision::Discard),
+            Decision::Continue => None,
+        })
+    }
+    async fn socket(
+        &self,
+        _: u8,
+        phase: SocketPhase,
+        facts: &RequestFacts,
+    ) -> Result<Option<SocketDecision>, String> {
+        let phase = match phase {
+            SocketPhase::BeforeUse => SocketMetadata::BeforeUse,
+            SocketPhase::BeforeReuse => SocketMetadata::BeforeReuse,
+        };
+        let decision = self
+            .invoke_metadata(
+                "socket",
+                facts,
+                &facts.headers,
+                Some(NetworkMetadata::Socket { phase }),
+                None,
+            )
+            .await?
+            .no_patch()?;
+        Ok(match decision {
+            Decision::Accept => Some(SocketDecision::Continue),
+            Decision::Deny => Some(SocketDecision::Close),
+            Decision::Continue => None,
+        })
     }
     async fn maintain(&self) {}
 }

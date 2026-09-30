@@ -68,8 +68,28 @@ fn settings(
         reuse,
     }
 }
+#[path = "native_proxy/pipeline.rs"]
+mod pipeline;
+
 async fn worker(config: ProxyConfig) -> Listening {
-    let proxy = NativeProxy::new(config, Arc::new(WorkerControl::default()), vec![]).unwrap();
+    worker_with_callbacks(config, vec![]).await
+}
+async fn worker_with_callbacks(
+    config: ProxyConfig,
+    callbacks: Vec<
+        Arc<dyn proxy_pingora::worker::surface::Callbacks<pingora_worker::proxy::ProxyContract>>,
+    >,
+) -> Listening {
+    worker_with_control(config, Arc::new(WorkerControl::default()), callbacks).await
+}
+async fn worker_with_control(
+    config: ProxyConfig,
+    control: Arc<WorkerControl>,
+    callbacks: Vec<
+        Arc<dyn proxy_pingora::worker::surface::Callbacks<pingora_worker::proxy::ProxyContract>>,
+    >,
+) -> Listening {
+    let proxy = NativeProxy::new(config, control, callbacks).unwrap();
     let mut engine = HttpProxy::new(
         proxy,
         Arc::new(ServerConf {
