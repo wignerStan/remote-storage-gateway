@@ -11,6 +11,7 @@ resolver = "3"
 
 [dependencies]
 text-processing = { path = "../infra/rust/crates/text/processing", features = ["json"] }
+stream-transfer = { path = "../infra/rust/crates/networking/stream/transfer" }
 network-sockets = { path = "../infra/rust/crates/networking/sockets" }
 action-router = { path = "../infra/rust/crates/networking/action-router" }
 network-actions = { path = "../infra/rust/crates/networking/actions" }

@@ -108,6 +108,8 @@ fn facts(request: &RequestHeader) -> RequestFacts {
         upstream_reused: false,
         completed: false,
         headers: request.headers.clone(),
+        request_body: Default::default(),
+        response_body: Default::default(),
     }
 }
 
@@ -122,6 +124,8 @@ async fn native_callback_receives_only_metadata_and_explicit_repeated_headers() 
     let mut request = request();
     let mut facts = facts(&request);
     facts.headers.clear();
+    facts.method = "stale-method".into();
+    facts.path = "/stale-path".into();
     fixture
         .notifier
         .pre_ingress(1, &mut request, &mut facts)
@@ -164,15 +168,15 @@ async fn native_request_and_response_patches_apply_only_after_full_validation() 
     assert_eq!(request.headers["x-added"], "patched");
     assert_eq!(request.headers["host"], "origin.example");
     assert_eq!(
-        facts.headers, request.headers,
-        "request patch must update later authentication facts"
+        facts.headers["x-remove"], "original",
+        "native hooks leave metadata snapshots to the compiled stage boundary"
     );
     let mut response = ResponseHeader::build(201, None).unwrap();
     response.insert_header("x-remove", "original").unwrap();
     response
         .insert_header("x-visible", "response-only")
         .unwrap();
-    facts.status = Some(201);
+    facts.status = Some(200);
     facts.upstream_reused = true;
     fixture
         .notifier
@@ -183,7 +187,15 @@ async fn native_request_and_response_patches_apply_only_after_full_validation() 
     assert_eq!(response.headers["x-added"], "patched");
     let metadata = fixture.metadata().await;
     assert_eq!(metadata["hook"], "upstream_response");
-    assert_eq!(metadata["status"], 201);
+    assert_eq!(
+        metadata["status"], 201,
+        "native frame must project the live response status"
+    );
+    assert_eq!(
+        facts.status,
+        Some(200),
+        "native frame projection must not clone or mutate stage facts"
+    );
     assert_eq!(metadata["upstream_reused"], true);
     assert_eq!(
         metadata["headers"],
@@ -357,7 +369,9 @@ async fn callback_input_size_and_textual_header_checks_fail_before_native_entry(
         .await
         .unwrap();
     let previous = fixture.metadata().await;
-    facts.path = "x".repeat(FRAME_LIMIT);
+    request
+        .insert_header("x-visible", "x".repeat(FRAME_LIMIT))
+        .unwrap();
     let original = request.headers.clone();
     assert!(
         fixture
@@ -368,7 +382,7 @@ async fn callback_input_size_and_textual_header_checks_fail_before_native_entry(
     );
     assert_eq!(request.headers, original);
     assert_eq!(fixture.metadata().await, previous);
-    facts.path = "/resource".into();
+    request.set_uri("/resource".parse().unwrap());
     request
         .headers
         .insert("x-visible", http::HeaderValue::from_bytes(b"\xff").unwrap());
@@ -425,4 +439,372 @@ fn configuration_rejects_invalid_hooks_header_names_bounds_and_body_capture_sett
         let config: crate::config::Config = serde_json::from_value(invalid).unwrap();
         assert!(config.validate().is_err());
     }
+}
+
+fn dial_request() -> DialRequest {
+    DialRequest {
+        target: DialTarget::Host {
+            name: "origin.example".into(),
+            port: 443,
+        },
+        timeout: Duration::from_millis(1500),
+        tcp_nodelay: true,
+    }
+}
+
+#[tokio::test]
+async fn native_network_controls_map_decisions_and_project_typed_safe_phases() {
+    let fixture = Fixture::new(CONTINUE, &["before_dial", "pool", "socket"], &[]).await;
+    for hook in [
+        CallbackHook::BeforeDial,
+        CallbackHook::Pool,
+        CallbackHook::Socket,
+    ] {
+        assert!(fixture.notifier.supports(hook));
+    }
+    let facts = facts(&request());
+    let dial = dial_request();
+    for (reply, dial_decision, pool_decision, socket_decision) in [
+        (CONTINUE, None, None, None),
+        (
+            r#"{"version":1,"decision":"accept"}"#,
+            Some(DialDecision::Allow),
+            Some(PoolDecision::Reuse),
+            Some(SocketDecision::Continue),
+        ),
+        (
+            r#"{"version":1,"decision":"deny"}"#,
+            Some(DialDecision::Deny),
+            Some(PoolDecision::Discard),
+            Some(SocketDecision::Close),
+        ),
+    ] {
+        fixture.reply(reply).await;
+        assert_eq!(
+            fixture
+                .notifier
+                .before_dial(1, &dial, &facts)
+                .await
+                .unwrap(),
+            dial_decision
+        );
+        assert_eq!(
+            fixture.metadata().await["network"],
+            json!({
+                "kind":"before_dial", "target":{"kind":"host","name":"origin.example","port":443},
+                "timeout_ms":1500, "tcp_nodelay":true,
+            })
+        );
+        assert_eq!(
+            fixture
+                .notifier
+                .pool(1, PoolPhase::BeforeCheckout, &facts)
+                .await
+                .unwrap(),
+            pool_decision
+        );
+        assert_eq!(
+            fixture.metadata().await["network"],
+            json!({"kind":"pool", "phase":{"name":"before_checkout"}})
+        );
+        assert_eq!(
+            fixture
+                .notifier
+                .pool(
+                    1,
+                    PoolPhase::BeforeReturn {
+                        entry_id: 987654321,
+                        reused: true,
+                        healthy: false
+                    },
+                    &facts
+                )
+                .await
+                .unwrap(),
+            pool_decision
+        );
+        assert_eq!(
+            fixture.metadata().await["network"],
+            json!({"kind":"pool", "phase":{"name":"before_return","reused":true,"healthy":false}})
+        );
+        for (phase, name) in [
+            (SocketPhase::BeforeUse, "before_use"),
+            (SocketPhase::BeforeReuse, "before_reuse"),
+        ] {
+            assert_eq!(
+                fixture.notifier.socket(1, phase, &facts).await.unwrap(),
+                socket_decision
+            );
+            assert_eq!(
+                fixture.metadata().await["network"],
+                json!({"kind":"socket","phase":name})
+            );
+        }
+    }
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_network_controls_reject_patches_errors_and_oversized_or_secret_targets() {
+    let fixture = Fixture::new(CONTINUE, &["before_dial", "pool", "socket"], &[]).await;
+    let facts = facts(&request());
+    let mut dial = dial_request();
+    fixture
+        .notifier
+        .before_dial(1, &dial, &facts)
+        .await
+        .unwrap();
+    let previous = fixture.metadata().await;
+    for name in [
+        "x".repeat(FRAME_LIMIT),
+        "user:private-password@origin.example".into(),
+        "https://origin.example".into(),
+    ] {
+        dial.target = DialTarget::Host { name, port: 443 };
+        assert!(
+            fixture
+                .notifier
+                .before_dial(1, &dial, &facts)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fixture.metadata().await,
+            previous,
+            "invalid target crossed ABI"
+        );
+    }
+    dial = dial_request();
+    for reply in [
+        "not-json",
+        "FAIL",
+        r#"{"version":2,"decision":"continue"}"#,
+        r#"{"version":1,"decision":"accept","set_headers":[["x-added","value"]]}"#,
+        r#"{"version":1,"decision":"deny","remove_headers":["x-remove"]}"#,
+        r#"{"version":1,"decision":"continue","phase":"unsupported"}"#,
+    ] {
+        fixture.reply(reply).await;
+        assert!(
+            fixture
+                .notifier
+                .before_dial(1, &dial, &facts)
+                .await
+                .is_err(),
+            "accepted {reply}"
+        );
+        assert!(
+            fixture
+                .notifier
+                .pool(1, PoolPhase::BeforeCheckout, &facts)
+                .await
+                .is_err()
+        );
+        assert!(
+            fixture
+                .notifier
+                .socket(1, SocketPhase::BeforeUse, &facts)
+                .await
+                .is_err()
+        );
+    }
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_network_chain_defers_stops_at_first_decision_and_propagates_failure() {
+    use proxy_pingora::worker::surface::{Exposure, NotifierChain};
+    let first = Fixture::new(CONTINUE, &["before_dial", "pool", "socket"], &[]).await;
+    let second = Fixture::new(
+        r#"{"version":1,"decision":"deny"}"#,
+        &["before_dial", "pool", "socket"],
+        &[],
+    )
+    .await;
+    // Move just the notifiers into the chain; retain native handles for snapshot inspection.
+    let chain = NotifierChain::<ProxyContract>::new(vec![
+        Arc::new(first.notifier),
+        Arc::new(second.notifier),
+    ]);
+    let exposure = Exposure::new(vec![1]);
+    let facts = facts(&request());
+    let dial = dial_request();
+    assert_eq!(
+        chain
+            .before_dial(&exposure, 1, &dial, &facts)
+            .await
+            .unwrap(),
+        DialDecision::Deny
+    );
+    assert_eq!(
+        chain
+            .pool(&exposure, 1, PoolPhase::BeforeCheckout, &facts)
+            .await
+            .unwrap(),
+        PoolDecision::Discard
+    );
+    assert_eq!(
+        chain
+            .socket(&exposure, 1, SocketPhase::BeforeUse, &facts)
+            .await
+            .unwrap(),
+        SocketDecision::Close
+    );
+    let inspect = |function: Arc<Function>| async move {
+        function
+            .call_with_reply("inspect", vec![], Duration::from_secs(2), (), |bytes| {
+                serde_json::from_slice::<Value>(bytes)
+            })
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let previous = inspect(Arc::clone(&second.function)).await;
+    for reply in [r#"{"version":1,"decision":"accept"}"#, "FAIL"] {
+        first
+            .function
+            .call_with_reply(
+                "set_reply",
+                reply.as_bytes().to_vec(),
+                Duration::from_secs(2),
+                (),
+                |_| (),
+            )
+            .await
+            .unwrap();
+        let result = chain.before_dial(&exposure, 1, &dial, &facts).await;
+        if reply == "FAIL" {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap(), DialDecision::Allow);
+        }
+        let result = chain
+            .pool(
+                &exposure,
+                1,
+                PoolPhase::BeforeReturn {
+                    entry_id: 1,
+                    reused: false,
+                    healthy: true,
+                },
+                &facts,
+            )
+            .await;
+        if reply == "FAIL" {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap(), PoolDecision::Reuse);
+        }
+        let result = chain
+            .socket(&exposure, 1, SocketPhase::BeforeReuse, &facts)
+            .await;
+        if reply == "FAIL" {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap(), SocketDecision::Continue);
+        }
+        assert_eq!(
+            inspect(Arc::clone(&second.function)).await,
+            previous,
+            "later native participant entered after decision or failure"
+        );
+    }
+    drop(chain);
+    first.function.shutdown().await.unwrap();
+    second.function.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn unsupported_native_stage_is_rejected_before_entry() {
+    let fixture = Fixture::new(CONTINUE, &["routing"], &[]).await;
+    let mut request = request();
+    let mut facts = facts(&request);
+    fixture
+        .notifier
+        .routing(1, &mut request, &mut facts)
+        .await
+        .unwrap();
+    let previous = fixture.metadata().await;
+    assert!(
+        fixture
+            .notifier
+            .invoke("before_bridge", &facts)
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.metadata().await, previous);
+    assert!(validate_hooks(&["before_bridge".into()]).is_err());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn directional_native_hooks_patch_heads_and_preserve_transform_acceptance() {
+    let fixture = Fixture::new(
+        r#"{"version":1,"decision":"accept","set_headers":[["x-direction","patched"]]}"#,
+        &["before_upstream_send", "before_downstream_write"],
+        &["x-visible"],
+    )
+    .await;
+    let mut request = request();
+    let mut facts = facts(&request);
+    fixture
+        .notifier
+        .before_upstream_send(1, &mut request, &(), &mut facts)
+        .await
+        .unwrap();
+    assert_eq!(request.headers["x-direction"], "patched");
+    assert_eq!(fixture.metadata().await["hook"], "before_upstream_send");
+    let mut response = ResponseHeader::build(200, None).unwrap();
+    response
+        .insert_header("x-visible", "downstream-value")
+        .unwrap();
+    fixture
+        .notifier
+        .before_downstream_write(1, &mut response, &(), &mut facts)
+        .await
+        .unwrap();
+    assert_eq!(response.headers["x-direction"], "patched");
+    let metadata = fixture.metadata().await;
+    assert_eq!(metadata["hook"], "before_downstream_write");
+    assert_eq!(
+        metadata["headers"],
+        json!([["x-visible", "downstream-value"]])
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_dial_metadata_projects_numeric_and_unix_targets_without_handles() {
+    let fixture = Fixture::new(CONTINUE, &["before_dial"], &[]).await;
+    let facts = facts(&request());
+    let mut dial = dial_request();
+    dial.target = DialTarget::Tcp("[::1]:8443".parse().unwrap());
+    assert_eq!(
+        fixture
+            .notifier
+            .before_dial(1, &dial, &facts)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        fixture.metadata().await["network"]["target"],
+        json!({"kind":"tcp","address":"[::1]:8443"})
+    );
+    #[cfg(unix)]
+    {
+        dial.target = DialTarget::Unix("/run/worker-origin.sock".into());
+        assert_eq!(
+            fixture
+                .notifier
+                .before_dial(1, &dial, &facts)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            fixture.metadata().await["network"]["target"],
+            json!({"kind":"unix","path":"/run/worker-origin.sock"})
+        );
+    }
+    fixture.shutdown().await;
 }
