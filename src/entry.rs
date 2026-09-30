@@ -1,37 +1,25 @@
 //! Reversible shared management entry owned by the plugin composition.
 mod publications;
-mod socket;
-use action_router::Router;
-use network_actions::ActionService;
-use network_sockets::{BoundListener, LocalEndpoint, SocketPermissions};
+use action_router::{Publication, PublicationRegistry, Router};
+use network_actions::{listener::ActionListener, ActionService};
+use network_sockets::{LocalEndpoint, SocketPermissions, StaleUnixSocketPolicy};
 use plugin_lifecycle::{Composition, Resource, Reversal};
-pub use publications::AxisRoutes;
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 use tokio::sync::oneshot;
 
 pub struct SharedEntry {
-    activation: Mutex<Option<oneshot::Sender<()>>>,
+    listener: Arc<ActionListener>,
     router: Router,
-    local_address: Option<std::net::SocketAddr>,
-    publications: Arc<Mutex<publications::State>>,
+    publications: PublicationRegistry,
 }
 impl SharedEntry {
     /// Actual TCP address, including a kernel-selected port when configured as zero.
     pub fn local_address(&self) -> Option<std::net::SocketAddr> {
-        self.local_address
+        self.listener.local_address()
     }
 
     pub fn activate(&self) -> Result<(), String> {
-        self.activation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-            .ok_or("action entry already activated")?
-            .send(())
-            .map_err(|_| "action entry stopped before activation".into())
+        self.listener.activate()
     }
 }
 /// Application-selected contracts are independent of the worker's notifier surface.
@@ -56,13 +44,12 @@ pub async fn install(
                 permissions,
             } = registration;
             // Bind before registering routes; pathname ownership follows the socket primitive.
-            let (bound, socket) = socket::bind(endpoint, permissions).await?;
-            let local_address = match &bound {
-                BoundListener::Tcp(listener) => {
-                    Some(listener.local_addr().map_err(|e| e.to_string())?)
-                }
-                BoundListener::Unix(_) => None,
-            };
+            let (bound, socket) = network_sockets::bind_local(
+                endpoint,
+                permissions,
+                StaleUnixSocketPolicy::RemoveIfStale,
+            )
+            .await?;
             let router = Router::new();
             let carrier = ActionService::new(router.clone(), 1024 * 1024, Duration::from_secs(120))
                 .map_err(|e| e.to_string())?;
@@ -75,48 +62,29 @@ pub async fn install(
                         .map_err(|e| e.to_string())
                 })
                 .transpose()?;
-            let publications = publications::State::new(worker_actions);
-            let (start, started) = oneshot::channel();
-            let (stop, mut stopped) = oneshot::channel();
-            let task = tokio::spawn(async move {
-                let _socket = socket;
-                tokio::select! {
-                    result = started => { if result.is_err() { return Ok(()); } }
-                    _ = &mut stopped => return Ok(()),
-                }
-                match bound {
-                    BoundListener::Tcp(listener) => {
-                        network_actions::serve_local(listener, carrier, async {
-                            let _ = stopped.await;
-                        })
-                        .await
-                    }
-                    BoundListener::Unix(listener) => {
-                        network_actions::serve_unix(listener, carrier, async {
-                            let _ = stopped.await;
-                        })
-                        .await
-                    }
-                }
-                .map_err(|e| e.to_string())
-            });
+            let publications = PublicationRegistry::new();
+            if let Some(worker_actions) = worker_actions {
+                publications
+                    .install("worker", move || {
+                        Ok(Arc::new(worker_actions) as Arc<dyn Publication>)
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            let listener = Arc::new(ActionListener::prepare(bound, socket, carrier)?);
             let activation = Arc::new(SharedEntry {
-                activation: Mutex::new(Some(start)),
+                listener: Arc::clone(&listener),
                 router,
-                local_address,
-                publications: Arc::clone(&publications),
+                publications: publications.clone(),
             });
             let _ = send.send(activation.clone());
             let inverse: Reversal = Box::new(move || {
                 Box::pin(async move {
                     // Mark closed and revoke every owner before waiting on the listener.
-                    let cleanup = publications::close_all(publications);
-                    let _ = stop.send(());
-                    let served = task
-                        .await
-                        .map_err(|e| e.to_string())
-                        .and_then(|result| result);
-                    cleanup.await?;
+                    let cleanup = publications.close_all();
+                    listener.request_stop();
+                    let served = listener.shutdown().await;
+                    cleanup.await.map_err(|error| error.to_string())?;
                     served
                 })
             });
