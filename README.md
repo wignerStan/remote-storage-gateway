@@ -68,14 +68,38 @@ Each `callbacks` entry explicitly selects a trusted native Function library:
 }
 ```
 
-Hooks run in configured callback order: `pre_ingress`, `pre_routing`,
-`authenticate`, `routing`, `admit`, `prepare_request_body`, then native peer/pool
-selection and connection, `before_upstream_send`, `upstream_response`,
-`prepare_response_body`, `before_downstream_write`, native delivery, and
-`complete`. Completion belongs only to the callback that accepted admission.
-Compiled Rust callbacks can also use native dial/socket/pool hooks. Pingora owns
-its pool-return boundary; the application does not fabricate a `BeforeReturn`
-notification after that boundary has passed.
+The native worker enforces this sequence:
+
+1. Validate the already-parsed ingress protocol (`pre_ingress`). Raw negotiation
+   and HTTP parsing belong to Pingora's carrier.
+2. Apply metadata/header transforms in registration order (`pre_routing`).
+3. Authenticate the resulting identity (`authenticate`).
+4. Select the configured route and admit execution (`routing`, `admit`).
+5. Configure native request-body transforms (`prepare_request_body`).
+6. Finalize outbound headers and encoding (`before_upstream_send`).
+7. Gate pool checkout and dialing, acquire/connect, authorize socket use, then
+   send upstream (`pool`, `before_dial`, `socket`).
+8. Process the final upstream response (`upstream_response`).
+9. Configure native response-body transforms (`prepare_response_body`).
+10. Finalize downstream headers and encoding (`before_downstream_write`).
+11. Stream downstream and attempt the admitting callback's `complete` once.
+
+Finalization runs before any upstream acquisition. Pingora's later
+`upstream_request_filter` only publishes the prepared head with native protocol
+framing; it does not replay notifier callbacks. An owned outbound head preserves
+the original ingress framing used by Pingora's body decoder. Informational
+responses such as `103` do not repeat final-response stages. Upgrade traffic stays
+with Pingora's duplex carrier and bypasses HTTP body transforms and body dumps.
+Callbacks cannot change the parsed method/protocol or manufacture an upgrade.
+
+Native and compiled callbacks can gate pool checkout, dialing, and socket use.
+Pingora owns pool return; this worker never fabricates `before_return` or
+`before_reuse` events after that boundary has passed. Socket `before_use` runs on
+both fresh and reused connections and exposes `upstream_reused` metadata.
+Admission closure is checked again after pending request callbacks. Callback
+phases have bounded waits, and acquisition shares its budget with control hooks
+and name resolution. Failed/cancelled or repeated lifecycle phases cannot advance
+or report completion. Automatic request replay remains disabled.
 
 The Function method is the hook name. Its bounded JSON frame contains
 `version: 1`, `hook`, `request_id`, `method`, query-free `path`, optional `status`,
@@ -88,6 +112,23 @@ Replies contain `{"version":1,"decision":"continue"}`, `accept`, or `deny`, with
 optional `set_headers` pairs and `remove_headers` names. `accept` selects an
 authentication/admission owner; `continue` defers those decisions. The final
 compiled policy accepts the configured fixed route if no plugin denied it.
+Network hooks add an optional bounded `network` object. `before_dial` includes a
+structured host/port, TCP address, or Unix path plus timeout and TCP options;
+`pool` includes phase metadata, and `socket` includes its ownership phase. Frames
+exclude raw descriptors, pool entry IDs, URL credentials, and stream objects.
+
+| Hook | `accept` | `deny` | `continue` |
+| --- | --- | --- | --- |
+| `before_dial` | Allow acquisition | Refuse acquisition | Ask the next participant |
+| `pool` | Permit reuse within configured limits | Discard/bypass reuse | Ask the next participant |
+| `socket` | Permit socket use | Close/refuse use | Ask the next participant |
+
+Network replies forbid header patches. A pool discard still permits a fresh
+connection; a dial refusal occurs before DNS/connection work. Native metadata
+frames borrow the live request method/path or response status and headers while
+encoding. Header snapshots for decision-only hooks are taken once per completed
+request-head stage, rather than once per native callback patch.
+
 Transform stages apply validated patches to the native head; authentication,
 admission and completion forbid patches. Framing/hop headers and authority cannot
 be changed by these metadata replies. Errors and denial stop the chain; malformed
@@ -184,7 +225,8 @@ stops dispatch. Completion stays with the admitting callback and can start only
 once, including when its first attempt fails or is cancelled; this is not a
 guarantee that completion finishes.
 
-Run `just bdd` to see `DECISION`, `WHY`, and `FACTS` for authentication, admission,
+Run `just bdd` to exercise the actual native pipeline and see `DECISION`, `WHY`,
+and `FACTS` for authentication, admission,
 dial, completion, and a refused completion retry over a real TCP exchange.
 The scenario buffers its trace and prints once. Shared infra credential policy
 hashes API/auth credentials and selected session cookies while preserving ordinary
@@ -203,7 +245,24 @@ Failures stop later hooks, and dropping the exchange cancels without reporting
 successful completion. The carrier retains raw protocol parsing responsibility.
 
 Body setup configures native pull-time transforms; it never collects or serializes
-a body to notify plugins. The C ABI carries bounded non-streaming metadata/control
+a body to notify plugins. Compiled callbacks register `stream_transfer::chunk::ChunkTransform`
+implementations through `facts.request_body.push(...)` and
+`facts.response_body.push(...)` during the respective preparation stages. The
+worker seals each chain before final header callbacks. Late registration, transform
+errors, or a violated length promise poison the chain. At most 64 transforms run
+in registration order per direction, using the borrowed `Option<Bytes>` slot;
+the dispatcher creates no payload copies, intermediate buffers, or per-chunk
+futures. Transforms may allocate when their own operation requires it.
+
+The default transform length policy is variable. The worker removes stale fixed
+lengths/digests and selects streaming framing. A transform that declares
+`preserves_length` must preserve length on every invocation. Header callbacks
+cannot override the body's original fixed length or sealed framing policy.
+Header-only messages do not provide a payload/EOF transform call, so transforms
+must not synthesize bodies or require EOF side effects for those messages.
+Transforms on protocol upgrades are rejected; opaque tunnel bytes remain native.
+Native Function callbacks configure metadata/control only; their ABI cannot
+install a Rust chunk processor or transport an asynchronous body. The C ABI carries bounded non-streaming metadata/control
 frames and explicit resource handles while async response streams stay with the
 native host/egress owner. Borrowed frame views can be passed through synchronous
 callbacks without copying; they cannot outlive their invocation.
