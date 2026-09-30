@@ -1,10 +1,107 @@
 # Pingora worker
 
-A reusable worker-host project built from infra components. It contains no
-Sub2API, OAuth, billing, model, mimic, or provider scheduling policy. Its library
-is used by a release application's executable: run the selected composition with
-`pingora_worker::run`, and give `Process<H>` the installed request handler and
-committed plugin runtime. This is a separate host project, not another proxy hop.
+A runnable Pingora application with explicit configuration, assembly, plugin
+runtime and process entry. `main` loads configuration; `assembly` installs native
+notifier Functions and optional management entry in `plugin-lifecycle`; the
+native `pingora-proxy::ProxyHttp` engine owns forwarding, streaming, upgrades and
+connection pooling. The library also exposes composition APIs for other selected
+applications. Business policy belongs to separately installed plugins.
+
+## Run the application
+
+Save a JSON configuration, for example:
+
+```json
+{
+  "listen": "127.0.0.1:6188",
+  "upstream": "http://127.0.0.1:8080",
+  "pool": { "enabled": true, "idle_timeout_seconds": 90, "isolation_key": 0 },
+  "logging": {
+    "filter": "info,proxy_pingora::worker::notifier=trace",
+    "access_file": { "directory": "logs/access", "keep_files": 30 }
+  },
+  "management": { "listen": "127.0.0.1:6189" },
+  "callbacks": []
+}
+```
+
+```sh
+cargo run --locked -- --config worker.json --check-config
+cargo run --locked -- --config worker.json
+```
+
+Validation does not load plugins or bind listeners. The upstream is a fixed
+HTTP(S) origin; request paths and queries are preserved. Optional `proxy` selects
+an HTTP CONNECT, HTTPS CONNECT, SOCKS5 or SOCKS5h upstream bridge. A refused
+selected proxy never falls back to direct access. TLS ingress uses
+`tls: {"certificate": "server.crt", "key": "server.key"}`. Configuration rejects
+unknown fields, invalid origins and unbounded timeouts/capacities.
+
+Native Pingora types remain directly available through their own crates. Infra
+adds lifecycle ordering, explicit resource ownership and fixes for transport
+adaptation; forwarding and native pooling stay in Pingora.
+Direct, HTTP CONNECT and SOCKS connections can use Pingora's pool. HTTPS proxy
+tunnels currently bypass reuse because the custom L4 TLS stream lacks the native
+socket identity required by idle-pool validation. Pool isolation includes selected
+upstream, bridge and credentials; those keys are never logged. Admitted requests
+are attempted once, with no automatic replay.
+
+SIGTERM/SIGINT stop native workers and pools before plugin teardown. Management
+routes are optional and loopback-only. Installed native calls retain their owners
+through cancellation until the synchronous operation really returns.
+
+## Native metadata callbacks
+
+Each `callbacks` entry explicitly selects a trusted native Function library:
+
+```json
+{
+  "path": "plugins/policy.so",
+  "package": "example.policy",
+  "variant": "native",
+  "language": "rust",
+  "hooks": ["pre_routing", "authenticate", "admit", "complete"],
+  "headers": ["x-request-id"],
+  "config": {},
+  "timeout_ms": 5000,
+  "max_inflight": 32
+}
+```
+
+Hooks run in configured callback order: `pre_ingress`, `pre_routing`,
+`authenticate`, `routing`, `admit`, `prepare_request_body`, then native peer/pool
+selection and connection, `before_upstream_send`, `upstream_response`,
+`prepare_response_body`, `before_downstream_write`, native delivery, and
+`complete`. Completion belongs only to the callback that accepted admission.
+Compiled Rust callbacks can also use native dial/socket/pool hooks. Pingora owns
+its pool-return boundary; the application does not fabricate a `BeforeReturn`
+notification after that boundary has passed.
+
+The Function method is the hook name. Its bounded JSON frame contains
+`version: 1`, `hook`, `request_id`, `method`, query-free `path`, optional `status`,
+`upstream_reused`, `completed`, and ordered `headers` pairs selected by the explicit
+allowlist. No headers are exposed by default. Bodies, Futures and asynchronous
+streams never cross this ABI. Input and reply budgets are 64 KiB; infra visits
+the borrowed native reply before releasing its allocation.
+
+Replies contain `{"version":1,"decision":"continue"}`, `accept`, or `deny`, with
+optional `set_headers` pairs and `remove_headers` names. `accept` selects an
+authentication/admission owner; `continue` defers those decisions. The final
+compiled policy accepts the configured fixed route if no plugin denied it.
+Transform stages apply validated patches to the native head; authentication,
+admission and completion forbid patches. Framing/hop headers and authority cannot
+be changed by these metadata replies. Errors and denial stop the chain; malformed
+patch batches leave the head unchanged. A completion error or cancellation cannot
+start completion again.
+
+Diagnostics contain stage, callback and decision metadata. Access events use a
+separate stdout/file sink. To capture bounded sanitized request JSON, explicitly
+configure both `logging.body_file` and `logging.body_max_bytes` (at most 1 MiB).
+Malformed, incomplete and oversized bodies emit an outcome without body text;
+response bodies are never captured. Credential fields and selected session cookies
+are fingerprinted while ordinary cookies stay useful. Global TRACE does not enable
+capture, and raw native wire/header debug targets are excluded from this standard
+logging path. Access and body retention are independent.
 
 ## Ownership and calls
 
@@ -121,7 +218,7 @@ bodies; consumed sessions keep unavailable status/byte counts explicitly unknown
 ## Native boundary
 
 The synchronous C ABI is the required effect boundary for Go Object plugins.
-Arguments and replies use copied values/opaque handles; no Go/Rust runtime object
+Arguments and replies use scoped byte views/opaque handles; no Go/Rust runtime object
 or Future crosses it. Runtime binding dispatch verifies the calling instance owns
 the binding ID. Method validation remains the Tool's contract. Caller-local
 async/await retains leases until the native operation actually returns; cancelling
@@ -163,7 +260,7 @@ fail before loading; there is no implicit backend fallback.
 
 The worker and its release application must resolve the same infra checkout;
 use the existing sibling `infra` workspace rather than a second clone. The host
-is a library project; release binaries select their application at build time.
+provides its own executable; other release binaries may select their application at build time.
 The selected build controls hook scope; environment variables only supply runtime
 settings and credentials. Run `cargo test` for host checks and
 `go test tools/plugin-contract/main.go tools/plugin-contract/main_test.go` for the
