@@ -1,6 +1,47 @@
 use super::*;
 
 #[test]
+fn native_transfer_coding_validation_accepts_only_absent_or_single_chunked() {
+    for coding in [None, Some("chunked"), Some(" ChUnKeD ")] {
+        let mut request = RequestHeader::build("POST", b"/", None).unwrap();
+        let mut response = ResponseHeader::build(200, None).unwrap();
+        if let Some(coding) = coding {
+            request.insert_header("transfer-encoding", coding).unwrap();
+            response.insert_header("transfer-encoding", coding).unwrap();
+        }
+        assert!(validate_ingress(&request).is_ok());
+        assert!(validate_transfer_coding(&response.headers, 502).is_ok());
+    }
+    for codings in [
+        vec!["gzip, chunked"],
+        vec!["gzip", "chunked"],
+        vec!["chunked", "chunked"],
+        vec!["chunked, chunked"],
+        vec!["gzip"],
+        vec!["identity"],
+        vec!["chunked; parameter=yes"],
+        vec![""],
+    ] {
+        let mut request = RequestHeader::build("POST", b"/", None).unwrap();
+        let mut response = ResponseHeader::build(200, None).unwrap();
+        for coding in codings {
+            request.append_header("transfer-encoding", coding).unwrap();
+            response.append_header("transfer-encoding", coding).unwrap();
+        }
+        assert_eq!(
+            validate_ingress(&request).unwrap_err().etype(),
+            &ErrorType::HTTPStatus(400)
+        );
+        assert_eq!(
+            validate_transfer_coding(&response.headers, 502)
+                .unwrap_err()
+                .etype(),
+            &ErrorType::HTTPStatus(502)
+        );
+    }
+}
+
+#[test]
 fn request_framing_is_derived_from_native_input_and_sealed_body_plan() {
     let mut original = RequestHeader::build("POST", b"/upload?q=1", None).unwrap();
     original.insert_header("content-length", "6").unwrap();

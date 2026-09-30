@@ -3,6 +3,7 @@ use super::*;
 use http::Version;
 
 pub(super) fn validate_ingress(request: &RequestHeader) -> Result<()> {
+    validate_transfer_coding(&request.headers, 400)?;
     if request.headers.contains_key("content-length")
         && request.headers.contains_key("transfer-encoding")
     {
@@ -19,6 +20,23 @@ pub(super) fn validate_ingress(request: &RequestHeader) -> Result<()> {
             405,
             "CONNECT requires a configured tunnel listener",
         ));
+    }
+    Ok(())
+}
+
+/// Pingora removes chunk framing, but does not decode other transfer codings.
+/// Reject them before callbacks or forwarding can erase their declaration.
+pub(super) fn validate_transfer_coding(headers: &http::HeaderMap, status: u16) -> Result<()> {
+    let mut values = headers.get_all("transfer-encoding").iter();
+    let Some(value) = values.next() else {
+        return Ok(());
+    };
+    if values.next().is_some()
+        || !value
+            .to_str()
+            .is_ok_and(|value| value.trim().eq_ignore_ascii_case("chunked"))
+    {
+        return Err(refusal(status, "unsupported transfer coding"));
     }
     Ok(())
 }
@@ -129,6 +147,8 @@ pub(super) fn wire_request(
         }
     } else {
         if has_body && !request.headers.contains_key("content-length") {
+            // HTTP/1.0 cannot delimit a streaming upload with chunked coding.
+            request.set_version(Version::HTTP_11);
             request.insert_header("transfer-encoding", "chunked")?;
         }
         request.insert_header(
@@ -187,7 +207,7 @@ pub(super) fn response_head(
     method: &http::Method,
     downstream_version: Version,
     variable: bool,
-) -> Result<()> {
+) -> Result<bool> {
     original.validate(response, method)?;
     strip_hop_headers(&mut response.headers)?;
     response.remove_header("content-length");
@@ -205,12 +225,13 @@ pub(super) fn response_head(
     }
     let may_have_body =
         *method != http::Method::HEAD && !matches!(response.status.as_u16(), 101 | 204 | 304);
-    if downstream_version != Version::HTTP_2
-        && may_have_body
-        && !response.headers.contains_key("content-length")
-    {
+    let unknown_length = may_have_body && !response.headers.contains_key("content-length");
+    let close_delimited = downstream_version == Version::HTTP_10 && unknown_length;
+    if downstream_version == Version::HTTP_11 && unknown_length {
         response.set_version(Version::HTTP_11);
         response.insert_header("transfer-encoding", "chunked")?;
+    } else if close_delimited {
+        response.set_version(Version::HTTP_10);
     }
     if response.status.as_u16() != 101 {
         response.remove_header("connection");
@@ -226,7 +247,7 @@ pub(super) fn response_head(
             response.remove_header(name);
         }
     }
-    Ok(())
+    Ok(close_delimited)
 }
 
 #[cfg(test)]
