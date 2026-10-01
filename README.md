@@ -47,8 +47,9 @@ upstream, bridge and credentials; those keys are never logged. Admitted requests
 are attempted once, with no automatic replay.
 
 SIGTERM/SIGINT stop native workers and pools before plugin teardown. Management
-routes are optional and loopback-only. Installed native calls retain their owners
-through cancellation until the synchronous operation really returns.
+routes are optional and loopback-only. Callbacks default to separately terminable helper processes. Explicit trusted
+`execution: "in_process"` calls retain their owners through cancellation until
+the synchronous operation really returns.
 
 ## Native metadata callbacks
 
@@ -76,8 +77,14 @@ the LuaJIT/V8 execution role and is not inferred from a native library's languag
 This native-only `callbacks` configuration does not select a LuaJIT/V8 engine.
 Explicit `kind: "function"` remains available only for existing native Function ABI
 artifacts; otherwise `kind` is `object`. Selection must match the artifact header. Object methods are serialized per instance within the callback deadline,
-while Functions retain configured concurrency. Go libraries remain mapped after
-shutdown; active calls drain before native instance cleanup.
+while local Functions retain configured concurrency. `instances` (default 1) adds
+independent Object instances with stable request affinity across metadata and
+message callbacks. `max_waiting` bounds queued inputs separately from active calls.
+Startup, calls and shutdown each have bounded deadlines. A timed-out/crashed
+isolated helper fails closed until reinstallation; in-process Go mappings remain
+retained until process exit. The isolated process is crash/hang containment, not
+a filesystem/network sandbox. Use `execution: "in_process"` only for trusted code
+when the borrowed-pointer fast path is required.
 
 Both kinds must implement the configured hook methods and the metadata/reply
 contract below. Object loading does not translate arbitrary business method
@@ -185,20 +192,13 @@ write grant. Compiled hooks must preserve the original handshake metadata too.
 Otherwise transparent forwarding could advertise an encoding or subprotocol it
 does not implement.
 
-Frame parsing, masking, fragmentation, ping/pong/close handling, limits and
-backpressure are protocol infrastructure, not product policy. Go plugins should
-own business interpretation and decisions. Existing async callbacks cannot simply
-be inserted into both HTTP body filters: Pingora's downstream body filter is
-synchronous, chunks are not WebSocket frames, and 101 can arrive with preread frame
-bytes. Client-only inspection can use the native async request filter with a bounded
-incremental codec. Bidirectional asynchronous inspection additionally needs a
-suitable async carrier interface or owned duplex loop. Both require ordered
-bounded callback waits, explicit directional grants and cancellation; detached
-notifications must not pretend to gate bytes already forwarded. No body stream or
-future crosses the C ABI.
-
-These host grants constrain the notifier contract. Trusted in-process `.so` code
-is not an OS sandbox and must not be treated as an untrusted isolated plugin.
+Frame parsing, masking, fragmentation, ping/pong/close handling and backpressure
+belong to infra; business interpretation belongs to the granted plugin. The
+vendored Pingora 0.8.1 proxy adds an awaited `async_response_body_filter` whose
+default delegates to the original synchronous hook, plus request/response assembly
+deadlines. Its existing duplex engine still owns forwarding. No stream or future
+crosses the C ABI. `message_responses: true` explicitly enables upstream message
+inspection; omitted grants keep response payloads opaque to callbacks.
 
 ## Opt-in native Pingora request filter
 
@@ -234,8 +234,8 @@ When buffering incomplete messages, use `Some(Bytes::new())` to withhold output;
 `None` has Pingora EOF semantics. Raw chunks are neither frames nor complete
 messages: any codec must bound accumulation, retain preread bytes and account for
 fragmentation/masking/extensions. The raw-hook API does not itself decode messages; the separately configured
-message codec runs before an additional trusted raw handler. Upstream delta bodies remain on the
-ordinary uninspected response path. An awaited client filter can still delay
+message codec runs before an additional trusted raw handler. Response inspection
+is independently granted with `message_responses`. An awaited client filter can still delay
 same-connection response scheduling, so its latency must be bounded and measured.
 
 ## Protocol codec plugins and the message ABI
@@ -244,7 +244,8 @@ The common boundary owns byte lifetimes, ordered decisions, cancellation and
 backpressure. Protocol codecs are separate compiled Rust plugins. The built-in
 `websocket.v1` codec handles client WebSocket framing; it does not parse application
 JSON, OpenAI events, or any other business format. Native Object plugins interpret
-those complete message payloads. Upstream response/delta bytes stay transparent.
+those complete message payloads. Response inspection is opt-in and preserves the
+original wire after approval.
 
 A callback opts in with `"message_codec": "websocket.v1"`. Without a codec grant,
 the existing opaque upgraded-byte path is unchanged. Custom compiled codecs can
@@ -252,8 +253,11 @@ be supplied through `assembly::assemble_with_codecs(config, codecs)`; each imple
 `proxy_pingora::http_ingress::message_codec::CodecPlugin` supplies its identifier, upgrade selection,
 handshake validation and per-connection decoder. Registration resolves an explicit
 identifier before native plugins are loaded. Several configured codecs may serve distinct routes; overlapping selections for
-a request are rejected. This is a Rust extension
-point, not a new dynamic `.so` codec loader. A codec must bound pending input,
+a request are rejected. A native `.so` may also register an explicit
+`codec_descriptor` selecting bounded built-in HTTP JSON or WebSocket framing and
+routes; its semantic decoder stays inside the native plugin. The descriptor ID
+must match the explicit codec grant. Arbitrary Rust vtables never cross C ABI.
+A codec must bound pending input,
 message output and frame bookkeeping and fail closed on malformed/incomplete input.
 
 The initial native message contract uses the existing plugin ABI `call` operation:
@@ -263,7 +267,16 @@ The initial native message contract uses the existing plugin ABI `call` operatio
 | Method | `websocket.v1/text/<request>/<sequence>` or `websocket.v1/binary/<request>/<sequence>` |
 | Request and sequence | Exactly 16 lowercase hexadecimal digits each; sequence starts at zero and counts data messages |
 | Input | Complete unmasked payload; text is valid UTF-8, binary is arbitrary bytes |
-| Reply | Exactly one byte: `0` allows, `1` denies and terminates; every other reply is an error |
+| Reply | `0` allows; `1` denies and closes. Responses/Codex request callbacks may instead return a validated bounded JSON `type: error` document |
+
+For Responses/Codex WebSocket requests, a structured error suppresses that request
+message and is sent as one server text frame, preserving the socket for a later
+client retry. Other JSON replies and errors returned by response callbacks fail
+closed. The error batch is bounded. Reply-capable protocols frame-gate the upstream
+direction even without semantic response access, so a locally generated error
+cannot be inserted into the middle of an upstream frame. Business callbacks see
+upstream payloads only with `message_responses: true`; this framing guard does not
+authorize them. Unknown or incomplete upstream frames fail closed.
 
 Control frames do not invoke business callbacks or advance the message sequence.
 The same complete payload allocation is shared across callbacks in registration
@@ -277,19 +290,24 @@ The codec retains original masked wire bytes and decodes payload once. A single
 contiguous accepted frame can reuse its original wire allocation. Fragmented or
 batched output may need one bounded coalescing copy because Pingora's body hook
 returns one `Bytes`; this is not a zero-copy claim for the entire path. Limits are
-1 MiB decoded payload, an additional 64 KiB wire budget, 1024 frames and 4096
+a configurable decoded payload (default 1 MiB, maximum 32 MiB), an additional 64 KiB wire budget, 1024 frames and 4096
 retained wire segments. An emitted batch may contain both previous buffered wire
-and current input, bounded to twice the wire budget. Whole messages are withheld until accepted; control frames interleaved within a fragmented
-message are retained in wire order. This can delay control delivery until message
-completion. A valid close discards withheld unfinished data and forwards the close
+and current input, bounded to twice the wire budget. Whole messages are withheld until accepted. Ping/pong frames are released
+immediately even during fragmented data, without invoking business callbacks. A valid close discards withheld unfinished data and forwards the close
 frame. Pending work is bounded by carrier timeouts and codec limits.
 
 The WebSocket codec validates masked client framing, continuation/control rules,
 length encoding, text UTF-8 and close payloads. Inspected WS requests withdraw extension offers before upstream dispatch;
 unsolicited negotiated extensions are rejected before downstream 101. Uninspected
 connections preserve their original compression negotiation.
-It does not terminate WebSocket sessions or synthesize protocol responses. A
-failure closes the proxy path. The existing notifier authentication, admission,
+It does not invent application error documents. Responses/Codex callbacks may
+return the CLIProxyAPI `writeResponsesWebsocketError` shape: `type` is `error`,
+`error` is an object with optional string `code`, `type`, `message`, and `param`,
+and optional `status`/`status_code` are unsigned 16-bit integers. Duplicate critical
+fields and malformed documents are rejected. The codec preserves those JSON
+bytes in one bounded unmasked server text frame; the host's upstream framing
+guard and write ordering keep the socket valid for a client retry. Other
+failures close the proxy path. The existing notifier authentication, admission,
 `before_upstream_send` and `before_downstream_write` stages remain authoritative.
 
 ## AI API codecs from infra
@@ -329,9 +347,30 @@ success cannot acknowledge an uninspected request; early origin rejection can be
 relayed without successful completion. HTTP zstd is decoded within strict limits
 for inspection while original compressed wire and headers are forwarded unchanged.
 The codec delegates bounded zstd decoding to infra’s `compression` primitive wrapper.
-The current input/decoded limit is 1 MiB with at most 4096 retained segments.
-Inspected WS connections negotiate uncompressed framing. Upstream response bodies,
-including SSE and WS deltas, continue unchanged through the native response path.
+The default input/decoded limit is 1 MiB with at most 4096 retained segments.
+`inspection` configures `max_requests` (128), `max_buffered_bytes` (256 MiB),
+`max_message_bytes` (1 MiB) and `message_timeout_ms` (30 seconds). Admission
+reserves worst-case decoder/IPC/encoding buffers before accumulating data; budget
+exhaustion returns 503. Idle framed connections release their assembly reservation;
+new message bytes reacquire it. Assembly deadlines cover idle incomplete messages, not
+an entire SSE/WS session. Completed messages release their deadline; a new partial
+message starts a new one. Per-callback deadlines remain independently bounded.
+
+With `message_responses: true`, complete JSON responses and structured errors
+(including HTTP 200 error envelopes), plain non-JSON HTTP errors, SSE events,
+Gemini JSON-array events, and server WebSocket messages are inspected. Full HTTP
+kinds append `.response` or `.error` to the protocol kind; event streams use
+`response.event`, `response.error`, `response.done`, or `response.binary`.
+Response sequences are independent of request sequences. HEAD and bodyless
+statuses have no body decoder. Inspected HTTP responses request identity encoding;
+unsupported encodings fail closed. WS inspection disables extension negotiation.
+Unfragmented contiguous server frames share their original payload allocation.
+
+The Go implementation in `infra/go/ai/llmprotocols` imports a pinned CLIProxyAPI
+SDK. It supplies request/full-response translation and status/header-aware error
+handling. It does not silently fall back when a conversion pair is unsupported.
+The worker's message contract remains decisions and bounded protocol errors; installing this SDK does not
+implicitly enable payload rewriting.
 
 ## Realtime / Live signaling codecs
 
@@ -359,12 +398,25 @@ Realtime/Live WS inspects complete client text messages. Known event types becom
 static ABI kinds; future types use `realtime.event` with the original JSON intact.
 Audio/base64 and context data are not materialized into domain objects. Invalid
 JSON, duplicate/missing event types and binary client frames fail closed.
-Upstream events/audio deltas continue unchanged. The existing uncompressed WS
-negotiation and 1 MiB message limits apply.
+Upstream events and binary audio messages can be inspected with an explicit
+response grant. The same configurable message limits apply.
 
 This supports WebRTC call signaling and WebSocket sidebands. Actual WebRTC media
-and DataChannel traffic use a separate peer connection outside Pingora's HTTP
-carrier. Codex Live paths and shapes were verified against local `codex-api`
+and DataChannel traffic use the independent `infra/go/network/webrtc` carrier.
+It owns Pion ICE/DTLS/SRTP/SCTP connections, bounded Opus RTP and DataChannel
+forwarding, complete-message hooks and shutdown. Media stays in Go; it is not
+copied through per-frame Rust IPC. Its session API is independent of HTTP and
+can be mounted through infra action adapters for Axum or native Pingora L4.
+
+Native action declarations (`actions`) explicitly bind unary plugin methods and
+JSON schemas to the optional loopback management entry. Stateful actions require
+`instances: 1`; plugins own opaque media session IDs. The entry revokes/drains
+these actions before closing native instances. See
+`infra/go/ai/llmprotocols/exampleplugin/worker-config.example.json` for signaling
+actions. The example is a carrier fixture; provider routing and credentials remain
+application plugin responsibilities.
+
+Codex Live paths and shapes were verified against local `codex-api`
 commit `444da310e108da16aaeb18fd790b0ac464f08aca`; they remain opt-in.
 
 ## Ownership and calls
@@ -514,16 +566,18 @@ async/await retains leases until the native operation actually returns; cancelli
 an await does not authorize freeing an in-flight handle. Logical closure,
 resource draining, and physical library unloading are separate operations.
 
-Native in-process libraries are **trusted code, not an OS sandbox**. Object code
-must not create its own sockets, RPC transports or filesystem side channels.
+Native libraries are **trusted code, not an OS sandbox**. Business Object code
+uses explicitly bound Tool capabilities for side effects. Infra media carriers
+own their protocol sockets as explicitly installed infrastructure.
 The `tools/plugin-contract` build guard rejects direct net/rpc/fs entry references
 (including aliases and function capture) and unauditable dot imports. It checks
 selected first-party entry sources, not transitive dependencies, dynamically
 constructed behavior, arbitrary C code, or malicious syscalls. Bootstrap config
 and existing business dependencies still require review; this guard is not proof
-that every transitive side effect has been migrated. Hard denial for untrusted
-native libraries requires a separate constrained process and mediated tools;
-that isolation mode is not implemented here. Do not advertise it as enforced.
+that every transitive side effect has been migrated. Helper processes now contain native crashes and enforce termination deadlines.
+They still inherit OS filesystem/network privileges; hard denial requires deployment
+sandbox policy and mediated tools. In-process codecs/chunk transforms remain
+trusted native code: chunk output bounds do not preempt arbitrary CPU or allocator use.
 
 The Rust native egress stream remains Rust-local through the provider trait.
 For a client implemented in another language, reuse infra's framed stdio primitive
