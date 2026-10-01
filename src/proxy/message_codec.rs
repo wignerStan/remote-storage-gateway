@@ -87,6 +87,42 @@ pub(crate) use proxy_pingora::http_ingress::message_codec::{
     CodecPlugin, Transport, resolve_all, valid_id, validate_selection,
 };
 
+/// Validate components before native affinity parses the slash-separated method.
+/// Delay formatting until a callback is interested, keeping delta bypass cheap.
+pub(super) fn callback_method<'a>(
+    codec: &'a str,
+    kind: &'a str,
+    request_id: u64,
+    sequence: u64,
+) -> Result<impl std::fmt::Display + 'a> {
+    // Three separators and two fixed-width hexadecimal IDs accompany the names.
+    if !valid_id(codec) || !valid_id(kind) || codec.len() + kind.len() + 35 > 256 {
+        return Err(refusal(502, "invalid codec callback method"));
+    }
+    Ok(CallbackMethod {
+        codec,
+        kind,
+        request_id,
+        sequence,
+    })
+}
+
+struct CallbackMethod<'a> {
+    codec: &'a str,
+    kind: &'a str,
+    request_id: u64,
+    sequence: u64,
+}
+impl std::fmt::Display for CallbackMethod<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}/{}/{:016x}/{:016x}",
+            self.codec, self.kind, self.request_id, self.sequence
+        )
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CodecRegistration {
     pub(crate) codec: Arc<dyn CodecPlugin>,
@@ -217,10 +253,8 @@ pub(super) async fn filter_owned(
             {
                 return Err(refusal(502, "invalid codec message kind"));
             }
-            let method = format!(
-                "{codec_id}/{}/{request_id:016x}/{sequence:016x}",
-                message.kind
-            );
+            let method =
+                callback_method(codec_id, message.kind, request_id, *sequence)?.to_string();
             let message_sequence = *sequence;
             *sequence = sequence
                 .checked_add(1)
@@ -322,6 +356,38 @@ enum NativeReply {
 mod tests {
     use super::*;
     use proxy_pingora::http_ingress::message_codec::{WebSocketCodec, resolve};
+
+    #[test]
+    fn callback_method_rejects_ambiguous_components_and_honors_native_boundary() {
+        for invalid in [
+            "",
+            "response/create",
+            "response\0create",
+            "Response",
+            "réponse",
+        ] {
+            assert!(callback_method("codec.v1", invalid, 1, 2).is_err());
+            assert!(callback_method(invalid, "response.create", 1, 2).is_err());
+        }
+        let codec = "c".repeat(128);
+        let kind = "k".repeat(93);
+        let method = callback_method(&codec, &kind, u64::MAX, 0)
+            .unwrap()
+            .to_string();
+        assert_eq!(method.len(), 256);
+        assert_eq!(
+            method.split('/').collect::<Vec<_>>(),
+            vec![
+                codec.as_str(),
+                kind.as_str(),
+                "ffffffffffffffff",
+                "0000000000000000"
+            ]
+        );
+        assert!(callback_method(&codec, &"k".repeat(94), 1, 2).is_err());
+        assert!(callback_method("c", &"k".repeat(129), 1, 2).is_err());
+        assert!(callback_method(&"c".repeat(129), "k", 1, 2).is_err());
+    }
 
     #[tokio::test]
     async fn http_json_gate_emits_original_wire_only_at_eof() {

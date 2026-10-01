@@ -442,6 +442,8 @@ async fn evaluate(
     };
     let response = matches!(original.side, Side::Upstream(_));
     let number = *sequence;
+    // Validate even bypassed custom events, without formatting delta methods.
+    message_codec::callback_method(registration.codec.id(), message.kind, request_id, number)?;
     *sequence = sequence
         .checked_add(1)
         .ok_or_else(|| refusal(400, "message sequence exhausted"))?;
@@ -453,14 +455,16 @@ async fn evaluate(
             .message
             .as_ref()
             .unwrap_or(message);
+        let method = message_codec::callback_method(
+            registration.codec.id(),
+            current.kind,
+            request_id,
+            number,
+        )?;
         if !callback.interested(response, current.kind) {
             continue;
         }
-        let method = format!(
-            "{}/{}/{request_id:016x}/{number:016x}",
-            registration.codec.id(),
-            current.kind
-        );
+        let method = method.to_string();
         let started = Instant::now();
         let reply = callback
             .decide(
@@ -629,4 +633,34 @@ fn replacement(
         message: event.message,
         wire: event.wire,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn malformed_codec_kind_is_rejected_even_without_interested_callbacks() {
+        let registration = message_codec::CodecRegistration {
+            codec: Arc::new(proxy_pingora::http_ingress::message_codec::WebSocketCodec),
+            callbacks: vec![],
+        };
+        for side in [Side::Downstream, Side::Upstream(1)] {
+            let message = Message {
+                side,
+                message: Some(proxy_protocols::message_codec::Message {
+                    kind: "response/create",
+                    payload: Bytes::from_static(b"{}"),
+                }),
+                wire: vec![],
+            };
+            let mut sequence = 7;
+            assert!(
+                evaluate(&registration, &message, &mut sequence, 1, 1024, None)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(sequence, 7);
+        }
+    }
 }
