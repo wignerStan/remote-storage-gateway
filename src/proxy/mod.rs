@@ -2,7 +2,18 @@
 mod body;
 mod carrier;
 mod headers;
+mod native_hooks;
 mod policy;
+pub use native_hooks::{NativeHookContext, NativeHookProxy};
+
+/// The actual Pingora trait and types used by trusted native hook implementations.
+pub mod native {
+    pub use bytes::Bytes;
+    pub use pingora_core::{protocols::Digest, upstreams::peer::HttpPeer};
+    pub use pingora_error::{Error, ErrorType, Result};
+    pub use pingora_http::{RequestHeader, ResponseHeader};
+    pub use pingora_proxy::{ProxyHttp, Session};
+}
 use diagnostic_output::runtime::JsonBodyCapture;
 use policy::{CompiledPolicy, snapshot_request};
 
@@ -142,6 +153,20 @@ pub struct NativeProxy {
     body_dump_limit: usize,
 }
 impl NativeProxy {
+    /// Grant a trusted native Pingora implementation its async request-body hook
+    /// after an admitted protocol upgrade. All other handler hooks stay inactive;
+    /// this worker continues to own routing, admission and metadata boundaries.
+    ///
+    /// Chunks are raw native bytes, not complete WebSocket frames or messages.
+    /// A handler buffering partial frames must leave `Some(Bytes::new())`, since
+    /// `None` signals EOF to Pingora. Its own context is created lazily per request.
+    pub fn with_upgraded_request_body<P>(self, handler: Arc<P>) -> NativeHookProxy<P>
+    where
+        P: ProxyHttp + Send + Sync + 'static,
+        P::CTX: Send + Sync,
+    {
+        NativeHookProxy::new(self, handler)
+    }
     pub fn new(
         config: ProxyConfig,
         control: Arc<WorkerControl>,
