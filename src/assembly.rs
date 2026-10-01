@@ -66,12 +66,23 @@ impl NativeSet {
 }
 
 pub fn run(config: Config) -> Result<(), String> {
+    let options = config.process_options(false)?;
+    run_with_options(config, options)
+}
+
+pub fn run_with_options(
+    config: Config,
+    options: proxy_pingora::http_ingress::ProcessOptions,
+) -> Result<(), String> {
     config.validate()?;
+    options.validate()?;
     let _logging = diagnostic_output::runtime::init_logging(config.logging())
         .map_err(|error| format!("logging initialization failed: {error}"))?;
     let listener = config.listener();
-    proxy_pingora::ProxyFacility::run_proxy(listener, move || assemble(config))
-        .map_err(|error| error.to_string())
+    proxy_pingora::ProxyFacility::run_proxy_with_options(listener, options, move || {
+        assemble(config)
+    })
+    .map_err(|error| error.to_string())
 }
 
 pub async fn assemble(config: Config) -> Result<NativeProxy, String> {
@@ -150,6 +161,14 @@ pub async fn assemble_with_codecs(
                 let expected =
                     Expected::v1(&callback.package, &callback.variant, kind, language, unload);
                 let options = CallbackOptions {
+                    scheduling: match callback.scheduling {
+                        crate::config::CallbackScheduling::Blocking => {
+                            plugin_loading::CallbackScheduling::Blocking
+                        }
+                        crate::config::CallbackScheduling::Inline => {
+                            plugin_loading::CallbackScheduling::Inline
+                        }
+                    },
                     max_inflight: callback.max_inflight,
                     max_waiting: callback.max_waiting,
                     instances: callback.instances,
