@@ -13,8 +13,11 @@ upgrade runtime directory are trusted operator inputs. Protect them against
 untrusted writes and run with only the OS privileges and credentials required by
 the deployment. The default data listener is `127.0.0.1:6188`; configuration can
 expose it more broadly. TLS termination and request authorization are deployment
-choices. A configured upstream/proxy is host-selected; metadata callbacks cannot
-replace the configured upstream or create arbitrary dial targets.
+choices. The configured upstream origin remains host-selected. Native callbacks
+with `message_actions` may select an origin-form path and replace the upstream
+session. The separate `message_proxy` grant also permits selecting an account
+proxy or direct egress; grant it only to trusted policy that may choose those
+network destinations. Ordinary metadata callbacks do not receive this authority.
 
 `callbacks[].backend` defaults to `native`. Native Rust/Go Objects or Functions
 execute in this worker process (`execution: "in_process"` is the only supported
@@ -94,6 +97,20 @@ accumulation; exhaustion fails with 503. Idle framed sessions release reservatio
 new partial messages reacquire them. These limits do not cap every host allocator,
 compiler memory or native callback CPU use. Callback queues, call/startup/shutdown
 deadlines and Wasm instruction fuel have separate meanings; see the common model.
+
+Native Object graphs bind only the selected dependency closure, retain the graph
+until outstanding callbacks finish, and scope dependency dispatch to its caller.
+Graph configuration and native dependency artifacts are trusted operator inputs;
+these host-interface checks do not sandbox native code.
+
+Controlled [message sessions](docs/message-sessions.md) preserve the original
+request admission across upstream generations. Message/header/proxy actions are
+validated before connection side effects. Wire, decoded messages and data queued
+while policy runs share a reservation acquired before accumulation; queue and
+assembly bounds apply while heartbeats continue. Synthetic `transport.closed`
+notifications let interested Objects release per-session state independently of
+the participant that owns request completion. Native callback deadlines still
+cannot terminate native execution.
 
 Pools keep Object state across requests and use request affinity. Instances do
 not automatically correspond to tenants. Upstream pool isolation incorporates
