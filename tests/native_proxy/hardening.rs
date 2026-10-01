@@ -30,8 +30,7 @@ fn artifact(dir: &Path, kind: &str, payload: &str, deny: bool) -> std::path::Pat
     path
 }
 fn config(origin: SocketAddr, artifact: &Path, responses: bool) -> serde_json::Value {
-    json!({"upstream":format!("http://{origin}"),"native_helper":env!("CARGO_BIN_EXE_pingora-worker"),
-        "callbacks":[{"path":artifact,"package":"worker.metadata.test","message_codec":"openai.chat_completions.v1","message_responses":responses}]})
+    json!({"upstream":format!("http://{origin}"),"callbacks":[{"path":artifact,"package":"worker.metadata.test","message_codec":"openai.chat_completions.v1","message_responses":responses}]})
 }
 async fn post(client: &mut TcpStream, length: usize) {
     client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
@@ -164,8 +163,7 @@ async fn idle_websockets_release_buffers_but_partial_messages_reserve_them() {
         }).await;
         let dir = tempfile::tempdir().unwrap();
         let artifact = artifact(dir.path(), "response.text", "unused", false);
-        let cfg = json!({"upstream":format!("http://{}",origin.address),"native_helper":env!("CARGO_BIN_EXE_pingora-worker"),
-            "inspection":{"max_buffered_bytes":8*1024*1024+8*1024*1024+512*1024},
+        let cfg = json!({"upstream":format!("http://{}",origin.address),"inspection":{"max_buffered_bytes":8*1024*1024+8*1024*1024+512*1024},
             "callbacks":[{"path":artifact,"package":"worker.metadata.test","message_codec":"websocket.v1"}]});
         let proxy = pingora_worker::assembly::assemble(serde_json::from_value(cfg).unwrap()).await.unwrap();
         let worker = serve_engine(proxy.clone()).await;
@@ -214,8 +212,7 @@ async fn reply_capable_custom_codec_cannot_omit_its_upstream_frame_guard() {
         }).await;
         let dir = tempfile::tempdir().unwrap();
         let library = artifact(dir.path(), "response.text", "unused", false);
-        let cfg = json!({"upstream":format!("http://{}",origin.address),"native_helper":env!("CARGO_BIN_EXE_pingora-worker"),
-            "callbacks":[{"path":library,"package":"worker.metadata.test","message_codec":"test.reply","message_responses":true}]});
+        let cfg = json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"path":library,"package":"worker.metadata.test","message_codec":"test.reply","message_responses":true}]});
         let proxy = pingora_worker::assembly::assemble_with_codecs(serde_json::from_value(cfg).unwrap(), vec![Arc::new(MissingGuard)]).await.unwrap();
         let worker = serve_engine(proxy.clone()).await;
         let mut client = TcpStream::connect(worker.address).await.unwrap();

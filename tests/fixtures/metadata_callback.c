@@ -32,7 +32,13 @@ static uint32_t replace(uint8_t **owned, size_t *length, InfraBytes value) {
     *length = value.len;
     return INFRA_OK;
 }
+#ifdef TEST_EXPECT_PID
+#include <unistd.h>
+#endif
 static uint32_t init(const InfraHostV1 *host, uint64_t *state) {
+#ifdef TEST_EXPECT_PID
+    if ((unsigned long)getpid() != TEST_EXPECT_PID) return INFRA_FAILED;
+#endif
     (void)host; *state = 1; return INFRA_OK;
 }
 static uint32_t open_callback(uint64_t state, uint64_t binding, InfraBytes input, uint64_t *handle) {
