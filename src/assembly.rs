@@ -1,12 +1,12 @@
 //! Process assembly selects and installs infra owners before opening the data path.
 use crate::{
-    config::{Config, Language},
+    config::{CallbackExecution, Config, Language},
     native_notifier::{FRAME_LIMIT, NativeNotifier},
     proxy::{NativeProxy, ProxyContract},
 };
 use plugin_abi::{Expected, Limits, UnloadPolicy};
 use plugin_lifecycle::{Composition, Resource, ResourceSchema, Reversal};
-use plugin_loading::Callback;
+use plugin_loading::{Callback, CallbackOptions};
 use proxy_pingora::worker::{WorkerControl, surface::Callbacks};
 use std::sync::Arc;
 
@@ -20,6 +20,20 @@ const MANAGEMENT: Resource = Resource {
     provides: &["management-entry"],
     requires: &[],
 };
+const NATIVE_ACTIONS: Resource = Resource {
+    id: "native-actions",
+    provides: &["native-actions"],
+    requires: &[
+        plugin_lifecycle::ResourceRequirement {
+            resource: "native-notifiers",
+            capability: "worker-notifiers",
+        },
+        plugin_lifecycle::ResourceRequirement {
+            resource: "management-entry",
+            capability: "management-entry",
+        },
+    ],
+};
 struct NativeSet {
     callbacks: Vec<Arc<dyn Callbacks<ProxyContract>>>,
     instances: Vec<Arc<Callback>>,
@@ -27,10 +41,20 @@ struct NativeSet {
 }
 impl NativeSet {
     async fn shutdown(&self) -> Result<(), String> {
+        for instance in &self.instances {
+            instance.withdraw();
+        }
+        let mut pending = tokio::task::JoinSet::new();
+        for instance in &self.instances {
+            let instance = Arc::clone(instance);
+            pending.spawn(async move { instance.shutdown().await });
+        }
         let mut errors = Vec::new();
-        for instance in self.instances.iter().rev() {
-            if let Err(error) = instance.shutdown().await {
-                errors.push(error);
+        while let Some(result) = pending.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => errors.push(error),
+                Err(error) => errors.push(error.to_string()),
             }
         }
         if errors.is_empty() {
@@ -41,7 +65,10 @@ impl NativeSet {
     }
 }
 
-pub fn run(config: Config) -> Result<(), String> {
+pub fn run(mut config: Config) -> Result<(), String> {
+    if config.native_helper.is_none() {
+        config.native_helper = Some(std::env::current_exe().map_err(|error| error.to_string())?);
+    }
     config.validate()?;
     let _logging = diagnostic_output::runtime::init_logging(config.logging())
         .map_err(|error| format!("logging initialization failed: {error}"))?;
@@ -64,9 +91,29 @@ pub async fn assemble(config: Config) -> Result<NativeProxy, String> {
 /// Install trusted host codec implementations before admitting native callbacks.
 pub async fn assemble_with_codecs(
     config: Config,
-    codecs: Vec<Arc<dyn proxy_pingora::http_ingress::message_codec::CodecPlugin>>,
+    mut codecs: Vec<Arc<dyn proxy_pingora::http_ingress::message_codec::CodecPlugin>>,
 ) -> Result<NativeProxy, String> {
     config.validate()?;
+    for callback in &config.callbacks {
+        if let Some(descriptor) = &callback.codec_descriptor {
+            codecs.push(Arc::new(
+                proxy_pingora::http_ingress::message_codec::RegisteredCodec::new(
+                    descriptor.clone(),
+                )?,
+            ));
+        }
+    }
+    if config.native_helper.is_none()
+        && config
+            .callbacks
+            .iter()
+            .any(|callback| matches!(callback.execution, CallbackExecution::Isolated))
+    {
+        return Err(
+            "isolated callbacks require native_helper when assembling from a library".into(),
+        );
+    }
+    let native_helper = config.native_helper.clone();
     let codecs = crate::proxy::message_codec::resolve_all(
         &codecs,
         config
@@ -76,8 +123,11 @@ pub async fn assemble_with_codecs(
     )?;
     let proxy_config = config.proxy_config()?;
     let body_limit = config.logging.body_max_bytes;
+    let inspection = config.inspection;
     let control = Arc::new(WorkerControl::default());
-    let resources = if config.management.is_some() {
+    let resources = if config.callbacks.iter().any(|c| !c.actions.is_empty()) {
+        vec![NOTIFIERS, MANAGEMENT, NATIVE_ACTIONS]
+    } else if config.management.is_some() {
         vec![NOTIFIERS, MANAGEMENT]
     } else {
         vec![NOTIFIERS]
@@ -92,8 +142,10 @@ pub async fn assemble_with_codecs(
             Ok((callback, input))
         })
         .collect::<Result<Vec<_>, &str>>()?;
+    let (actions_send, actions_receive) = tokio::sync::oneshot::channel();
     composition
         .install(NOTIFIERS, async move {
+            let mut actions = Vec::new();
             let mut native = NativeSet {
                 callbacks: Vec::new(),
                 instances: Vec::new(),
@@ -111,25 +163,62 @@ pub async fn assemble_with_codecs(
                 let kind = callback.plugin_kind();
                 let expected =
                     Expected::v1(&callback.package, &callback.variant, kind, language, unload);
-                let result = unsafe {
-                    // The configuration explicitly selects trusted native code. Infra
-                    // validates its exact identity and owns every call and cleanup lease.
-                    Callback::load(
-                        callback.path.clone(),
-                        expected,
-                        Limits {
-                            max_input: if callback.message_codec.is_some() {
-                                crate::proxy::message_codec::MESSAGE_LIMIT
-                            } else {
-                                FRAME_LIMIT
-                            },
-                            max_reply: FRAME_LIMIT,
-                            max_inflight: callback.max_inflight,
-                        },
-                        input,
-                        callback.max_inflight,
-                    )
-                    .await
+                let options = CallbackOptions {
+                    max_inflight: callback.max_inflight,
+                    max_waiting: callback.max_waiting,
+                    instances: callback.instances,
+                    startup_timeout: std::time::Duration::from_millis(callback.startup_timeout_ms),
+                    shutdown_timeout: std::time::Duration::from_millis(
+                        callback.shutdown_timeout_ms,
+                    ),
+                };
+                let mut limits = Limits {
+                    max_input: if callback.message_codec.is_some() {
+                        inspection.max_message_bytes.max(FRAME_LIMIT)
+                    } else {
+                        FRAME_LIMIT
+                    },
+                    max_reply: callback
+                        .actions
+                        .iter()
+                        .map(|a| a.contract.max_output)
+                        .max()
+                        .unwrap_or(0)
+                        .max(FRAME_LIMIT),
+                    max_inflight: callback.max_inflight,
+                };
+                limits.max_input = limits.max_input.max(
+                    callback
+                        .actions
+                        .iter()
+                        .map(|a| a.contract.max_input)
+                        .max()
+                        .unwrap_or(0),
+                );
+                let result = match callback.execution {
+                    CallbackExecution::Isolated => {
+                        Callback::load_isolated(
+                            native_helper.clone().ok_or("missing native helper")?,
+                            callback.path.clone(),
+                            expected,
+                            limits,
+                            input,
+                            options,
+                        )
+                        .await
+                    }
+                    CallbackExecution::InProcess => unsafe {
+                        // The configuration explicitly selects trusted native code. Infra
+                        // validates its exact identity and owns every call and cleanup lease.
+                        Callback::load_with_options(
+                            callback.path.clone(),
+                            expected,
+                            limits,
+                            input,
+                            options,
+                        )
+                        .await
+                    },
                 };
                 let instance = match result {
                     Ok(instance) => Arc::new(instance),
@@ -143,12 +232,32 @@ pub async fn assemble_with_codecs(
                     }
                 };
                 native.instances.push(Arc::clone(&instance));
+                for action in &callback.actions {
+                    actions.push(action_router::Action {
+                        contract: action.contract.clone(),
+                        bindings: action.bindings.clone(),
+                        handler: Arc::new(
+                            match plugin_loading::CallbackAction::new(
+                                Arc::clone(&instance),
+                                action.method.clone(),
+                                std::time::Duration::from_millis(callback.timeout_ms),
+                            ) {
+                                Ok(handler) => handler,
+                                Err(error) => {
+                                    let _ = native.shutdown().await;
+                                    return Err(error);
+                                }
+                            },
+                        ),
+                    });
+                }
                 if let Some(codec) = &callback.message_codec {
                     native.messages.push((
                         codec.clone(),
                         crate::proxy::message_codec::MessageCallback::new(
                             Arc::clone(&instance),
                             std::time::Duration::from_millis(callback.timeout_ms),
+                            callback.message_responses,
                         ),
                     ));
                 }
@@ -163,6 +272,7 @@ pub async fn assemble_with_codecs(
                     }
                 }
             }
+            let _ = actions_send.send(actions);
             let native = Arc::new(native);
             let owner = Arc::clone(&native);
             let inverse: Reversal =
@@ -170,22 +280,51 @@ pub async fn assemble_with_codecs(
             Ok((native, inverse))
         })
         .await?;
+    let actions = match actions_receive.await {
+        Ok(actions) => actions,
+        Err(_) => {
+            let cleanup = composition.rollback().await;
+            return Err(format!(
+                "native action setup canceled; cleanup: {cleanup:?}"
+            ));
+        }
+    };
     let entry = if let Some(management) = config.management {
-        Some(
-            crate::entry::install(
-                &mut composition,
-                MANAGEMENT,
-                crate::entry::Registration {
-                    worker_control: Some(Arc::clone(&control)),
-                    endpoint: network_sockets::LocalEndpoint::Tcp(management.listen),
-                    permissions: network_sockets::SocketPermissions::default(),
-                },
-            )
-            .await?,
+        let installed = crate::entry::install(
+            &mut composition,
+            MANAGEMENT,
+            crate::entry::Registration {
+                worker_control: Some(Arc::clone(&control)),
+                endpoint: network_sockets::LocalEndpoint::Tcp(management.listen),
+                permissions: network_sockets::SocketPermissions::default(),
+            },
         )
+        .await;
+        match installed {
+            Ok(entry) => Some(entry),
+            Err(error) => {
+                let cleanup = composition.rollback().await;
+                return Err(format!(
+                    "management setup failed: {error}; cleanup: {cleanup:?}"
+                ));
+            }
+        }
     } else {
         None
     };
+    if let Some(entry) = &entry {
+        if !actions.is_empty() {
+            if let Err(error) = entry
+                .install_actions(&mut composition, NATIVE_ACTIONS, "native", actions)
+                .await
+            {
+                let cleanup = composition.rollback().await;
+                return Err(format!(
+                    "native action publication failed: {error}; cleanup: {cleanup:?}"
+                ));
+            }
+        }
+    }
     let runtime = composition.commit().await?;
     let native = runtime.require::<NativeSet>(NOTIFIERS.id)?.enter()?;
     let callbacks = native.callbacks.clone();
@@ -205,6 +344,7 @@ pub async fn assemble_with_codecs(
         return Err(error);
     }
     Ok(proxy
+        .with_inspection_limits(inspection)
         .with_message_callbacks(messages, codecs)
         .with_body_dump_limit(body_limit)
         .with_runtime(runtime))

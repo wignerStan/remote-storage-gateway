@@ -10,6 +10,7 @@ description = "Plugin-composed Pingora worker process and shared management entr
 resolver = "3"
 
 [dependencies]
+admission-gate = { path = "../infra/rust/crates/processes/admission-gate" }
 llm-protocols = { path = "../infra/rust/crates/ai/llm-protocols", features = ["codec"] }
 text-processing = { path = "../infra/rust/crates/text/processing", features = ["json"] }
 stream-transfer = { path = "../infra/rust/crates/networking/stream/transfer" }
@@ -44,3 +45,6 @@ tonic = { version = "0.14", features = ["transport"] }
 tower = { version = "0.5", features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 tempfile = "3"
+
+[patch.crates-io]
+pingora-proxy = { path = "../infra/rust/vendor/pingora-proxy" }
