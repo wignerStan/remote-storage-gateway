@@ -66,6 +66,8 @@ fn settings(
         pool_idle_timeout: WAIT,
         pool_key: 42,
         reuse,
+        http2: Default::default(),
+        websocket_keepalive: Default::default(),
     }
 }
 #[cfg(unix)]
@@ -74,6 +76,8 @@ mod api_codecs;
 #[cfg(unix)]
 #[path = "native_proxy/hardening.rs"]
 mod hardening;
+#[path = "native_proxy/http2_keepalive.rs"]
+mod http2_keepalive;
 #[path = "native_proxy/native_hooks.rs"]
 mod native_hooks;
 #[path = "native_proxy/pipeline.rs"]
@@ -367,7 +371,10 @@ async fn websocket_upgrade_keeps_native_full_duplex_stream() {
         assert_eq!(frame, [0x81, 0x82, 1, 2, 3, 4, b'h' ^ 1, b'i' ^ 2]);
         socket.write_all(&[0x81, 2, b'h', b'i']).await.unwrap();
     }).await;
-    let worker = worker(settings(origin.address, None, "", true)).await;
+    let mut config = settings(origin.address, None, "", true);
+    config.http2.enabled = true;
+    config.http2.ping_interval_ms = Some(20);
+    let worker = worker(config).await;
     timeout(WAIT, async {
         let mut client = TcpStream::connect(worker.address).await.unwrap();
         client.write_all(b"GET /socket HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();
@@ -382,3 +389,6 @@ async fn websocket_upgrade_keeps_native_full_duplex_stream() {
 #[cfg(unix)]
 #[path = "native_proxy/go_carrier.rs"]
 mod go_carrier;
+
+#[path = "native_proxy/websocket_keepalive.rs"]
+mod websocket_keepalive;

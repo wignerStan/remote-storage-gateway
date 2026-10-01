@@ -4,6 +4,21 @@ use super::*;
 #[async_trait]
 impl ProxyHttp for NativeProxy {
     type CTX = ProxyContext;
+    fn upstream_upgrade_keepalive(
+        &self,
+        session: &Session,
+        _ctx: &Self::CTX,
+    ) -> Result<Option<Box<dyn pingora_proxy::UpgradedKeepalive>>> {
+        self.config.websocket_keepalive.build(session, true)
+    }
+    fn downstream_upgrade_keepalive(
+        &self,
+        session: &Session,
+        _ctx: &Self::CTX,
+    ) -> Result<Option<Box<dyn pingora_proxy::UpgradedKeepalive>>> {
+        self.config.websocket_keepalive.build(session, false)
+    }
+
     fn new_ctx(&self) -> Self::CTX {
         let request_id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
         ProxyContext {
@@ -167,7 +182,7 @@ impl ProxyHttp for NativeProxy {
     }
     async fn upstream_peer(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         if ctx.peer_selected {
@@ -199,6 +214,8 @@ impl ProxyHttp for NativeProxy {
         ctx.reuse = self.config.reuse && selected == PoolDecision::Reuse && poolable;
         // The installation key is never logged. Bypass adds a request-private
         // scope, without rehashing fixed URLs, and sets zero idle time below.
+        let use_http2 =
+            self.config.http2.enabled && !session.req_header().headers.contains_key("upgrade");
         let key = if ctx.reuse {
             self.pool_key
         } else {
@@ -207,6 +224,12 @@ impl ProxyHttp for NativeProxy {
             ctx.request_id.hash(&mut key);
             key.finish()
         };
+        // Native HttpPeer hashing omits ALPN. Explicitly separate H1 upgrade
+        // peers from H2-capable peers, including H1 fallback connections.
+        let mut protocol_key = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut protocol_key);
+        use_http2.hash(&mut protocol_key);
+        let key = protocol_key.finish();
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let mut peer = tokio::time::timeout_at(
             deadline,
@@ -222,6 +245,18 @@ impl ProxyHttp for NativeProxy {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return Err(refusal(504, "upstream acquisition deadline exceeded"));
+        }
+        // HTTP/1 upgrades cannot travel on an HTTP/2 stream.
+        if use_http2 {
+            peer.options.set_http_version(
+                2,
+                if self.config.upstream.scheme() == "https" {
+                    1
+                } else {
+                    2
+                },
+            );
+            peer.options.h2_ping_interval = self.config.http2.ping_interval();
         }
         peer.options.connection_timeout = Some(remaining);
         peer.options.total_connection_timeout = Some(remaining);

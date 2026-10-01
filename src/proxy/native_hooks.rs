@@ -43,6 +43,21 @@ where
     P::CTX: Send + Sync,
 {
     type CTX = NativeHookContext<P::CTX>;
+    fn upstream_upgrade_keepalive(
+        &self,
+        session: &Session,
+        ctx: &Self::CTX,
+    ) -> Result<Option<Box<dyn pingora_proxy::UpgradedKeepalive>>> {
+        self.worker.upstream_upgrade_keepalive(session, &ctx.worker)
+    }
+    fn downstream_upgrade_keepalive(
+        &self,
+        session: &Session,
+        ctx: &Self::CTX,
+    ) -> Result<Option<Box<dyn pingora_proxy::UpgradedKeepalive>>> {
+        self.worker
+            .downstream_upgrade_keepalive(session, &ctx.worker)
+    }
     fn new_ctx(&self) -> Self::CTX {
         NativeHookContext {
             worker: self.worker.new_ctx(),
