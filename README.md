@@ -2,7 +2,7 @@
 
 A runnable Pingora application with explicit configuration, assembly, plugin
 runtime and process entry. `main` loads configuration; `assembly` installs native
-notifier Functions and optional management entry in `plugin-lifecycle`; the
+notifier Function/Object instances and optional management entry in `plugin-lifecycle`; the
 native `pingora-proxy::ProxyHttp` engine owns forwarding, streaming, upgrades and
 connection pooling. The library also exposes composition APIs for other selected
 applications. Business policy belongs to separately installed plugins.
@@ -52,7 +52,7 @@ through cancellation until the synchronous operation really returns.
 
 ## Native metadata callbacks
 
-Each `callbacks` entry explicitly selects a trusted native Function library:
+Each `callbacks` entry explicitly selects a trusted native Function or Object library:
 
 ```json
 {
@@ -67,6 +67,19 @@ Each `callbacks` entry explicitly selects a trusted native Function library:
   "max_inflight": 32
 }
 ```
+
+Callback `kind` accepts `function` or `object`. When omitted, Rust defaults to
+Function and Go defaults to Object; `language: "go"` therefore loads Object ABI
+libraries such as `libopenai_oauth.so` without pretending they are Functions.
+Explicit kind selection must match the artifact header. Tools are not notifier
+callbacks. Object methods are serialized per instance within the callback deadline,
+while Functions retain configured concurrency. Go libraries remain mapped after
+shutdown; active calls drain before native instance cleanup.
+
+Both kinds must implement the configured hook methods and the metadata/reply
+contract below. Object loading does not translate arbitrary business method
+contracts or grant dependency bindings; dependency-bearing instances belong in
+runtime graph composition.
 
 The native worker enforces this sequence:
 
@@ -101,7 +114,7 @@ phases have bounded waits, and acquisition shares its budget with control hooks
 and name resolution. Failed/cancelled or repeated lifecycle phases cannot advance
 or report completion. Automatic request replay remains disabled.
 
-The Function method is the hook name. Its bounded JSON frame contains
+The callback method is the hook name. Its bounded JSON frame contains
 `version: 1`, `hook`, `request_id`, `method`, query-free `path`, optional `status`,
 `upstream_reused`, `completed`, and ordered `headers` pairs selected by the explicit
 allowlist. No headers are exposed by default. Bodies, Futures and asynchronous
@@ -268,7 +281,7 @@ carrier does not decode them.
 Header-only messages do not provide a payload/EOF transform call, so transforms
 must not synthesize bodies or require EOF side effects for those messages.
 Transforms on protocol upgrades are rejected; opaque tunnel bytes remain native.
-Native Function callbacks configure metadata/control only; their ABI cannot
+Native Function/Object callbacks configure metadata/control only; their ABI cannot
 install a Rust chunk processor or transport an asynchronous body. The C ABI carries bounded non-streaming metadata/control
 frames and explicit resource handles while async response streams stay with the
 native host/egress owner. Borrowed frame views can be passed through synchronous
