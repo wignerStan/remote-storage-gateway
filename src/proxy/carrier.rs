@@ -652,15 +652,31 @@ impl ProxyHttp for NativeProxy {
                     ctx.inspection_permit.clone(),
                     true,
                     self.inspection.limits.max_message_bytes,
-                    None,
+                    (ctx.upgraded && registration.codec.supports_message_replies())
+                        .then_some(registration.codec.as_ref()),
                 ),
             )
             .await
             .map_err(|_| refusal(504, "response callback deadline exceeded"))
             .and_then(|r| r);
-            if let Err(error) = result {
-                ctx.exchange()?.fail();
-                return Err(error);
+            let downstream = match result {
+                Ok(frame) => frame,
+                Err(error) => {
+                    ctx.exchange()?.fail();
+                    return Err(error);
+                }
+            };
+            // This body is the downstream write. A terminal error frame replaces
+            // the completion here; write_response_body would send it upstream.
+            if let Some(frame) = downstream {
+                let mut combined = bytes::BytesMut::new();
+                if let Some(existing) = body.take() {
+                    if !existing.is_empty() {
+                        combined.extend_from_slice(&existing);
+                    }
+                }
+                combined.extend_from_slice(&frame);
+                *body = Some(combined.freeze());
             }
             ctx.message_failed = previously_failed;
             if !decoder.has_pending() {
@@ -762,10 +778,19 @@ impl NativeProxy {
                 && registration.codec.supports_message_replies()
             {
                 use proxy_pingora::http_ingress::message_codec::CodecPlugin;
-                ctx.response_decoder = proxy_pingora::http_ingress::message_codec::WebSocketCodec
-                    .create_upgrade_response_with_limits(
+                // The API decoder classifies response.completed and response.done.
+                // A raw websocket decoder would leave both as "text", so the
+                // terminal decision would never run. Deltas stay uncalled.
+                ctx.response_decoder = registration.codec.create_upgrade_response_with_limits(
                     self.inspection.limits.max_message_bytes,
                 )?;
+                if ctx.response_decoder.is_none() {
+                    ctx.response_decoder =
+                        proxy_pingora::http_ingress::message_codec::WebSocketCodec
+                            .create_upgrade_response_with_limits(
+                                self.inspection.limits.max_message_bytes,
+                            )?;
+                }
                 ctx.inspection_permit = None;
                 return Ok(());
             }

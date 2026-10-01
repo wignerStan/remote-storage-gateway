@@ -184,6 +184,7 @@ fn responses_plugin(dir: &Path, mode: &str) -> std::path::PathBuf {
     let define = match mode {
         "error" => "-DTEST_RESPONSES_ERROR=1",
         "bad" => "-DTEST_RESPONSES_BAD=1",
+        "terminal" => "-DTEST_RESPONSES_TERMINAL=1",
         _ => panic!("unknown responses plugin mode"),
     };
     assert!(
@@ -327,6 +328,84 @@ async fn responses_non_error_reply_forwards_nothing() {
         let _ = client.read_to_end(&mut rest).await;
         assert!(rest.is_empty(), "{}", String::from_utf8_lossy(&rest));
         assert_eq!(received.load(Ordering::SeqCst), 0);
+        drop(client);
+        drop(worker);
+        proxy.shutdown().await.unwrap();
+    }).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_terminal_frame_can_replace_a_completion_without_gating_deltas() {
+    fn frame(payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x81, 0x80 | payload.len() as u8];
+        out.extend_from_slice(&[1, 2, 3, 4]);
+        out.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(i, b)| b ^ [1, 2, 3, 4][i % 4]),
+        );
+        out
+    }
+    timeout(WAIT, async {
+        let create = frame(br#"{"type":"response.create","input":[]}"#);
+        let again = frame(br#"{"type":"response.create","input":[{"type":"message"}]}"#);
+        let delta_payload = br#"{"type":"response.output_text.delta","delta":"hello"}"#;
+        let zero_payload = br#"{"type":"response.completed","response":{"usage":{"input_tokens_details":{"cached_tokens":0}}}}"#;
+        let warm_payload = br#"{"type":"response.completed","response":{"usage":{"input_tokens_details":{"cached_tokens":12}}}}"#;
+        let delta_frame = server_text(delta_payload);
+        let warm_frame = server_text(warm_payload);
+        let error_frame = server_text(REPLAY_DOCUMENT);
+        let create_wire = create.clone();
+        let again_wire = again.clone();
+        let delta_up = delta_frame.clone();
+        let zero_up = server_text(zero_payload);
+        let warm_up = warm_frame.clone();
+        let origin = listen(move |mut socket| {
+            let create_wire = create_wire.clone();
+            let again_wire = again_wire.clone();
+            let delta_up = delta_up.clone();
+            let zero_up = zero_up.clone();
+            let warm_up = warm_up.clone();
+            async move {
+                head(&mut socket).await;
+                socket.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n").await.unwrap();
+                let mut actual = vec![0; create_wire.len()];
+                socket.read_exact(&mut actual).await.unwrap();
+                assert_eq!(actual, create_wire);
+                socket.write_all(&delta_up).await.unwrap();
+                socket.write_all(&zero_up).await.unwrap();
+                let mut actual = vec![0; again_wire.len()];
+                socket.read_exact(&mut actual).await.unwrap();
+                assert_eq!(actual, again_wire);
+                socket.write_all(&warm_up).await.unwrap();
+            }
+        }).await;
+        let dir = tempfile::tempdir().unwrap();
+        let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({
+            "native_helper": env!("CARGO_BIN_EXE_pingora-worker"),
+            "upstream": format!("http://{}", origin.address),
+            "callbacks": [{
+                "path": responses_plugin(dir.path(), "terminal"),
+                "package": "worker.metadata.test",
+                "message_codec": "codex.responses.v1"
+            }]
+        })).unwrap()).await.unwrap();
+        let worker = serve_engine(proxy.clone()).await;
+        let mut client = TcpStream::connect(worker.address).await.unwrap();
+        client.write_all(b"GET /backend-api/codex/responses HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();
+        assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
+        client.write_all(&create).await.unwrap();
+        let mut got = vec![0; delta_frame.len()];
+        client.read_exact(&mut got).await.unwrap();
+        assert_eq!(got, delta_frame, "delta was gated or rewritten");
+        let mut got = vec![0; error_frame.len()];
+        client.read_exact(&mut got).await.unwrap();
+        assert_eq!(got, error_frame);
+        client.write_all(&again).await.unwrap();
+        let mut got = vec![0; warm_frame.len()];
+        client.read_exact(&mut got).await.unwrap();
+        assert_eq!(got, warm_frame, "nonzero completion was replaced");
         drop(client);
         drop(worker);
         proxy.shutdown().await.unwrap();
