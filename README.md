@@ -304,6 +304,7 @@ native callback execution, without its own API decoder implementation.
 | `openai.responses.v1` | HTTP(S) POST and WS GET `/responses`, `/v1/responses` |
 | `anthropic.messages.v1` | HTTP(S) POST `/v1/messages` |
 | `codex.responses.v1` | HTTP(S) POST and WS GET `/backend-api/codex/responses` |
+| `google.gemini.v1` | HTTP(S) POST `/v1{beta}/models/{model}:generateContent` or `:streamGenerateContent` (`v1` and `v1beta`) |
 
 For example, add `"message_codec": "openai.responses.v1"` to a trusted native
 callback. Metadata hooks may be omitted for a message-only callback. All grants
@@ -312,6 +313,10 @@ receive its messages, preserving their registration order.
 
 The existing binary method form is `<codec>/<kind>/<request>/<sequence>`.
 HTTP kinds are `chat_completion`, `message`, `response`, and `responses_lite.full`.
+Gemini uses `generate_content` and `stream_generate_content`; the entire request
+JSON is delivered once, including `contents`, tools, and unknown fields. Query
+parameters such as `alt=sse` remain unchanged. This adapter covers Gemini REST,
+not Gemini Live WebSocket or Vertex AI resource paths.
 Responses WS kinds are `response.create`, `responses_lite.create`, and
 `responses_lite.delta`. Lite is detected per message from the actual Codex wire
 marker; incremental input and continuation IDs are preserved, not reconstructed.
@@ -323,6 +328,7 @@ native approval; upstream headers may already have been dispatched. Early origin
 success cannot acknowledge an uninspected request; early origin rejection can be
 relayed without successful completion. HTTP zstd is decoded within strict limits
 for inspection while original compressed wire and headers are forwarded unchanged.
+The codec delegates bounded zstd decoding to infra’s `compression` primitive wrapper.
 The current input/decoded limit is 1 MiB with at most 4096 retained segments.
 Inspected WS connections negotiate uncompressed framing. Upstream response bodies,
 including SSE and WS deltas, continue unchanged through the native response path.
