@@ -55,6 +55,23 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
         *out = (InfraOwnedBytes){0};
         return result;
     }
+#ifdef TEST_RESPONSE_REPLY
+#ifndef TEST_RESPONSE_REQUEST_METHOD
+#define TEST_RESPONSE_REQUEST_METHOD "openai.chat_completions.v1/chat_completion/"
+#endif
+    {
+        const char *request_prefix = TEST_RESPONSE_REQUEST_METHOD;
+        const char *response_prefix = TEST_RESPONSE_METHOD;
+        const uint8_t allow[] = {0};
+        if (method.len == strlen(request_prefix) + 33 && !memcmp(method.ptr, request_prefix, strlen(request_prefix)))
+            return copy_reply(allow, sizeof(allow), out);
+        if (method.len != strlen(response_prefix) + 33 || memcmp(method.ptr, response_prefix, strlen(response_prefix))) return INFRA_FAILED;
+        const char *expected = TEST_RESPONSE_BODY;
+        if (input.len != strlen(expected) || memcmp(input.ptr, expected, input.len)) return INFRA_FAILED;
+        const uint8_t action[] = {TEST_RESPONSE_REPLY};
+        return copy_reply(action, sizeof(action), out);
+    }
+#endif
 #ifdef TEST_REALTIME_REPLY
     {
         const char *prefix = TEST_REALTIME_METHOD;
@@ -78,6 +95,39 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
         sequence++;
         const uint8_t action[] = {0};
         return copy_reply(action, sizeof(action), out);
+    }
+#endif
+#ifdef TEST_RESPONSES_ERROR
+    {
+        /* First response.create is the CLIProxyAPI previous-response document.
+           The next one on the same socket is allowed through. */
+        static size_t sequence;
+        const char *kind = "response.create/";
+        const char *prefix = TEST_API_PREFIX;
+        size_t n = strlen(prefix), k = strlen(kind);
+        if (sequence > 1 || method.len != n + k + 33 || memcmp(method.ptr, prefix, n)
+                || memcmp(method.ptr + n, kind, k) || method.ptr[method.len - 1] != '0' + sequence
+                || input.len < 2 || input.ptr[0] != '{') return INFRA_FAILED;
+        sequence++;
+        if (sequence == 1) {
+            static const char document[] =
+                "{\"type\":\"error\",\"status\":409,\"error\":{\"message\":\"Previous response was not found. Retrying the full request.\",\"type\":\"invalid_request_error\",\"code\":\"previous_response_not_found\",\"param\":\"previous_response_id\"}}";
+            return copy_reply((const uint8_t *)document, sizeof(document) - 1, out);
+        }
+        const uint8_t action[] = {0};
+        return copy_reply(action, sizeof(action), out);
+    }
+#endif
+#ifdef TEST_RESPONSES_BAD
+    {
+        const char *kind = "response.create/";
+        const char *prefix = TEST_API_PREFIX;
+        size_t n = strlen(prefix), k = strlen(kind);
+        if (method.len != n + k + 33 || memcmp(method.ptr, prefix, n)
+                || memcmp(method.ptr + n, kind, k) || input.len < 2 || input.ptr[0] != '{')
+            return INFRA_FAILED;
+        static const char document[] = "{\"type\":\"response.completed\"}";
+        return copy_reply((const uint8_t *)document, sizeof(document) - 1, out);
     }
 #endif
 #ifdef TEST_API_REPLY

@@ -71,6 +71,9 @@ fn settings(
 #[cfg(unix)]
 #[path = "native_proxy/api_codecs.rs"]
 mod api_codecs;
+#[cfg(unix)]
+#[path = "native_proxy/hardening.rs"]
+mod hardening;
 #[path = "native_proxy/native_hooks.rs"]
 mod native_hooks;
 #[path = "native_proxy/pipeline.rs"]
@@ -78,6 +81,9 @@ mod pipeline;
 #[cfg(unix)]
 #[path = "native_proxy/realtime_codecs.rs"]
 mod realtime_codecs;
+#[cfg(unix)]
+#[path = "native_proxy/response_streams.rs"]
+mod response_streams;
 #[cfg(unix)]
 #[path = "native_proxy/websocket_abi.rs"]
 mod websocket_abi;
@@ -372,3 +378,7 @@ async fn websocket_upgrade_keeps_native_full_duplex_stream() {
         assert_eq!(reply, [0x81, 2, b'h', b'i']);
     }).await.unwrap();
 }
+
+#[cfg(unix)]
+#[path = "native_proxy/go_carrier.rs"]
+mod go_carrier;

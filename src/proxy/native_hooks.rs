@@ -50,6 +50,12 @@ where
             native_failed: false,
         }
     }
+    fn request_body_deadline(&self, ctx: &Self::CTX) -> Option<tokio::time::Instant> {
+        self.worker.request_body_deadline(&ctx.worker)
+    }
+    fn response_body_deadline(&self, ctx: &Self::CTX) -> Option<tokio::time::Instant> {
+        self.worker.response_body_deadline(&ctx.worker)
+    }
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         active(ctx)?;
         self.worker.request_filter(session, &mut ctx.worker).await
@@ -172,7 +178,7 @@ where
             .response_filter(session, response, &mut ctx.worker)
             .await
     }
-    fn response_body_filter(
+    async fn async_response_body_filter(
         &self,
         session: &mut Session,
         body: &mut Option<bytes::Bytes>,
@@ -181,7 +187,8 @@ where
     ) -> Result<Option<Duration>> {
         active(ctx)?;
         self.worker
-            .response_body_filter(session, body, end, &mut ctx.worker)
+            .async_response_body_filter(session, body, end, &mut ctx.worker)
+            .await
     }
     async fn logging(&self, session: &mut Session, error: Option<&Error>, ctx: &mut Self::CTX) {
         if ctx.native_failed {

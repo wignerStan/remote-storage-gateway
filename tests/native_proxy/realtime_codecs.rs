@@ -86,7 +86,7 @@ async fn webrtc_signaling_gates_complete_offers_and_preserves_answer_and_locatio
             }).await;
             let dir = tempfile::tempdir().unwrap();
             let callback = artifact(dir.path(), id, kind, body, 0);
-            let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"path":callback,"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
+            let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({"native_helper":env!("CARGO_BIN_EXE_pingora-worker"),"upstream":format!("http://{}",origin.address),"callbacks":[{"path":callback,"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
             let worker = serve_engine(proxy.clone()).await;
             let mut client = TcpStream::connect(worker.address).await.unwrap();
             let coding = if body == BACKEND { "Content-Encoding: zstd\r\n" } else { "" };
@@ -136,7 +136,7 @@ async fn realtime_and_live_sidebands_inspect_complete_messages_and_keep_server_d
             let first = frame(1, false, &EVENT.as_bytes()[..8]);
             let ping = frame(9, true, b"p");
             let last = frame(0, true, &EVENT.as_bytes()[8..]);
-            let expected = [first.clone(), ping.clone(), last.clone()].concat();
+            let expected = [ping.clone(), first.clone(), last.clone()].concat();
             let received = Arc::new(AtomicUsize::new(0)); let observed = received.clone();
             let origin = listen(move |mut socket| {
                 let expected = expected.clone(); let observed = observed.clone();
@@ -153,13 +153,15 @@ async fn realtime_and_live_sidebands_inspect_complete_messages_and_keep_server_d
             }).await;
             let dir = tempfile::tempdir().unwrap();
             let callback = artifact(dir.path(), id, "session.update", EVENT, 0);
-            let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"path":callback,"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
+            let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({"native_helper":env!("CARGO_BIN_EXE_pingora-worker"),"upstream":format!("http://{}",origin.address),"callbacks":[{"path":callback,"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
             let worker = serve_engine(proxy.clone()).await; let mut client = TcpStream::connect(worker.address).await.unwrap();
             client.write_all(format!("GET {route} HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Extensions: permessage-deflate\r\n\r\n").as_bytes()).await.unwrap();
             assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
             client.write_all(&first).await.unwrap(); client.write_all(&ping).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            assert_eq!(received.load(Ordering::SeqCst), 0);
+            timeout(WAIT, async {
+                while received.load(Ordering::SeqCst) < ping.len() { tokio::time::sleep(Duration::from_millis(1)).await; }
+            }).await.expect("heartbeat blocked behind incomplete message");
+            assert_eq!(received.load(Ordering::SeqCst), ping.len());
             client.write_all(&last).await.unwrap(); let mut delta = [0;5]; client.read_exact(&mut delta).await.unwrap();
             assert_eq!(delta, [0x82,3,0,255,7]);
             drop(client); drop(worker); proxy.shutdown().await.unwrap();
@@ -182,7 +184,7 @@ async fn denied_webrtc_offer_never_reaches_upstream_body() {
         let dir = tempfile::tempdir().unwrap();
         let id = "openai.realtime.v1";
         let callback = artifact(dir.path(), id, "realtime.call.sdp", SDP, 1);
-        let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"path":callback,"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
+        let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({"native_helper":env!("CARGO_BIN_EXE_pingora-worker"),"upstream":format!("http://{}",origin.address),"callbacks":[{"path":callback,"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
         let worker = serve_engine(proxy.clone()).await; let mut client = TcpStream::connect(worker.address).await.unwrap();
         client.write_all(format!("POST /v1/realtime/calls HTTP/1.1\r\nHost: local\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{SDP}", SDP.len()).as_bytes()).await.unwrap();
         let mut response = Vec::new(); let _ = client.read_to_end(&mut response).await;

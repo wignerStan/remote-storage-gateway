@@ -66,7 +66,7 @@ async fn api_routes_share_one_worker_and_only_inspect_complete_http_bodies() {
         }}).await;
         let dir=tempfile::tempdir().unwrap();
         let callbacks=ROUTES.iter().map(|(id,_)|json!({"path":artifact(dir.path(),id,"0"),"package":"worker.metadata.test","message_codec":id})).collect::<Vec<_>>();
-        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":callbacks})).unwrap()).await.unwrap();
+        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"native_helper":env!("CARGO_BIN_EXE_pingora-worker"),"upstream":format!("http://{}",origin.address),"callbacks":callbacks})).unwrap()).await.unwrap();
         let worker=serve_engine(proxy.clone()).await;
         let mut previous_bytes=0;
         for (i,(id,path)) in ROUTES.iter().chain([("google.gemini.v1", "/v1/models/gemini-test:streamGenerateContent?alt=sse")].iter()).enumerate(){
@@ -97,7 +97,7 @@ async fn http_message_denial_forwards_no_body_bytes() {
             let mut byte=[0];if socket.read(&mut byte).await.unwrap_or(0)>0{observed.fetch_add(1,Ordering::SeqCst);}
         }}).await;
         let dir=tempfile::tempdir().unwrap();let id=ROUTES[0].0;
-        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"path":artifact(dir.path(),id,"1"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
+        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"native_helper":env!("CARGO_BIN_EXE_pingora-worker"),"upstream":format!("http://{}",origin.address),"callbacks":[{"path":artifact(dir.path(),id,"1"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
         let worker=serve_engine(proxy.clone()).await;let mut client=TcpStream::connect(worker.address).await.unwrap();
         client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: local\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",BODY.len()).as_bytes()).await.unwrap();client.write_all(BODY).await.unwrap();
         let mut response=Vec::new();let _=client.read_to_end(&mut response).await;
@@ -115,7 +115,7 @@ async fn early_upstream_success_cannot_bypass_http_message_inspection() {
                 socket.write_all(format!("HTTP/1.1 {status} Early\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
             }).await;
             let dir=tempfile::tempdir().unwrap();let id=ROUTES[0].0;
-            let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"path":artifact(dir.path(),id,"0"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
+            let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"native_helper":env!("CARGO_BIN_EXE_pingora-worker"),"upstream":format!("http://{}",origin.address),"callbacks":[{"path":artifact(dir.path(),id,"0"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
             let worker=serve_engine(proxy.clone()).await;let mut client=TcpStream::connect(worker.address).await.unwrap();
             client.write_all(b"POST /v1/chat/completions HTTP/1.1\r\nHost: local\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{").await.unwrap();
             let response=head(&mut client).await;
@@ -167,11 +167,168 @@ async fn responses_ws_selects_lite_per_message_and_keeps_upstream_delta_opaque()
             }
         }).await;
         let dir=tempfile::tempdir().unwrap();let id="openai.responses.v1";
-        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"path":artifact(dir.path(),id,"responses"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
+        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"native_helper":env!("CARGO_BIN_EXE_pingora-worker"),"upstream":format!("http://{}",origin.address),"callbacks":[{"path":artifact(dir.path(),id,"responses"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
         let worker=serve_engine(proxy.clone()).await;let mut client=TcpStream::connect(worker.address).await.unwrap();
         client.write_all(b"GET /v1/responses HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\r\n").await.unwrap();
         assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
         for frame in frames.iter() {client.write_all(frame).await.unwrap();let mut delta=[0;5];client.read_exact(&mut delta).await.unwrap();assert_eq!(delta,[0x82,3,0,255,7]);}
         drop(client);drop(worker);proxy.shutdown().await.unwrap();
+    }).await.unwrap();
+}
+
+const REPLAY_DOCUMENT: &[u8] = br#"{"type":"error","status":409,"error":{"message":"Previous response was not found. Retrying the full request.","type":"invalid_request_error","code":"previous_response_not_found","param":"previous_response_id"}}"#;
+
+fn responses_plugin(dir: &Path, mode: &str) -> std::path::PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = dir.join(format!("codex.responses.v1.{mode}.so"));
+    let define = match mode {
+        "error" => "-DTEST_RESPONSES_ERROR=1",
+        "bad" => "-DTEST_RESPONSES_BAD=1",
+        _ => panic!("unknown responses plugin mode"),
+    };
+    assert!(
+        Command::new("cc")
+            .args(["-shared", "-fPIC", "-std=c11", "-I"])
+            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg("-DTEST_PLUGIN_KIND=INFRA_PLUGIN_OBJECT")
+            .arg(define)
+            .arg("-DTEST_API_PREFIX=\"codex.responses.v1/\"")
+            .arg(root.join("tests/fixtures/metadata_callback.c"))
+            .arg("-o")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    path
+}
+
+fn server_text(payload: &[u8]) -> Vec<u8> {
+    let mut wire = vec![0x81];
+    if payload.len() < 126 {
+        wire.push(payload.len() as u8);
+    } else {
+        wire.push(126);
+        wire.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    }
+    wire.extend_from_slice(payload);
+    wire
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_error_document_is_written_and_the_socket_stays_open() {
+    fn frame(payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x81];
+        out.push(0x80 | payload.len() as u8);
+        out.extend_from_slice(&[9, 8, 7, 6]);
+        out.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(i, b)| b ^ [9, 8, 7, 6][i % 4]),
+        );
+        out
+    }
+    timeout(WAIT, async {
+        let continued = frame(br#"{"type":"response.create","previous_response_id":"resp_old","input":[]}"#);
+        let replay = frame(br#"{"type":"response.create","input":[{"type":"message","role":"user","content":"continue the patch"}]}"#);
+        let continued_wire = continued.clone();
+        let replay_wire = replay.clone();
+        let origin = listen(move |mut socket| {
+            let continued_wire = continued_wire.clone();
+            let replay_wire = replay_wire.clone();
+            async move {
+                let request = String::from_utf8(head(&mut socket).await).unwrap();
+                assert!(request.starts_with("GET /backend-api/codex/responses "));
+                socket.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n").await.unwrap();
+                // Leave one upstream frame incomplete while the client receives
+                // its local structured error. Injection must not split this frame.
+                socket.write_all(&[0x82]).await.unwrap();
+                let mut actual = vec![0; replay_wire.len()];
+                socket.read_exact(&mut actual).await.unwrap();
+                assert_ne!(actual, continued_wire, "previous_response frame reached upstream");
+                assert_eq!(actual, replay_wire);
+                socket.write_all(&[1, 7]).await.unwrap();
+            }
+        }).await;
+        let dir = tempfile::tempdir().unwrap();
+        let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({
+            "native_helper": env!("CARGO_BIN_EXE_pingora-worker"),
+            "upstream": format!("http://{}", origin.address),
+            "callbacks": [{
+                "path": responses_plugin(dir.path(), "error"),
+                "package": "worker.metadata.test",
+                "message_codec": "codex.responses.v1"
+            }]
+        })).unwrap()).await.unwrap();
+        let worker = serve_engine(proxy.clone()).await;
+        let mut client = TcpStream::connect(worker.address).await.unwrap();
+        client.write_all(b"GET /backend-api/codex/responses HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();
+        assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
+        assert!(timeout(Duration::from_millis(30), client.read_u8()).await.is_err(), "partial upstream frame escaped reply guard");
+        client.write_all(&continued).await.unwrap();
+        let expected = server_text(REPLAY_DOCUMENT);
+        let mut error_frame = vec![0; expected.len()];
+        client.read_exact(&mut error_frame).await.unwrap();
+        assert_eq!(error_frame, expected);
+        client.write_all(&replay).await.unwrap();
+        let mut delta = [0; 3];
+        client.read_exact(&mut delta).await.unwrap();
+        assert_eq!(delta, [0x82, 1, 7]);
+        drop(client);
+        drop(worker);
+        proxy.shutdown().await.unwrap();
+    }).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_non_error_reply_forwards_nothing() {
+    fn frame(payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x81, 0x80 | payload.len() as u8];
+        out.extend_from_slice(&[1, 2, 3, 4]);
+        out.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(i, b)| b ^ [1, 2, 3, 4][i % 4]),
+        );
+        out
+    }
+    timeout(WAIT, async {
+        let received = Arc::new(AtomicUsize::new(0));
+        let observed = received.clone();
+        let origin = listen(move |mut socket| {
+            let observed = observed.clone();
+            async move {
+                head(&mut socket).await;
+                socket.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n").await.unwrap();
+                let mut byte = [0];
+                if socket.read(&mut byte).await.unwrap_or(0) > 0 {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }).await;
+        let dir = tempfile::tempdir().unwrap();
+        let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({
+            "native_helper": env!("CARGO_BIN_EXE_pingora-worker"),
+            "upstream": format!("http://{}", origin.address),
+            "callbacks": [{
+                "path": responses_plugin(dir.path(), "bad"),
+                "package": "worker.metadata.test",
+                "message_codec": "codex.responses.v1"
+            }]
+        })).unwrap()).await.unwrap();
+        let worker = serve_engine(proxy.clone()).await;
+        let mut client = TcpStream::connect(worker.address).await.unwrap();
+        client.write_all(b"GET /backend-api/codex/responses HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();
+        assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
+        client.write_all(&frame(br#"{"type":"response.create","input":[]}"#)).await.unwrap();
+        let mut rest = Vec::new();
+        let _ = client.read_to_end(&mut rest).await;
+        assert!(rest.is_empty(), "{}", String::from_utf8_lossy(&rest));
+        assert_eq!(received.load(Ordering::SeqCst), 0);
+        drop(client);
+        drop(worker);
+        proxy.shutdown().await.unwrap();
     }).await.unwrap();
 }
