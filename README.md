@@ -175,8 +175,8 @@ logging path. Access and body retention are independent.
 | Pool, dial, and acquired socket decisions | Supported before native dispatch | Worker controls and Pingora |
 | Bidirectional bytes after 101 | Transparent native forwarding with backpressure | Pingora carrier |
 | Async upgraded client-byte filter | Opt-in native `ProxyHttp::request_body_filter` adapter | Trusted compiled assembly |
-| WebSocket frame parsing / per-frame Go calls | Not implemented by this worker | Requires a native codec/carrier adapter |
-| Whole-message business decisions or rewrites | Not implemented by this worker | Plugin policy over an explicit message capability |
+| WebSocket client message inspection | Opt-in `websocket.v1` codec; native ABI call per complete message | Protocol codec and granted plugin |
+| Whole-message decisions | Ordered allow/deny callbacks; no payload rewrites | Native plugin policy |
 
 HTTP body transforms and body dumps are bypassed after upgrade. Handshake fields
 (`Sec-WebSocket-Key`, `Accept`, `Version`, `Protocol`, `Extensions`, with the
@@ -233,10 +233,63 @@ invocations poison the wrapper context and cannot report successful completion.
 When buffering incomplete messages, use `Some(Bytes::new())` to withhold output;
 `None` has Pingora EOF semantics. Raw chunks are neither frames nor complete
 messages: any codec must bound accumulation, retain preread bytes and account for
-fragmentation/masking/extensions. This API does not create a new Go frame ABI or
-alter the existing native metadata grants. Upstream delta bodies remain on the
+fragmentation/masking/extensions. The raw-hook API does not itself decode messages; the separately configured
+message codec runs before an additional trusted raw handler. Upstream delta bodies remain on the
 ordinary uninspected response path. An awaited client filter can still delay
 same-connection response scheduling, so its latency must be bounded and measured.
+
+## Protocol codec plugins and the message ABI
+
+The common boundary owns byte lifetimes, ordered decisions, cancellation and
+backpressure. Protocol codecs are separate compiled Rust plugins. The built-in
+`websocket.v1` codec handles client WebSocket framing; it does not parse application
+JSON, OpenAI events, or any other business format. Native Object plugins interpret
+those complete message payloads. Upstream response/delta bytes stay transparent.
+
+A callback opts in with `"message_codec": "websocket.v1"`. Without a codec grant,
+the existing opaque upgraded-byte path is unchanged. Custom compiled codecs can
+be supplied through `assembly::assemble_with_codecs(config, codecs)`; each implementation of
+`proxy::message_codec::CodecPlugin` supplies its identifier, upgrade selection,
+handshake validation and per-connection decoder. Registration resolves an explicit
+identifier before native plugins are loaded. This initial assembly selects one
+codec for its message callbacks; conflicting selections are rejected. This is a Rust extension
+point, not a new dynamic `.so` codec loader. A codec must bound pending input,
+message output and frame bookkeeping and fail closed on malformed/incomplete input.
+
+The initial native message contract uses the existing plugin ABI `call` operation:
+
+| Field | Encoding |
+| --- | --- |
+| Method | `websocket.v1/text/<request>/<sequence>` or `websocket.v1/binary/<request>/<sequence>` |
+| Request and sequence | Exactly 16 lowercase hexadecimal digits each; sequence starts at zero and counts data messages |
+| Input | Complete unmasked payload; text is valid UTF-8, binary is arbitrary bytes |
+| Reply | Exactly one byte: `0` allows, `1` denies and terminates; every other reply is an error |
+
+Control frames do not invoke business callbacks or advance the message sequence.
+The same complete payload allocation is shared across callbacks in registration
+order. Each native call borrows its input pointer only until that call returns;
+Go code must not retain that pointer or slice. Explicitly copying is required if
+plugin code needs ownership beyond the call. A timed-out host waiter does not free
+input still used by native code: the loading owner retains it and its admission
+permit until actual completion. Payloads are not JSON/base64 encoded across ABI.
+
+The codec retains original masked wire bytes and decodes payload once. A single
+contiguous accepted frame can reuse its original wire allocation. Fragmented or
+batched output may need one bounded coalescing copy because Pingora's body hook
+returns one `Bytes`; this is not a zero-copy claim for the entire path. Limits are
+1 MiB decoded payload, an additional 64 KiB wire budget, 1024 frames and 4096
+retained wire segments. An emitted batch may contain both previous buffered wire
+and current input, bounded to twice the wire budget. Whole messages are withheld until accepted; control frames interleaved within a fragmented
+message are retained in wire order. This can delay control delivery until message
+completion. A valid close discards withheld unfinished data and forwards the close
+frame. Pending work is bounded by carrier timeouts and codec limits.
+
+The WebSocket codec validates masked client framing, continuation/control rules,
+length encoding, text UTF-8 and close payloads. Negotiated extensions are rejected
+before downstream 101 because this implementation does not decode compression.
+It does not terminate WebSocket sessions or synthesize protocol responses. A
+failure closes the proxy path. The existing notifier authentication, admission,
+`before_upstream_send` and `before_downstream_write` stages remain authoritative.
 
 ## Ownership and calls
 
