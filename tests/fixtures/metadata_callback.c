@@ -2,6 +2,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ABI-shaped C fixture; Go identity exercises loader policy, not Go runtime code. */
+#ifndef TEST_PLUGIN_KIND
+#define TEST_PLUGIN_KIND INFRA_PLUGIN_FUNCTION
+#endif
+#ifndef TEST_PLUGIN_LANGUAGE
+#define TEST_PLUGIN_LANGUAGE INFRA_LANGUAGE_RUST
+#endif
+#ifndef TEST_UNLOAD_POLICY
+#define TEST_UNLOAD_POLICY INFRA_UNLOAD_EXPLICIT
+#endif
+
 /* Test-only retained snapshots let Rust inspect the actual native callback frame. */
 static uint8_t *reply_bytes, *last_frame;
 static size_t reply_len, frame_len;
@@ -63,8 +74,8 @@ static uint32_t close_callback(uint64_t state, uint64_t handle) {
 static uint32_t destroy(uint64_t state) { (void)state; return INFRA_OK; }
 static void free_reply(uint64_t state, InfraOwnedBytes reply) { (void)state; free(reply.ptr); }
 static const InfraPluginV1 table = {
-    { sizeof(InfraPluginV1), INFRA_PLUGIN_ABI_VERSION, INFRA_PLUGIN_FUNCTION,
-      INFRA_LANGUAGE_RUST, INFRA_UNLOAD_EXPLICIT,
+    { sizeof(InfraPluginV1), INFRA_PLUGIN_ABI_VERSION, TEST_PLUGIN_KIND,
+      TEST_PLUGIN_LANGUAGE, TEST_UNLOAD_POLICY,
       { (const uint8_t *)"worker.metadata.test", 20 }, { (const uint8_t *)"native", 6 } },
     init, open_callback, call, next, close_callback, destroy, free_reply
 };
