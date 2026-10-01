@@ -4,11 +4,18 @@ use proxy_pingora::http_ingress::ProxyLifecycle;
 use serde_json::json;
 use std::{path::Path, process::Command};
 const BODY: &[u8] = br#"{"messages":[],"unknown":"preserved"}"#;
-const ROUTES: [(&str, &str); 4] = [
+const GEMINI_BODY: &[u8] = br#"{"contents":[{"parts":[{"text":"hello"}]}],"unknown":"preserved"}"#;
+const GEMINI_SSE: &[u8] =
+    b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n";
+const ROUTES: [(&str, &str); 5] = [
     ("openai.chat_completions.v1", "/v1/chat/completions"),
     ("openai.responses.v1", "/v1/responses"),
     ("anthropic.messages.v1", "/v1/messages"),
     ("codex.responses.v1", "/backend-api/codex/responses"),
+    (
+        "google.gemini.v1",
+        "/v1beta/models/gemini-test:generateContent",
+    ),
 ];
 fn artifact(dir: &Path, id: &str, action: &str) -> std::path::PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -24,6 +31,10 @@ fn artifact(dir: &Path, id: &str, action: &str) -> std::path::PathBuf {
                 format!("-DTEST_API_REPLY={action}")
             })
             .arg(format!("-DTEST_API_PREFIX=\"{id}/\""))
+            .arg(format!(
+                "-DTEST_GEMINI_BODY={}",
+                u8::from(id == "google.gemini.v1")
+            ))
             .arg(root.join("tests/fixtures/metadata_callback.c"))
             .arg("-o")
             .arg(&path)
@@ -43,20 +54,24 @@ async fn api_routes_share_one_worker_and_only_inspect_complete_http_bodies() {
             assert!(request.starts_with(b"POST "));
             let head_text=String::from_utf8(request).unwrap();
             let compressed=head_text.to_ascii_lowercase().contains("content-encoding: zstd");
-            let expected=if compressed{zstd::stream::encode_all(BODY,3).unwrap()}else{BODY.to_vec()};
+            let payload=if head_text.contains("/models/"){GEMINI_BODY}else{BODY};
+            let expected=if compressed{zstd::stream::encode_all(payload,3).unwrap()}else{payload.to_vec()};
             let mut body=vec![0;expected.len()];
             for byte in &mut body { *byte=socket.read_u8().await.unwrap(); observed.fetch_add(1,Ordering::SeqCst); }
             assert_eq!(body,expected);
             // Upstream event bytes remain untouched; no event-to-chat projection.
-            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\ndata: [DONE]\n\n").await.unwrap();
+            let reply=if head_text.contains("/models/"){GEMINI_SSE}else{b"data: [DONE]\n\n"};
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",reply.len()).as_bytes()).await.unwrap();
+            socket.write_all(reply).await.unwrap();
         }}).await;
         let dir=tempfile::tempdir().unwrap();
         let callbacks=ROUTES.iter().map(|(id,_)|json!({"path":artifact(dir.path(),id,"0"),"package":"worker.metadata.test","message_codec":id})).collect::<Vec<_>>();
         let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":callbacks})).unwrap()).await.unwrap();
         let worker=serve_engine(proxy.clone()).await;
         let mut previous_bytes=0;
-        for (i,(_,path)) in ROUTES.iter().enumerate(){
-            let wire=if i==1{zstd::stream::encode_all(BODY,3).unwrap()}else{BODY.to_vec()};
+        for (i,(id,path)) in ROUTES.iter().chain([("google.gemini.v1", "/v1/models/gemini-test:streamGenerateContent?alt=sse")].iter()).enumerate(){
+            let payload=if *id=="google.gemini.v1"{GEMINI_BODY}else{BODY};
+            let wire=if i==1{zstd::stream::encode_all(payload,3).unwrap()}else{payload.to_vec()};
             let coding=if i==1{"Content-Encoding: zstd\r\n"}else{""};
             let mut client=TcpStream::connect(worker.address).await.unwrap();
             let marker=if *path=="/v1/responses"{"x-openai-internal-codex-responses-lite: true\r\n"}else{""};
@@ -67,7 +82,7 @@ async fn api_routes_share_one_worker_and_only_inspect_complete_http_bodies() {
             client.write_all(&wire[8..]).await.unwrap();
             let mut reply=Vec::new();client.read_to_end(&mut reply).await.unwrap();
             assert!(reply.starts_with(b"HTTP/1.1 200"),"{}",String::from_utf8_lossy(&reply));
-            assert!(reply.ends_with(b"data: [DONE]\n\n"));
+            assert!(reply.ends_with(if *id=="google.gemini.v1"{GEMINI_SSE}else{b"data: [DONE]\n\n"}));
             previous_bytes+=wire.len();
         }
         drop(worker);proxy.shutdown().await.unwrap();

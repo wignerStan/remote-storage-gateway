@@ -72,7 +72,16 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
 #ifdef TEST_API_REPLY
     {
         const char *prefix = TEST_API_PREFIX;
+#if TEST_GEMINI_BODY
+        size_t n = strlen(prefix);
+        const char *kind = "generate_content/";
+        const char *stream_kind = "stream_generate_content/";
+        if (!((method.len == n + strlen(kind) + 33 && !memcmp(method.ptr + n, kind, strlen(kind)))
+                || (method.len == n + strlen(stream_kind) + 33 && !memcmp(method.ptr + n, stream_kind, strlen(stream_kind))))) return INFRA_FAILED;
+        const char *body = "{\"contents\":[{\"parts\":[{\"text\":\"hello\"}]}],\"unknown\":\"preserved\"}";
+#else
         const char *body = "{\"messages\":[],\"unknown\":\"preserved\"}";
+#endif
         if (method.len < strlen(prefix) || memcmp(method.ptr, prefix, strlen(prefix))
                 || input.len != strlen(body) || memcmp(input.ptr, body, input.len)) return INFRA_FAILED;
         const uint8_t action[] = {TEST_API_REPLY};
