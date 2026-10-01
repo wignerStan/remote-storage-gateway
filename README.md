@@ -47,9 +47,9 @@ upstream, bridge and credentials; those keys are never logged. Admitted requests
 are attempted once, with no automatic replay.
 
 SIGTERM/SIGINT stop native workers and pools before plugin teardown. Management
-routes are optional and loopback-only. Callbacks default to separately terminable helper processes. Explicit trusted
-`execution: "in_process"` calls retain their owners through cancellation until
-the synchronous operation really returns.
+routes are optional and loopback-only. Notifier callbacks execute in the worker
+process through the plugin runtime. Native owners remain pinned through
+cancellation until the synchronous operation actually returns.
 
 ## WebSocket Ping/Pong keepalive
 
@@ -144,11 +144,22 @@ artifacts; otherwise `kind` is `object`. Selection must match the artifact heade
 while local Functions retain configured concurrency. `instances` (default 1) adds
 independent Object instances with stable request affinity across metadata and
 message callbacks. `max_waiting` bounds queued inputs separately from active calls.
-Startup, calls and shutdown each have bounded deadlines. A timed-out/crashed
-isolated helper fails closed until reinstallation; in-process Go mappings remain
-retained until process exit. The isolated process is crash/hang containment, not
-a filesystem/network sandbox. Use `execution: "in_process"` only for trusted code
-when the borrowed-pointer fast path is required.
+Startup, calls and shutdown each have bounded host waiting deadlines. The plugin
+runtime stops dispatch to an instance when an admitted call times out or loses
+its waiter. Queued callers are released promptly; active input, handle, library
+and resource reservations remain pinned until actual completion. An affected
+instance stays withdrawn until reinstallation; a queue timeout before admission
+does not withdraw a healthy instance. This never forcibly kills a native thread.
+Go library mappings remain retained until process exit.
+
+`execution` defaults to `"in_process"`, the only supported notifier mode. Remove
+legacy `native_helper` settings and replace `"execution": "isolated"` with
+`"in_process"`; both process-splitting settings are rejected. Worker assembly
+does not spawn callback helpers or marshal notifier messages through IPC. Input
+owners move into runtime jobs without copying their bytes, and reply visitors
+consume the original native allocation before release. Infra's separate process
+adapter remains available to applications that explicitly own a process boundary;
+it is not part of this worker's notifier chain.
 
 Both kinds must implement the configured hook methods and the metadata/reply
 contract below. Object loading does not translate arbitrary business method
@@ -646,10 +657,10 @@ The `tools/plugin-contract` build guard rejects direct net/rpc/fs entry referenc
 selected first-party entry sources, not transitive dependencies, dynamically
 constructed behavior, arbitrary C code, or malicious syscalls. Bootstrap config
 and existing business dependencies still require review; this guard is not proof
-that every transitive side effect has been migrated. Helper processes now contain native crashes and enforce termination deadlines.
-They still inherit OS filesystem/network privileges; hard denial requires deployment
-sandbox policy and mediated tools. In-process codecs/chunk transforms remain
-trusted native code: chunk output bounds do not preempt arbitrary CPU or allocator use.
+that every transitive side effect has been migrated. Runtime admission, ownership
+checks and quarantine do not contain native process crashes or restrict syscalls.
+Notifier plugins and synchronous codecs/chunk transforms remain trusted code;
+bounded host waits cannot forcibly interrupt arbitrary native CPU or allocator use.
 
 The Rust native egress stream remains Rust-local through the provider trait.
 For a client implemented in another language, reuse infra's framed stdio primitive
