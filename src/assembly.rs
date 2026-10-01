@@ -4,9 +4,9 @@ use crate::{
     native_notifier::{FRAME_LIMIT, NativeNotifier},
     proxy::{NativeProxy, ProxyContract},
 };
-use plugin_abi::{Expected, Limits, PluginType, UnloadPolicy};
+use plugin_abi::{Expected, Limits, UnloadPolicy};
 use plugin_lifecycle::{Composition, Resource, ResourceSchema, Reversal};
-use plugin_loading::Function;
+use plugin_loading::Callback;
 use proxy_pingora::worker::{WorkerControl, surface::Callbacks};
 use std::sync::Arc;
 
@@ -22,13 +22,13 @@ const MANAGEMENT: Resource = Resource {
 };
 struct NativeSet {
     callbacks: Vec<Arc<dyn Callbacks<ProxyContract>>>,
-    functions: Vec<Arc<Function>>,
+    instances: Vec<Arc<Callback>>,
 }
 impl NativeSet {
     async fn shutdown(&self) -> Result<(), String> {
         let mut errors = Vec::new();
-        for function in self.functions.iter().rev() {
-            if let Err(error) = function.shutdown().await {
+        for instance in self.instances.iter().rev() {
+            if let Err(error) = instance.shutdown().await {
                 errors.push(error);
             }
         }
@@ -73,7 +73,7 @@ pub async fn assemble(config: Config) -> Result<NativeProxy, String> {
         .install(NOTIFIERS, async move {
             let mut native = NativeSet {
                 callbacks: Vec::new(),
-                functions: Vec::new(),
+                instances: Vec::new(),
             };
             for (callback, input) in callbacks {
                 let language = match callback.language {
@@ -84,17 +84,13 @@ pub async fn assemble(config: Config) -> Result<NativeProxy, String> {
                     Language::Rust => UnloadPolicy::Explicit,
                     Language::Go => UnloadPolicy::Retain,
                 };
-                let expected = Expected::v1(
-                    &callback.package,
-                    &callback.variant,
-                    PluginType::Function,
-                    language,
-                    unload,
-                );
+                let kind = callback.plugin_kind();
+                let expected =
+                    Expected::v1(&callback.package, &callback.variant, kind, language, unload);
                 let result = unsafe {
                     // The configuration explicitly selects trusted native code. Infra
                     // validates its exact identity and owns every call and cleanup lease.
-                    Function::load(
+                    Callback::load(
                         callback.path.clone(),
                         expected,
                         Limits {
@@ -107,19 +103,19 @@ pub async fn assemble(config: Config) -> Result<NativeProxy, String> {
                     )
                     .await
                 };
-                let function = match result {
-                    Ok(function) => Arc::new(function),
-                    Err(_) => {
+                let instance = match result {
+                    Ok(instance) => Arc::new(instance),
+                    Err(error) => {
                         let cleanup = native.shutdown().await;
                         return Err(if cleanup.is_ok() {
-                            "native notifier initialization failed".into()
+                            format!("native notifier initialization failed: {error}")
                         } else {
-                            "native notifier initialization and cleanup failed".into()
+                            format!("native notifier initialization and cleanup failed: {error}")
                         });
                     }
                 };
-                native.functions.push(Arc::clone(&function));
-                match NativeNotifier::new(function, &callback) {
+                native.instances.push(Arc::clone(&instance));
+                match NativeNotifier::new(instance, &callback) {
                     Ok(notifier) => native.callbacks.push(Arc::new(notifier)),
                     Err(error) => {
                         let _ = native.shutdown().await;

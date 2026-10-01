@@ -8,7 +8,7 @@ const CONTINUE: &str = r#"{"version":1,"decision":"continue"}"#;
 
 struct Fixture {
     notifier: NativeNotifier,
-    function: Arc<Function>,
+    function: Arc<Callback>,
     _directory: tempfile::TempDir,
 }
 impl Fixture {
@@ -34,7 +34,7 @@ impl Fixture {
         .unwrap();
         let function = Arc::new(
             unsafe {
-                Function::load(
+                Callback::load(
                     config.path.clone(),
                     Expected::v1(
                         &config.package,
@@ -649,7 +649,7 @@ async fn native_network_chain_defers_stops_at_first_decision_and_propagates_fail
             .unwrap(),
         SocketDecision::Close
     );
-    let inspect = |function: Arc<Function>| async move {
+    let inspect = |function: Arc<Callback>| async move {
         function
             .call_with_reply("inspect", vec![], Duration::from_secs(2), (), |bytes| {
                 serde_json::from_slice::<Value>(bytes)

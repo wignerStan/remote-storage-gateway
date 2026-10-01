@@ -91,7 +91,7 @@ pub struct Management {
 }
 
 /// Native code is explicitly selected by trusted process configuration.
-/// Only the worker's metadata Function contract is admitted here.
+/// Function and Object plugins expose the worker's bounded metadata contract.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeCallback {
@@ -101,6 +101,9 @@ pub struct NativeCallback {
     pub variant: String,
     #[serde(default)]
     pub language: Language,
+    /// Defaults to Function for Rust and Object for Go.
+    #[serde(default)]
+    pub kind: Option<CallbackKind>,
     pub hooks: Vec<String>,
     /// Header metadata explicitly exposed to this trusted callback.
     #[serde(default)]
@@ -118,6 +121,24 @@ pub enum Language {
     #[default]
     Rust,
     Go,
+}
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallbackKind {
+    Function,
+    Object,
+}
+impl NativeCallback {
+    pub fn plugin_kind(&self) -> plugin_abi::PluginType {
+        match self.kind {
+            Some(CallbackKind::Function) => plugin_abi::PluginType::Function,
+            Some(CallbackKind::Object) => plugin_abi::PluginType::Object,
+            None => match self.language {
+                Language::Rust => plugin_abi::PluginType::Function,
+                Language::Go => plugin_abi::PluginType::Object,
+            },
+        }
+    }
 }
 fn listen() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 6188))
@@ -256,5 +277,43 @@ impl Config {
             body_file: self.logging.body_file.as_ref().map(file),
             queue_capacity: self.logging.queue_capacity,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn callback_kind_defaults_follow_language_and_explicit_kinds_are_preserved() {
+        for (language, kind, expected) in [
+            (None, None, plugin_abi::PluginType::Function),
+            (Some("rust"), None, plugin_abi::PluginType::Function),
+            (Some("go"), None, plugin_abi::PluginType::Object),
+            (Some("rust"), Some("object"), plugin_abi::PluginType::Object),
+            (
+                Some("go"),
+                Some("function"),
+                plugin_abi::PluginType::Function,
+            ),
+        ] {
+            let mut input =
+                json!({"path":"callback.so","package":"trusted.metadata","hooks":["pre_routing"]});
+            if let Some(language) = language {
+                input["language"] = json!(language);
+            }
+            if let Some(kind) = kind {
+                input["kind"] = json!(kind);
+            }
+            let callback: NativeCallback = serde_json::from_value(input).unwrap();
+            assert_eq!(callback.plugin_kind(), expected);
+        }
+    }
+
+    #[test]
+    fn tool_plugins_are_not_worker_metadata_callbacks() {
+        let input = json!({"path":"callback.so","package":"trusted.metadata", "kind":"tool", "hooks":["pre_routing"]});
+        assert!(serde_json::from_value::<NativeCallback>(input).is_err());
     }
 }
