@@ -51,6 +51,51 @@ routes are optional and loopback-only. Notifier callbacks execute in the worker
 process through the plugin runtime. Native owners remain pinned through
 cancellation until the synchronous operation actually returns.
 
+## Graceful version updates with listener handoff
+
+On Linux, configure both worker generations with the same native transfer socket:
+
+```json
+{
+  "upgrade": {
+    "socket": "/run/pingora-worker/upgrade.sock",
+    "grace_period_seconds": 1
+  },
+  "shutdown_seconds": 60
+}
+```
+
+Create the socket's parent directory beforehand, owned by the worker user with
+mode `0700`. Keep the data `listen` address unchanged. Start the first generation
+normally. For a binary, configuration or plugin update:
+
+1. Validate the replacement with `--config next.json --check-config --upgrade`.
+2. Start the replacement with `--config next.json --upgrade`. It loads plugins,
+   installs management and validates TLS before waiting for native listener FDs.
+3. Wait for the transfer socket to appear and verify the replacement is still
+   alive, then promptly send **SIGQUIT to the old PID only**. Automate this wait:
+   Pingora currently waits roughly six seconds for the sender. Do not connect a readiness
+   probe to the transfer socket: its next peer must be the old Pingora process.
+4. Verify the replacement serves the data listener. The old generation stops
+   accepting after Pingora's native handoff delay, drains existing requests, then
+   shuts down plugins and flushes logs. Use SIGTERM for shutdown without updating.
+
+Run one replacement at a time, under the same OS identity. Pingora removes the
+transfer socket after receiving descriptors. Its native SIGQUIT path can still
+terminate the old generation if descriptor transfer fails, so never signal it
+before the replacement is waiting. This is native process-generation handoff;
+each generation retains Pingora's multithreaded scheduling and same-process
+notifier callbacks. The update path adds no per-request work or body copies.
+
+The transfer covers the Pingora data listener. The separate loopback management
+server currently needs a different per-generation port, or must be disabled;
+reusing its occupied port fails initialization before handoff. Existing sockets
+and plugin state stay with the old generation; they are not migrated. WebSocket
+and other long-lived connections may drain until `shutdown_seconds` expires,
+then disconnect and require client reconnection. `grace_period_seconds` accepts
+0..3600. The grace period precedes the
+bounded shutdown window; native FD handoff has its own delay as well.
+
 ## WebSocket Ping/Pong keepalive
 
 Transport keepalive is opt-in and independent of message-codec grants. For
@@ -130,6 +175,7 @@ Each `callbacks` entry explicitly selects a trusted native Function or Object li
   "patch_headers": ["x-request-id"],
   "config": {},
   "timeout_ms": 5000,
+  "scheduling": "blocking",
   "max_inflight": 32
 }
 ```
@@ -145,18 +191,33 @@ while local Functions retain configured concurrency. `instances` (default 1) add
 independent Object instances with stable request affinity across metadata and
 message callbacks. `max_waiting` bounds queued inputs separately from active calls.
 Startup, calls and shutdown each have bounded host waiting deadlines. The plugin
-runtime stops dispatch to an instance when an admitted call times out or loses
-its waiter. Queued callers are released promptly; active input, handle, library
+runtime stops dispatch to an instance when a running call times out or loses
+its waiter. Cancellation before native entry discards the queued job without
+withdrawing a healthy instance. Cancellation after native return also leaves the
+instance available. Queued callers are released promptly; active input, handle, library
 and resource reservations remain pinned until actual completion. An affected
 instance stays withdrawn until reinstallation; a queue timeout before admission
 does not withdraw a healthy instance. This never forcibly kills a native thread.
 Go library mappings remain retained until process exit.
 
+`scheduling` defaults to `"blocking"`: bounded native worker threads run calls
+after asynchronous admission. `"inline"` explicitly declares trusted, bounded,
+nonblocking work and runs native entry and reply consumption on the calling
+execution thread after the same asynchronous admission. Scheduling is independent
+of Function/Object identity and Rust/Go language; both modes execute in this
+process. Inline input and ABI reply owners remain local through native return.
+The host cannot enforce the nonblocking declaration or preempt an inline call;
+it checks elapsed deadlines after return. An inline call that blocks stalls its
+calling execution thread. Management action handling already has its own executor;
+inline scheduling uses that action's calling execution thread. This does not pin
+an instance to one OS thread across calls; thread-affine VM adapters must own
+their scheduling separately.
+
 `execution` defaults to `"in_process"`, the only supported notifier mode. Remove
 legacy `native_helper` settings and replace `"execution": "isolated"` with
 `"in_process"`; both process-splitting settings are rejected. Worker assembly
 does not spawn callback helpers or marshal notifier messages through IPC. Input
-owners move into runtime jobs without copying their bytes, and reply visitors
+owners move into blocking runtime jobs without copying their bytes, and reply visitors
 consume the original native allocation before release. Infra's separate process
 adapter remains available to applications that explicitly own a process boundary;
 it is not part of this worker's notifier chain.
