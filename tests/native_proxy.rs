@@ -396,3 +396,7 @@ mod websocket_keepalive;
 #[cfg(unix)]
 #[path = "native_proxy/runtime_ownership.rs"]
 mod runtime_ownership;
+
+#[cfg(feature = "wasm")]
+#[path = "native_proxy/wasm_callbacks.rs"]
+mod wasm_callbacks;

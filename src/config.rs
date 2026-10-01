@@ -163,11 +163,16 @@ impl Default for Inspection {
     }
 }
 
-/// Native code is explicitly selected by trusted process configuration.
-/// Function and Object plugins expose the worker's bounded metadata contract.
+/// Process configuration explicitly selects the callback backend and its grants.
+/// Native Function/Object and optional Wasm Object callbacks share metadata contracts.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeCallback {
+    #[serde(default)]
+    pub backend: CallbackBackend,
+    /// Sandbox bounds apply only to the explicitly selected Wasm backend.
+    #[serde(default)]
+    pub wasm_limits: Option<WasmLimits>,
     pub path: PathBuf,
     pub package: String,
     #[serde(default = "variant")]
@@ -221,6 +226,55 @@ pub struct NativeCallback {
     #[serde(default)]
     pub scheduling: CallbackScheduling,
 }
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallbackBackend {
+    #[default]
+    Native,
+    Wasm,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WasmLimits {
+    pub max_memory_bytes: usize,
+    pub fuel_per_call: u64,
+    pub max_module_bytes: usize,
+    pub max_table_elements: usize,
+}
+impl Default for WasmLimits {
+    fn default() -> Self {
+        Self {
+            max_memory_bytes: 16 * 1024 * 1024,
+            fuel_per_call: 1_000_000,
+            max_module_bytes: 16 * 1024 * 1024,
+            max_table_elements: 4096,
+        }
+    }
+}
+impl WasmLimits {
+    fn validate(self) -> Result<(), String> {
+        #[cfg(feature = "wasm")]
+        {
+            self.sandbox().validate().map_err(|error| error.to_string())
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            let _ = self;
+            Err("Wasm callbacks require the worker wasm feature".into())
+        }
+    }
+    #[cfg(feature = "wasm")]
+    pub(crate) fn sandbox(self) -> plugin_loading::WasmLimits {
+        plugin_loading::WasmLimits {
+            max_memory_bytes: self.max_memory_bytes,
+            fuel_per_call: self.fuel_per_call,
+            max_module_bytes: self.max_module_bytes,
+            max_table_elements: self.max_table_elements,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallbackScheduling {
@@ -321,6 +375,34 @@ impl Config {
         }
         let mut action_bindings = std::collections::BTreeSet::new();
         for callback in &self.callbacks {
+            match callback.backend {
+                CallbackBackend::Native if callback.wasm_limits.is_some() => {
+                    return Err("wasm_limits requires backend wasm".into());
+                }
+                CallbackBackend::Wasm => {
+                    if !cfg!(feature = "wasm") {
+                        return Err("Wasm callbacks require the worker wasm feature".into());
+                    }
+                    if matches!(callback.kind, Some(CallbackKind::Function)) {
+                        return Err("Wasm callbacks support only Object kind".into());
+                    }
+                    if callback.scheduling == CallbackScheduling::Inline {
+                        return Err("Wasm callbacks require blocking scheduling".into());
+                    }
+                    let sandbox = callback.wasm_limits.unwrap_or_default();
+                    sandbox.validate()?;
+                    if sandbox
+                        .max_memory_bytes
+                        .checked_mul(callback.instances)
+                        .is_none_or(|bytes| bytes > 512 * 1024 * 1024)
+                    {
+                        return Err(
+                            "Wasm callback instance pool memory must not exceed 512 MiB".into()
+                        );
+                    }
+                }
+                CallbackBackend::Native => {}
+            }
             if let Some(descriptor) = &callback.codec_descriptor {
                 if callback.message_codec.as_deref() != Some(&descriptor.id) {
                     return Err(
@@ -532,6 +614,89 @@ mod tests {
             assert_eq!(callback.plugin_kind(), expected);
             assert!(callback.message_codec.is_none());
         }
+    }
+
+    #[test]
+    fn callback_backend_defaults_to_native_and_rejects_sandbox_on_native() {
+        let mut input = selected_callback();
+        let callback: NativeCallback = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(callback.backend, CallbackBackend::Native);
+        assert!(configured(input.clone()).validate().is_ok());
+        input["wasm_limits"] = json!({});
+        assert!(
+            configured(input)
+                .validate()
+                .unwrap_err()
+                .contains("requires backend wasm")
+        );
+    }
+
+    #[test]
+    fn wasm_backend_requires_feature_object_and_blocking_execution() {
+        let mut input = selected_callback();
+        input["backend"] = json!("wasm");
+        let result = configured(input.clone()).validate();
+        if cfg!(feature = "wasm") {
+            assert!(result.is_ok());
+            input["kind"] = json!("function");
+            assert!(
+                configured(input.clone())
+                    .validate()
+                    .unwrap_err()
+                    .contains("only Object")
+            );
+            input["kind"] = json!("object");
+            input["scheduling"] = json!("inline");
+            assert!(
+                configured(input.clone())
+                    .validate()
+                    .unwrap_err()
+                    .contains("blocking scheduling")
+            );
+            input["scheduling"] = json!("blocking");
+            for limits in [
+                json!({"fuel_per_call":0}),
+                json!({"max_memory_bytes":0}),
+                json!({"max_module_bytes":0}),
+                json!({"max_table_elements":65537}),
+                json!({"fuel_per_call":1000000001}),
+            ] {
+                input["wasm_limits"] = limits;
+                assert!(configured(input.clone()).validate().is_err());
+            }
+        } else {
+            assert!(result.unwrap_err().contains("wasm feature"));
+        }
+    }
+
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn wasm_defaults_match_primitive_and_pool_memory_is_bounded_before_loading() {
+        let local = WasmLimits::default().sandbox();
+        let primitive = plugin_loading::WasmLimits::default();
+        assert_eq!(local.max_memory_bytes, primitive.max_memory_bytes);
+        assert_eq!(local.max_module_bytes, primitive.max_module_bytes);
+        assert_eq!(local.max_table_elements, primitive.max_table_elements);
+        assert_eq!(local.fuel_per_call, primitive.fuel_per_call);
+        let mut input = selected_callback();
+        input["backend"] = json!("wasm");
+        input["instances"] = json!(32);
+        assert!(configured(input.clone()).validate().is_ok());
+        input["instances"] = json!(33);
+        assert!(
+            configured(input.clone())
+                .validate()
+                .unwrap_err()
+                .contains("512 MiB")
+        );
+        input["instances"] = json!(1);
+        input["wasm_limits"] = json!({"max_memory_bytes": 1024 * 1024 * 1024});
+        assert!(
+            configured(input)
+                .validate()
+                .unwrap_err()
+                .contains("512 MiB")
+        );
     }
 
     #[test]
