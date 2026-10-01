@@ -28,6 +28,9 @@ enum Mode {
     ReplaceRequestBeforeSend,
     ReplaceResponseBeforeWrite,
     ReplaceRequestAfterResponse,
+    PatchRequestHandshake,
+    PatchResponseHandshake,
+    PatchResponseConnection,
 }
 struct Hooks {
     seen: Arc<Seen>,
@@ -133,6 +136,11 @@ impl Callbacks<ProxyContract> for Hooks {
                 request.insert_header("content-length", "1").unwrap();
             }
             Mode::ReplaceRequestBeforeSend => facts.request_body = sealed_drop_first(),
+            Mode::PatchRequestHandshake => {
+                request
+                    .insert_header("sec-websocket-key", "replaced")
+                    .unwrap();
+            }
             _ => {}
         }
         Ok(())
@@ -184,6 +192,11 @@ impl Callbacks<ProxyContract> for Hooks {
         if matches!(self.mode, Mode::ReplaceRequestAfterResponse) {
             facts.request_body = sealed_drop_first();
         }
+        if matches!(self.mode, Mode::PatchResponseHandshake) {
+            response
+                .insert_header("sec-websocket-accept", "replaced")
+                .unwrap();
+        }
         Ok(())
     }
     async fn prepare_response_body(
@@ -205,13 +218,16 @@ impl Callbacks<ProxyContract> for Hooks {
     async fn before_downstream_write(
         &self,
         _: u8,
-        _: &mut ResponseHeader,
+        response: &mut ResponseHeader,
         _: &(),
         facts: &mut RequestFacts,
     ) -> Result<(), String> {
         self.seen.record("before_write");
         if matches!(self.mode, Mode::ReplaceResponseBeforeWrite) {
             facts.response_body = sealed_drop_first();
+        }
+        if matches!(self.mode, Mode::PatchResponseConnection) {
+            response.insert_header("connection", "close").unwrap();
         }
         Ok(())
     }
@@ -481,6 +497,48 @@ async fn callbacks_cannot_change_an_ordinary_response_into_an_upgrade() {
     assert!(stages.contains(&"upstream_response"));
     assert!(!stages.contains(&"before_write"));
     assert!(!stages.contains(&"complete"));
+}
+
+#[tokio::test]
+async fn compiled_callbacks_cannot_replace_websocket_handshake_negotiation() {
+    for (mode, status, expected_connections, before_write) in [
+        (Mode::PatchRequestHandshake, 400, 0, false),
+        (Mode::PatchResponseHandshake, 502, 1, false),
+        (Mode::PatchResponseConnection, 502, 1, true),
+    ] {
+        let connections = Arc::new(AtomicUsize::new(0));
+        let accepted = connections.clone();
+        let origin = listen(move |mut socket| {
+            accepted.fetch_add(1, Ordering::SeqCst);
+            async move {
+                let request = request_head_for_upgrade(&mut socket).await;
+                assert!(request.contains(&"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==".to_ascii_lowercase()));
+                socket.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n").await.unwrap();
+            }
+        }).await;
+        let seen = Arc::new(Seen::default());
+        let worker = worker_with_callbacks(
+            settings(origin.address, None, "", false),
+            hooks(&seen, mode),
+        )
+        .await;
+        timeout(WAIT, async {
+            let mut client = TcpStream::connect(worker.address).await.unwrap();
+            client.write_all(b"GET /socket HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();
+            let response = head(&mut client).await;
+            assert!(response.starts_with(format!("HTTP/1.1 {status}").as_bytes()), "{response:?}");
+            assert_eq!(connections.load(Ordering::SeqCst), expected_connections);
+            let stages = seen.stages.lock().unwrap();
+            assert_eq!(stages.contains(&"before_write"), before_write);
+            assert!(!stages.contains(&"complete"));
+        }).await.unwrap();
+    }
+}
+
+async fn request_head_for_upgrade(socket: &mut TcpStream) -> String {
+    String::from_utf8(head(socket).await)
+        .unwrap()
+        .to_ascii_lowercase()
 }
 
 #[tokio::test]

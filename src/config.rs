@@ -108,6 +108,10 @@ pub struct NativeCallback {
     /// Header metadata explicitly exposed to this trusted callback.
     #[serde(default)]
     pub headers: Vec<String>,
+    /// Host-selected header names this callback may set or remove. Empty by default.
+    /// Transport framing and WebSocket negotiation fields cannot be granted.
+    #[serde(default)]
+    pub patch_headers: Vec<String>,
     #[serde(default)]
     pub config: serde_json::Value,
     #[serde(default = "callback_timeout")]
@@ -191,6 +195,7 @@ impl Config {
                 return Err("invalid native callback identity, capacity or timeout".into());
             }
             crate::native_notifier::validate_hooks(&callback.hooks)?;
+            crate::native_notifier::validate_patch_headers(&callback.patch_headers)?;
             text_processing::json::to_vec_bounded(
                 &callback.config,
                 crate::native_notifier::FRAME_LIMIT,

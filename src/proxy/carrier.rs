@@ -87,17 +87,7 @@ impl ProxyHttp for NativeProxy {
                     "callbacks cannot change carrier method or protocol",
                 ));
             }
-            if !request.headers.get_all("upgrade").iter().eq(session
-                .req_header()
-                .headers
-                .get_all("upgrade")
-                .iter())
-            {
-                return Err(refusal(
-                    400,
-                    "callbacks cannot change protocol upgrade semantics",
-                ));
-            }
+            headers::validate_request_handshake(&request, session.req_header())?;
             headers::request_head(
                 &mut request,
                 session.req_header(),
@@ -258,10 +248,7 @@ impl ProxyHttp for NativeProxy {
         if response.status.is_informational() && response.status.as_u16() != 101 {
             return Ok(());
         }
-        if response.status.as_u16() == 101 && !session.req_header().headers.contains_key("upgrade")
-        {
-            return Err(refusal(502, "unsolicited upstream protocol upgrade"));
-        }
+        headers::validate_upstream_upgrade(session.req_header(), response)?;
         headers::validate_transfer_coding(&response.headers, 502)?;
         let original = headers::ResponseFraming::capture(response);
         ctx.exchange()?.facts_mut().status = Some(response.status.as_u16());
