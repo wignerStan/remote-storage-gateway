@@ -62,6 +62,7 @@ Each `callbacks` entry explicitly selects a trusted native Function or Object li
   "language": "rust",
   "hooks": ["pre_routing", "authenticate", "admit", "complete"],
   "headers": ["x-request-id"],
+  "patch_headers": ["x-request-id"],
   "config": {},
   "timeout_ms": 5000,
   "max_inflight": 32
@@ -144,6 +145,13 @@ frames borrow the live request method/path or response status and headers while
 encoding. Header snapshots for decision-only hooks are taken once per completed
 request-head stage, rather than once per native callback patch.
 
+Host configuration grants `headers` for reading and `patch_headers` for writing;
+both default to empty and neither implies the other. Existing plugins that patch
+headers must explicitly configure their write grant. Every set/remove operation
+must be granted, and the entire batch is checked before any mutation. Plugins
+cannot widen these grants in their reply. Configured `hooks` independently limits
+which methods the host may invoke.
+
 Transform stages apply validated patches to the native head; authentication,
 admission and completion forbid patches. Framing/hop headers and authority cannot
 be changed by these metadata replies. Errors and denial stop the chain; malformed
@@ -158,6 +166,36 @@ response bodies are never captured. Credential fields and selected session cooki
 are fingerprinted while ordinary cookies stay useful. Global TRACE does not enable
 capture, and raw native wire/header debug targets are excluded from this standard
 logging path. Access and body retention are independent.
+
+## WebSocket capability boundary
+
+| Capability | Current native worker | Owner |
+| --- | --- | --- |
+| Upgrade request/response metadata decisions | Supported within configured hook/header grants | Worker notifier chain |
+| Pool, dial, and acquired socket decisions | Supported before native dispatch | Worker controls and Pingora |
+| Bidirectional bytes after 101 | Transparent native forwarding with backpressure | Pingora carrier |
+| WebSocket frame parsing / per-frame Go calls | Not implemented by this worker | Requires a native codec/carrier adapter |
+| Whole-message business decisions or rewrites | Not implemented by this worker | Plugin policy over an explicit message capability |
+
+HTTP body transforms and body dumps are bypassed after upgrade. Handshake fields
+(`Sec-WebSocket-Key`, `Accept`, `Version`, `Protocol`, `Extensions`, with the
+`Sec-WebSocket-` prefix) cannot be changed by native metadata replies, even with a
+write grant. Compiled hooks must preserve the original handshake metadata too.
+Otherwise transparent forwarding could advertise an encoding or subprotocol it
+does not implement.
+
+Frame parsing, masking, fragmentation, ping/pong/close handling, limits and
+backpressure are protocol infrastructure, not product policy. Go plugins should
+own business interpretation and decisions. Existing async callbacks cannot simply
+be inserted into both HTTP body filters: Pingora's downstream body filter is
+synchronous, chunks are not WebSocket frames, and 101 can arrive with preread frame
+bytes. A future frame capability needs an owned native codec/duplex loop, ordered
+bounded callback waits, explicit directional grants and cancellation; detached
+notifications must not pretend to gate bytes already forwarded. No body stream or
+future crosses the C ABI.
+
+These host grants constrain the notifier contract. Trusted in-process `.so` code
+is not an OS sandbox and must not be treated as an untrusted isolated plugin.
 
 ## Ownership and calls
 
