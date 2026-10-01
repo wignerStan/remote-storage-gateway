@@ -555,10 +555,10 @@ impl Config {
             if callback.message_responses && callback.message_codec.is_none() {
                 return Err("response message access requires an explicit codec grant".into());
             }
-            if let Some(codec) = &callback.message_codec {
-                if !crate::proxy::message_codec::valid_id(codec) {
-                    return Err("invalid message codec identifier".into());
-                }
+            if let Some(codec) = &callback.message_codec
+                && !crate::proxy::message_codec::valid_id(codec)
+            {
+                return Err("invalid message codec identifier".into());
             }
             if callback.path.as_os_str().is_empty()
                 || callback.path.as_os_str().len() > 4096

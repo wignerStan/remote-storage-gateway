@@ -329,15 +329,15 @@ impl ProxyHttp for NativeProxy {
         if !ctx.upgraded {
             ctx.dump
                 .observe(body.as_deref().unwrap_or_default(), end, ctx.request_id);
-            if !ctx.request_body.is_empty() {
-                if let Err(error) = ctx.request_body.filter_bounded(
+            if !ctx.request_body.is_empty()
+                && let Err(error) = ctx.request_body.filter_bounded(
                     body,
                     end,
                     self.inspection.limits.max_message_bytes.max(64 * 1024),
-                ) {
-                    ctx.exchange()?.fail();
-                    return Err(lifecycle_error(error));
-                }
+                )
+            {
+                ctx.exchange()?.fail();
+                return Err(lifecycle_error(error));
             }
         }
         if ctx.message_decoder.is_some()
@@ -371,16 +371,19 @@ impl ProxyHttp for NativeProxy {
                 message_codec::filter_owned(
                     &registration.callbacks,
                     decoder.as_mut(),
-                    registration.codec.id(),
                     &mut ctx.message_sequence,
-                    ctx.request_id,
                     body,
                     end,
-                    ctx.inspection_permit.clone(),
-                    false,
-                    self.inspection.limits.max_message_bytes,
-                    (ctx.upgraded && registration.codec.supports_message_replies())
+                    message_codec::FilterContext {
+                        codec_id: registration.codec.id(),
+                        request_id: ctx.request_id,
+                        reservation: ctx.inspection_permit.clone(),
+                        response: false,
+                        max_bytes: self.inspection.limits.max_message_bytes,
+                        reply_codec: (ctx.upgraded
+                            && registration.codec.supports_message_replies())
                         .then_some(registration.codec.as_ref()),
+                    },
                 ),
             )
             .instrument(ctx.span.clone())
@@ -610,15 +613,15 @@ impl ProxyHttp for NativeProxy {
         if !ctx.response_received {
             return Ok(None);
         }
-        if !ctx.response_body.is_empty() {
-            if let Err(error) = ctx.response_body.filter_bounded(
+        if !ctx.response_body.is_empty()
+            && let Err(error) = ctx.response_body.filter_bounded(
                 body,
                 end,
                 self.inspection.limits.max_message_bytes.max(64 * 1024),
-            ) {
-                ctx.exchange()?.fail();
-                return Err(lifecycle_error(error));
-            }
+            )
+        {
+            ctx.exchange()?.fail();
+            return Err(lifecycle_error(error));
         }
         if ctx.response_decoder.is_some()
             && ctx.inspection_permit.is_none()
@@ -651,16 +654,19 @@ impl ProxyHttp for NativeProxy {
                 message_codec::filter_owned(
                     &registration.callbacks,
                     decoder.as_mut(),
-                    registration.codec.id(),
                     &mut ctx.response_sequence,
-                    ctx.request_id,
                     body,
                     end,
-                    ctx.inspection_permit.clone(),
-                    true,
-                    self.inspection.limits.max_message_bytes,
-                    (ctx.upgraded && registration.codec.supports_message_replies())
+                    message_codec::FilterContext {
+                        codec_id: registration.codec.id(),
+                        request_id: ctx.request_id,
+                        reservation: ctx.inspection_permit.clone(),
+                        response: true,
+                        max_bytes: self.inspection.limits.max_message_bytes,
+                        reply_codec: (ctx.upgraded
+                            && registration.codec.supports_message_replies())
                         .then_some(registration.codec.as_ref()),
+                    },
                 ),
             )
             .await
@@ -677,10 +683,10 @@ impl ProxyHttp for NativeProxy {
             // the completion here; write_response_body would send it upstream.
             if let Some(frame) = downstream {
                 let mut combined = bytes::BytesMut::new();
-                if let Some(existing) = body.take() {
-                    if !existing.is_empty() {
-                        combined.extend_from_slice(&existing);
-                    }
+                if let Some(existing) = body.take()
+                    && !existing.is_empty()
+                {
+                    combined.extend_from_slice(&existing);
                 }
                 combined.extend_from_slice(&frame);
                 *body = Some(combined.freeze());
