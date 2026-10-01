@@ -320,7 +320,7 @@ not Gemini Live WebSocket or Vertex AI resource paths.
 Responses WS kinds are `response.create`, `responses_lite.create`, and
 `responses_lite.delta`. Lite is detected per message from the actual Codex wire
 marker; incremental input and continuation IDs are preserved, not reconstructed.
-HTTP bodies are validated as complete JSON objects without narrowing them to the
+JSON bodies are validated as complete objects without narrowing them to the
 client's smaller chat DTOs.
 
 HTTP body transforms precede codec inspection. The body is held until EOF and
@@ -332,6 +332,40 @@ The codec delegates bounded zstd decoding to infra’s `compression` primitive w
 The current input/decoded limit is 1 MiB with at most 4096 retained segments.
 Inspected WS connections negotiate uncompressed framing. Upstream response bodies,
 including SSE and WS deltas, continue unchanged through the native response path.
+
+## Realtime / Live signaling codecs
+
+Grant `openai.realtime.v1` for public Realtime/Live or `codex.realtime.v1` for
+Codex backend routes. Both are infra registrations and use the existing notifier
+sequence, native Object callback grants, and bounded binary message ABI.
+
+- WebSocket: public `/realtime`, `/v1/realtime`, `/live`, `/v1/live`;
+  Codex `/backend-api/codex/realtime` and `/backend-api/codex/live`.
+- Live sideband: append one opaque call-ID segment to a Live route. Legacy
+  Realtime sidebands retain the `call_id` query parameter unchanged.
+- HTTP POST: public `/realtime/calls`, `/v1/realtime/calls`, `/live`, `/v1/live`;
+  Codex `/backend-api/codex/realtime/calls`.
+
+HTTP signaling accepts SDP, multipart with one valid boundary, and backend JSON.
+ABI kinds are `realtime.call.sdp`, `realtime.call.multipart`, and
+`realtime.call.json`. The callback receives the complete original payload
+(decoded once for zstd) before any body is sent upstream. SDP/multipart semantics
+are the plugin's responsibility; infra validates HTTP/MIME header selection and
+bounds accumulation. For multipart parsing, also grant `headers: ["content-type"]`
+at a metadata hook such as `before_upstream_send`; the binary payload has no
+extra metadata envelope. The plugin must implement both granted interfaces.
+
+Realtime/Live WS inspects complete client text messages. Known event types become
+static ABI kinds; future types use `realtime.event` with the original JSON intact.
+Audio/base64 and context data are not materialized into domain objects. Invalid
+JSON, duplicate/missing event types and binary client frames fail closed.
+Upstream events/audio deltas continue unchanged. The existing uncompressed WS
+negotiation and 1 MiB message limits apply.
+
+This supports WebRTC call signaling and WebSocket sidebands. Actual WebRTC media
+and DataChannel traffic use a separate peer connection outside Pingora's HTTP
+carrier. Codex Live paths and shapes were verified against local `codex-api`
+commit `444da310e108da16aaeb18fd790b0ac464f08aca`; they remain opt-in.
 
 ## Ownership and calls
 
