@@ -11,9 +11,10 @@ resolver = "3"
 
 [features]
 default = []
-wasm = ["plugin-loading/wasm"]
+wasm = ["plugin-loading/wasm", "dep:wasm-sandbox"]
 
 [dependencies]
+wasm-sandbox = { path = "../infra/rust/crates/interop/wasm-sandbox", optional = true }
 admission-gate = { path = "../infra/rust/crates/processes/admission-gate" }
 llm-protocols = { path = "../infra/rust/crates/ai/llm-protocols", features = ["codec"] }
 text-processing = { path = "../infra/rust/crates/text/processing", features = ["json"] }
