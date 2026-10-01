@@ -61,9 +61,13 @@ pub struct ProxyConfig {
     pub pool_idle_timeout: Duration,
     pub pool_key: u64,
     pub reuse: bool,
+    pub http2: crate::config::Http2,
+    pub websocket_keepalive: crate::keepalive::WebSocketKeepalive,
 }
 impl ProxyConfig {
     pub fn validate(&self) -> std::result::Result<(), String> {
+        self.http2.validate()?;
+        self.websocket_keepalive.validate(self.io_timeout)?;
         if !matches!(self.upstream.scheme(), "http" | "https")
             || self.upstream.host_str().is_none()
             || !self.upstream.username().is_empty()
