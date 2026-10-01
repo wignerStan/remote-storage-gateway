@@ -2,6 +2,115 @@
 use super::*;
 use http::Version;
 
+const HANDSHAKE_HEADERS: [&str; 6] = [
+    "upgrade",
+    "sec-websocket-key",
+    "sec-websocket-accept",
+    "sec-websocket-version",
+    "sec-websocket-extensions",
+    "sec-websocket-protocol",
+];
+
+fn connection_upgrades(headers: &http::HeaderMap) -> bool {
+    let mut upgrade = false;
+    for value in headers.get_all("connection") {
+        let Ok(value) = value.to_str() else {
+            return false;
+        };
+        for token in value.split(',').map(str::trim) {
+            if token.eq_ignore_ascii_case("close") {
+                return false;
+            }
+            upgrade |= token.eq_ignore_ascii_case("upgrade");
+        }
+    }
+    upgrade
+}
+
+pub(super) fn validate_request_handshake(
+    request: &RequestHeader,
+    original: &RequestHeader,
+) -> Result<()> {
+    if HANDSHAKE_HEADERS.iter().any(|name| {
+        !request
+            .headers
+            .get_all(*name)
+            .iter()
+            .eq(original.headers.get_all(*name).iter())
+    }) {
+        return Err(refusal(
+            400,
+            "callbacks cannot change protocol handshake negotiation",
+        ));
+    }
+    Ok(())
+}
+
+/// Check the origin's protocol selection before accepting its raw 101 head.
+/// The endpoint remains responsible for cryptographic WebSocket accept validation.
+pub(super) fn validate_upstream_upgrade(
+    request: &RequestHeader,
+    response: &ResponseHeader,
+) -> Result<()> {
+    if response.status.as_u16() != 101 {
+        return Ok(());
+    }
+    let offered = request
+        .headers
+        .get_all("upgrade")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let mut selected = Vec::new();
+    for value in response.headers.get_all("upgrade") {
+        let value = value
+            .to_str()
+            .map_err(|_| refusal(502, "invalid upstream protocol upgrade"))?;
+        for token in value.split(',') {
+            let token = token.trim();
+            if token.is_empty()
+                || !offered
+                    .iter()
+                    .any(|offered| token.eq_ignore_ascii_case(offered))
+            {
+                return Err(refusal(
+                    502,
+                    "upstream selected an unoffered protocol upgrade",
+                ));
+            }
+            selected.push(token);
+        }
+    }
+    let connection_upgrade = connection_upgrades(&response.headers);
+    let request_upgrade = connection_upgrades(&request.headers);
+    if request.version != Version::HTTP_11
+        || selected.is_empty()
+        || !connection_upgrade
+        || !request_upgrade
+    {
+        return Err(refusal(502, "invalid upstream protocol upgrade"));
+    }
+    if selected
+        .iter()
+        .any(|token| token.eq_ignore_ascii_case("websocket"))
+    {
+        let mut accept = response.headers.get_all("sec-websocket-accept").iter();
+        if request.method != http::Method::GET
+            || selected.len() != 1
+            || !accept
+                .next()
+                .is_some_and(|value| value.to_str().is_ok_and(|value| !value.trim().is_empty()))
+            || accept.next().is_some()
+        {
+            return Err(refusal(502, "invalid upstream WebSocket handshake"));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate_ingress(request: &RequestHeader) -> Result<()> {
     validate_transfer_coding(&request.headers, 400)?;
     if request.headers.contains_key("content-length")
@@ -169,13 +278,24 @@ pub(super) fn wire_request(
 pub(super) struct ResponseFraming {
     pub status: http::StatusCode,
     length: Option<http::HeaderValue>,
-    upgrade: Option<http::HeaderValue>,
+    handshake: [Vec<http::HeaderValue>; HANDSHAKE_HEADERS.len()],
 }
 impl ResponseFraming {
     pub fn capture(response: &ResponseHeader) -> Self {
         Self {
             status: response.status,
-            upgrade: response.headers.get("upgrade").cloned(),
+            handshake: std::array::from_fn(|index| {
+                if response.status.as_u16() == 101 {
+                    response
+                        .headers
+                        .get_all(HANDSHAKE_HEADERS[index])
+                        .iter()
+                        .cloned()
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            }),
             length: if response.headers.contains_key("transfer-encoding") {
                 None
             } else {
@@ -187,7 +307,15 @@ impl ResponseFraming {
         let no_body = |status: http::StatusCode| {
             *method == http::Method::HEAD || matches!(status.as_u16(), 204 | 304)
         };
-        if (self.status.as_u16() == 101 && response.headers.get("upgrade") != self.upgrade.as_ref())
+        if (self.status.as_u16() == 101
+            && HANDSHAKE_HEADERS.iter().enumerate().any(|(index, name)| {
+                !response
+                    .headers
+                    .get_all(*name)
+                    .iter()
+                    .eq(self.handshake[index].iter())
+            }))
+            || (self.status.as_u16() == 101 && !connection_upgrades(&response.headers))
             || (self.status.as_u16() == 101) != (response.status.as_u16() == 101)
             || (response.status.is_informational() && response.status.as_u16() != 101)
             || no_body(self.status) != no_body(response.status)

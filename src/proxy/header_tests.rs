@@ -1,6 +1,93 @@
 use super::*;
 
 #[test]
+fn handshake_guards_compare_every_repeated_negotiation_value() {
+    let mut request = RequestHeader::build("GET", b"/socket", None).unwrap();
+    request.insert_header("upgrade", "websocket").unwrap();
+    request
+        .append_header("sec-websocket-protocol", "first")
+        .unwrap();
+    request
+        .append_header("sec-websocket-protocol", "second")
+        .unwrap();
+    assert!(validate_request_handshake(&request, &request).is_ok());
+    let mut changed = request.clone();
+    changed.remove_header("sec-websocket-protocol");
+    changed
+        .append_header("sec-websocket-protocol", "first")
+        .unwrap();
+    changed
+        .append_header("sec-websocket-protocol", "changed")
+        .unwrap();
+    assert!(validate_request_handshake(&changed, &request).is_err());
+    for name in HANDSHAKE_HEADERS {
+        let mut changed = request.clone();
+        changed.insert_header(name, "changed").unwrap();
+        assert!(
+            validate_request_handshake(&changed, &request).is_err(),
+            "{name}"
+        );
+    }
+    let mut response = ResponseHeader::build(101, None).unwrap();
+    response.insert_header("upgrade", "websocket").unwrap();
+    response.insert_header("connection", "Upgrade").unwrap();
+    response
+        .append_header("sec-websocket-protocol", "first")
+        .unwrap();
+    response
+        .append_header("sec-websocket-protocol", "second")
+        .unwrap();
+    let original = ResponseFraming::capture(&response);
+    assert!(original.validate(&response, &http::Method::GET).is_ok());
+    for name in HANDSHAKE_HEADERS {
+        let mut changed = response.clone();
+        changed.append_header(name, "added").unwrap();
+        assert!(
+            original.validate(&changed, &http::Method::GET).is_err(),
+            "{name}"
+        );
+    }
+    for value in [None, Some("close"), Some("upgrade, close")] {
+        let mut changed = response.clone();
+        changed.remove_header("connection");
+        if let Some(value) = value {
+            changed.insert_header("connection", value).unwrap();
+        }
+        assert!(original.validate(&changed, &http::Method::GET).is_err());
+    }
+}
+
+#[test]
+fn raw_upstream_upgrade_must_select_an_offered_protocol_and_preserve_websocket_shape() {
+    let mut request = RequestHeader::build("GET", b"/socket", None).unwrap();
+    request.insert_header("upgrade", "websocket").unwrap();
+    request.insert_header("connection", "Upgrade").unwrap();
+    let mut response = ResponseHeader::build(101, None).unwrap();
+    response.insert_header("upgrade", "websocket").unwrap();
+    response.insert_header("connection", "Upgrade").unwrap();
+    response
+        .insert_header("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+        .unwrap();
+    validate_upstream_upgrade(&request, &response).unwrap();
+    let mut changed = response.clone();
+    changed.insert_header("upgrade", "unoffered").unwrap();
+    assert!(validate_upstream_upgrade(&request, &changed).is_err());
+    changed = response.clone();
+    changed.remove_header("connection");
+    assert!(validate_upstream_upgrade(&request, &changed).is_err());
+    changed = response.clone();
+    changed.remove_header("sec-websocket-accept");
+    assert!(validate_upstream_upgrade(&request, &changed).is_err());
+    changed = response.clone();
+    changed
+        .append_header("sec-websocket-accept", "duplicate")
+        .unwrap();
+    assert!(validate_upstream_upgrade(&request, &changed).is_err());
+    request.remove_header("upgrade");
+    assert!(validate_upstream_upgrade(&request, &response).is_err());
+}
+
+#[test]
 fn native_transfer_coding_validation_accepts_only_absent_or_single_chunked() {
     for coding in [None, Some("chunked"), Some(" ChUnKeD ")] {
         let mut request = RequestHeader::build("POST", b"/", None).unwrap();

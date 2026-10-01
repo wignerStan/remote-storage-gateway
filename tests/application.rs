@@ -228,7 +228,7 @@ async fn executable_callback_roundtrip(language: &str, configured_kind: Option<&
     let resolved_kind = configured_kind.unwrap_or("object");
     let mut callback = json!({"path":callback_artifact_with_identity(directory.path(), resolved_kind, language),
         "package":"worker.metadata.test", "language":language,
-        "hooks":["pre_routing"], "config":{"version":1,"decision":"continue","set_headers":[["x-native","installed"]]}});
+        "hooks":["pre_routing"], "patch_headers":["x-native"], "config":{"version":1,"decision":"continue","set_headers":[["x-native","installed"]]}});
     if let Some(kind) = configured_kind {
         callback["kind"] = json!(kind);
     }

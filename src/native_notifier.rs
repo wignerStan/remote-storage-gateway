@@ -46,6 +46,48 @@ pub fn validate_hooks(hooks: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn protected_header(name: &http::header::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "host"
+            | "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "keep-alive"
+            | "proxy-connection"
+            | "upgrade"
+            | "trailer"
+            | "te"
+            | "sec-websocket-key"
+            | "sec-websocket-accept"
+            | "sec-websocket-version"
+            | "sec-websocket-extensions"
+            | "sec-websocket-protocol"
+    )
+}
+
+/// Parse the host's bounded write grant; protected transport fields are never grantable.
+pub fn validate_patch_headers(names: &[String]) -> Result<Vec<http::header::HeaderName>, String> {
+    if names.len() > 64 {
+        return Err("callback patch headers must be a bounded list of valid names".into());
+    }
+    let mut granted = Vec::with_capacity(names.len());
+    for name in names {
+        let name = http::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| "invalid callback patch header name")?;
+        if protected_header(&name) {
+            return Err(
+                "callback patch headers cannot grant transport or WebSocket negotiation fields"
+                    .into(),
+            );
+        }
+        if !granted.contains(&name) {
+            granted.push(name);
+        }
+    }
+    Ok(granted)
+}
+
 #[derive(Serialize)]
 struct Metadata<'a> {
     version: u8,
@@ -147,7 +189,7 @@ struct Reply {
     remove_headers: Vec<String>,
 }
 impl Reply {
-    fn check(self, hook: &str) -> Result<Self, String> {
+    fn check(self, hook: &str, patch_headers: &[http::header::HeaderName]) -> Result<Self, String> {
         if !HOOKS.contains(&hook) {
             return Err("unsupported notifier stage".into());
         }
@@ -168,26 +210,19 @@ impl Reply {
             .map(|(name, _)| name)
             .chain(&self.remove_headers)
         {
-            let canonical = name.to_ascii_lowercase();
-            if [
-                "host",
-                "content-length",
-                "transfer-encoding",
-                "connection",
-                "keep-alive",
-                "proxy-connection",
-                "upgrade",
-                "trailer",
-                "te",
-            ]
-            .contains(&canonical.as_str())
-            {
-                return Err(
-                    "notifier cannot override transport framing or selected authority".into(),
-                );
-            }
-            http::header::HeaderName::from_bytes(name.as_bytes())
+            let parsed = http::header::HeaderName::from_bytes(name.as_bytes())
                 .map_err(|_| "invalid notifier header name")?;
+            let reason = if protected_header(&parsed) {
+                Some("protected_header")
+            } else if !patch_headers.contains(&parsed) {
+                Some("ungranted_patch_header")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                tracing::trace!(target: "proxy_pingora::worker::notifier", hook, header = &parsed.as_str()[..parsed.as_str().len().min(128)], outcome = "error", reason, "native metadata patch rejected");
+                return Err("notifier header patch is outside the host grant".into());
+            }
         }
         for (_, value) in &self.set_headers {
             http::header::HeaderValue::from_str(value)
@@ -228,10 +263,12 @@ pub struct NativeNotifier {
     interests: u16,
     timeout: Duration,
     headers: Vec<http::header::HeaderName>,
+    patch_headers: Arc<[http::header::HeaderName]>,
 }
 impl NativeNotifier {
     pub fn new(callback: Arc<Callback>, config: &NativeCallback) -> Result<Self, String> {
         validate_hooks(&config.hooks)?;
+        let patch_headers = validate_patch_headers(&config.patch_headers)?.into();
         let interests = config.hooks.iter().fold(0, |bits, hook| {
             bits | (1 << HOOKS.iter().position(|known| known == hook).unwrap())
         });
@@ -248,6 +285,7 @@ impl NativeNotifier {
             interests,
             timeout: Duration::from_millis(config.timeout_ms),
             headers,
+            patch_headers,
         })
     }
     fn interested(&self, hook: &str) -> bool {
@@ -278,6 +316,10 @@ impl NativeNotifier {
         if !HOOKS.contains(&hook) {
             return Err("unsupported notifier stage".into());
         }
+        if !self.interested(hook) {
+            tracing::trace!(target: "proxy_pingora::worker::notifier", hook, outcome = "error", reason = "unregistered_hook", "native metadata invocation rejected");
+            return Err("notifier stage is outside the host grant".into());
+        }
         let metadata = Metadata {
             version: 1,
             hook,
@@ -305,12 +347,13 @@ impl NativeNotifier {
         let input = text_processing::json::to_vec_bounded(&metadata, FRAME_LIMIT)
             .map_err(|_| "could not encode bounded notifier metadata")?;
 
+        let patch_headers = Arc::clone(&self.patch_headers);
         let result = self
             .callback
-            .call_with_reply(hook, input, self.timeout, (), |bytes| {
+            .call_with_reply(hook, input, self.timeout, (), move |bytes| {
                 serde_json::from_slice::<Reply>(bytes)
                     .map_err(|_| "invalid notifier metadata reply".to_string())
-                    .and_then(|reply| reply.check(hook))
+                    .and_then(|reply| reply.check(hook, &patch_headers))
             })
             .await
             .map_err(|_| "native notifier call failed".to_string())?;
