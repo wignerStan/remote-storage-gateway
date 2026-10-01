@@ -1,0 +1,162 @@
+//! Native Object callback selection and full HTTP body gating for API codecs.
+use super::*;
+use proxy_pingora::http_ingress::ProxyLifecycle;
+use serde_json::json;
+use std::{path::Path, process::Command};
+const BODY: &[u8] = br#"{"messages":[],"unknown":"preserved"}"#;
+const ROUTES: [(&str, &str); 4] = [
+    ("openai.chat_completions.v1", "/v1/chat/completions"),
+    ("openai.responses.v1", "/v1/responses"),
+    ("anthropic.messages.v1", "/v1/messages"),
+    ("codex.responses.v1", "/backend-api/codex/responses"),
+];
+fn artifact(dir: &Path, id: &str, action: &str) -> std::path::PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = dir.join(format!("{id}.so"));
+    assert!(
+        Command::new("cc")
+            .args(["-shared", "-fPIC", "-std=c11", "-I"])
+            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg("-DTEST_PLUGIN_KIND=INFRA_PLUGIN_OBJECT")
+            .arg(if action == "responses" {
+                "-DTEST_RESPONSES_REPLY=0".to_owned()
+            } else {
+                format!("-DTEST_API_REPLY={action}")
+            })
+            .arg(format!("-DTEST_API_PREFIX=\"{id}/\""))
+            .arg(root.join("tests/fixtures/metadata_callback.c"))
+            .arg("-o")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    path
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_routes_share_one_worker_and_only_inspect_complete_http_bodies() {
+    timeout(WAIT,async{
+        let received=Arc::new(AtomicUsize::new(0));
+        let observed=received.clone();
+        let origin=listen(move|mut socket|{let observed=observed.clone();async move{
+            let request=head(&mut socket).await;
+            assert!(request.starts_with(b"POST "));
+            let head_text=String::from_utf8(request).unwrap();
+            let compressed=head_text.to_ascii_lowercase().contains("content-encoding: zstd");
+            let expected=if compressed{zstd::stream::encode_all(BODY,3).unwrap()}else{BODY.to_vec()};
+            let mut body=vec![0;expected.len()];
+            for byte in &mut body { *byte=socket.read_u8().await.unwrap(); observed.fetch_add(1,Ordering::SeqCst); }
+            assert_eq!(body,expected);
+            // Upstream event bytes remain untouched; no event-to-chat projection.
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\ndata: [DONE]\n\n").await.unwrap();
+        }}).await;
+        let dir=tempfile::tempdir().unwrap();
+        let callbacks=ROUTES.iter().map(|(id,_)|json!({"path":artifact(dir.path(),id,"0"),"package":"worker.metadata.test","message_codec":id})).collect::<Vec<_>>();
+        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":callbacks})).unwrap()).await.unwrap();
+        let worker=serve_engine(proxy.clone()).await;
+        let mut previous_bytes=0;
+        for (i,(_,path)) in ROUTES.iter().enumerate(){
+            let wire=if i==1{zstd::stream::encode_all(BODY,3).unwrap()}else{BODY.to_vec()};
+            let coding=if i==1{"Content-Encoding: zstd\r\n"}else{""};
+            let mut client=TcpStream::connect(worker.address).await.unwrap();
+            let marker=if *path=="/v1/responses"{"x-openai-internal-codex-responses-lite: true\r\n"}else{""};
+            client.write_all(format!("POST {path} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{coding}{marker}\r\n",wire.len()).as_bytes()).await.unwrap();
+            client.write_all(&wire[..8]).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert_eq!(received.load(Ordering::SeqCst),previous_bytes,"partial request escaped codec gate");
+            client.write_all(&wire[8..]).await.unwrap();
+            let mut reply=Vec::new();client.read_to_end(&mut reply).await.unwrap();
+            assert!(reply.starts_with(b"HTTP/1.1 200"),"{}",String::from_utf8_lossy(&reply));
+            assert!(reply.ends_with(b"data: [DONE]\n\n"));
+            previous_bytes+=wire.len();
+        }
+        drop(worker);proxy.shutdown().await.unwrap();
+    }).await.unwrap();
+}
+#[tokio::test]
+async fn http_message_denial_forwards_no_body_bytes() {
+    timeout(WAIT,async{
+        let received=Arc::new(AtomicUsize::new(0));let observed=received.clone();
+        let origin=listen(move|mut socket|{let observed=observed.clone();async move{
+            head(&mut socket).await;
+            let mut byte=[0];if socket.read(&mut byte).await.unwrap_or(0)>0{observed.fetch_add(1,Ordering::SeqCst);}
+        }}).await;
+        let dir=tempfile::tempdir().unwrap();let id=ROUTES[0].0;
+        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"path":artifact(dir.path(),id,"1"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
+        let worker=serve_engine(proxy.clone()).await;let mut client=TcpStream::connect(worker.address).await.unwrap();
+        client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: local\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",BODY.len()).as_bytes()).await.unwrap();client.write_all(BODY).await.unwrap();
+        let mut response=Vec::new();let _=client.read_to_end(&mut response).await;
+        assert!(!response.starts_with(b"HTTP/1.1 200"));assert_eq!(received.load(Ordering::SeqCst),0);
+        drop(client);drop(worker);proxy.shutdown().await.unwrap();
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn early_upstream_success_cannot_bypass_http_message_inspection() {
+    for status in [200, 413] {
+        timeout(WAIT,async{
+            let origin=listen(move|mut socket|async move{
+                // Respond as soon as connected, before reading the held request body.
+                socket.write_all(format!("HTTP/1.1 {status} Early\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            }).await;
+            let dir=tempfile::tempdir().unwrap();let id=ROUTES[0].0;
+            let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"path":artifact(dir.path(),id,"0"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
+            let worker=serve_engine(proxy.clone()).await;let mut client=TcpStream::connect(worker.address).await.unwrap();
+            client.write_all(b"POST /v1/chat/completions HTTP/1.1\r\nHost: local\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{").await.unwrap();
+            let response=head(&mut client).await;
+            let expected=if status==200{502}else{413};
+            assert!(response.starts_with(format!("HTTP/1.1 {expected}").as_bytes()),"{}",String::from_utf8_lossy(&response));
+            drop(client);drop(worker);proxy.shutdown().await.unwrap();
+        }).await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_ws_selects_lite_per_message_and_keeps_upstream_delta_opaque() {
+    fn frame(payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x81];
+        if payload.len() < 126 {
+            out.push(0x80 | payload.len() as u8);
+        } else {
+            out.push(0xfe);
+            out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        }
+        out.extend_from_slice(&[1, 2, 3, 4]);
+        out.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(i, b)| b ^ [1, 2, 3, 4][i % 4]),
+        );
+        out
+    }
+    timeout(WAIT, async {
+        let frames = Arc::new(vec![
+            frame(br#"{"type":"response.create","input":[],"generate":false}"#),
+            frame(br#"{"type":"response.create","previous_response_id":"r1","input":[],"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"}}"#),
+            frame(br#"{"type":"response.create","input":[]}"#),
+        ]);
+        let upstream_frames = frames.clone();
+        let origin = listen(move |mut socket| {
+            let frames = upstream_frames.clone();
+            async move {
+                let request = String::from_utf8(head(&mut socket).await).unwrap();
+                assert!(!request.to_ascii_lowercase().contains("sec-websocket-extensions"));
+                socket.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n").await.unwrap();
+                for expected in frames.iter() {
+                    let mut actual=vec![0;expected.len()];socket.read_exact(&mut actual).await.unwrap();
+                    assert_eq!(&actual,expected);
+                    // The request classifier must never see/deny upstream binary deltas.
+                    socket.write_all(&[0x82,3,0,255,7]).await.unwrap();
+                }
+            }
+        }).await;
+        let dir=tempfile::tempdir().unwrap();let id="openai.responses.v1";
+        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"path":artifact(dir.path(),id,"responses"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
+        let worker=serve_engine(proxy.clone()).await;let mut client=TcpStream::connect(worker.address).await.unwrap();
+        client.write_all(b"GET /v1/responses HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\r\n").await.unwrap();
+        assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
+        for frame in frames.iter() {client.write_all(frame).await.unwrap();let mut delta=[0;5];client.read_exact(&mut delta).await.unwrap();assert_eq!(delta,[0x82,3,0,255,7]);}
+        drop(client);drop(worker);proxy.shutdown().await.unwrap();
+    }).await.unwrap();
+}
