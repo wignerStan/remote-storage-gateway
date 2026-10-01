@@ -13,12 +13,13 @@ fn main() -> ExitCode {
 fn start(args: Vec<std::ffi::OsString>) -> Result<(), String> {
     if args.len() == 1 && matches!(args[0].to_str(), Some("--help" | "-h")) {
         println!(
-            "pingora-worker --config <file.json> [--check-config]\n\nRuns the native proxy, configured callbacks and optional loopback management entry.\n--check-config validates configuration without opening listeners or loading plugins."
+            "pingora-worker --config <file.json> [--check-config] [--upgrade]\n\nRuns the native proxy, configured callbacks and optional loopback management entry.\n--check-config validates configuration without opening listeners or loading plugins.\n--upgrade receives native listening sockets from the previous generation; requires upgrade.socket."
         );
         return Ok(());
     }
     let mut path = None;
     let mut check = false;
+    let mut upgrade = false;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -28,14 +29,20 @@ fn start(args: Vec<std::ffi::OsString>) -> Result<(), String> {
                 ));
             }
             Some("--check-config") if !check => check = true,
-            _ => return Err("expected --config <file.json> [--check-config]; use --help".into()),
+            Some("--upgrade") if !upgrade => upgrade = true,
+            _ => {
+                return Err(
+                    "expected --config <file.json> [--check-config] [--upgrade]; use --help".into(),
+                );
+            }
         }
     }
     let path = path.ok_or("--config is required; use --help")?;
     let config = pingora_worker::config::Config::load(&path)?;
+    let options = config.process_options(upgrade)?;
     if check {
         println!("configuration valid");
         return Ok(());
     }
-    pingora_worker::assembly::run(config)
+    pingora_worker::assembly::run_with_options(config, options)
 }
