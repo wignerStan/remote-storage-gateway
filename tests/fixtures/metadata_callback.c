@@ -55,6 +55,22 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
         *out = (InfraOwnedBytes){0};
         return result;
     }
+#ifdef TEST_WEBSOCKET_REPLY
+    if (method.len >= 10 && !memcmp(method.ptr, "websocket.", 10)) {
+        const char *prefix = "websocket.v1/text/";
+        size_t n = strlen(prefix);
+        if (method.len != n + 33 || memcmp(method.ptr, prefix, n)
+                || method.ptr[n + 16] != '/' || !frame_len
+                || input.len != 2 || memcmp(input.ptr, "hi", 2)) return INFRA_FAILED;
+        for (size_t i = n; i < method.len; i++) {
+            if (i == n + 16) continue;
+            uint8_t c = method.ptr[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return INFRA_FAILED;
+        }
+        const uint8_t action[] = {TEST_WEBSOCKET_REPLY};
+        return copy_reply(action, sizeof(action), out);
+    }
+#endif
     uint32_t result = replace(&last_frame, &frame_len, input);
     if (result != INFRA_OK) return result;
     if (reply_len == 4 && !memcmp(reply_bytes, "FAIL", 4)) return INFRA_FAILED;

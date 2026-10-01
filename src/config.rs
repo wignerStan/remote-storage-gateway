@@ -104,7 +104,11 @@ pub struct NativeCallback {
     /// Native artifacts default to Object, independently of implementation language.
     #[serde(default)]
     pub kind: Option<CallbackKind>,
+    #[serde(default)]
     pub hooks: Vec<String>,
+    /// Explicit protocol codec grant, resolved against the host codec registry.
+    #[serde(default)]
+    pub message_codec: Option<String>,
     /// Header metadata explicitly exposed to this trusted callback.
     #[serde(default)]
     pub headers: Vec<String>,
@@ -185,7 +189,17 @@ impl Config {
         if self.callbacks.len() > 64 {
             return Err("at most 64 callbacks may be installed".into());
         }
+        let mut selected_codec = None;
         for callback in &self.callbacks {
+            if let Some(codec) = &callback.message_codec {
+                if !crate::proxy::message_codec::valid_id(codec) {
+                    return Err("invalid message codec identifier".into());
+                }
+                if selected_codec.is_some_and(|selected| selected != codec) {
+                    return Err("all message callbacks must select the same codec".into());
+                }
+                selected_codec = Some(codec);
+            }
             if callback.path.as_os_str().is_empty()
                 || callback.package.is_empty()
                 || callback.variant.is_empty()
@@ -194,7 +208,9 @@ impl Config {
             {
                 return Err("invalid native callback identity, capacity or timeout".into());
             }
-            crate::native_notifier::validate_hooks(&callback.hooks)?;
+            if !callback.hooks.is_empty() || callback.message_codec.is_none() {
+                crate::native_notifier::validate_hooks(&callback.hooks)?;
+            }
             crate::native_notifier::validate_patch_headers(&callback.patch_headers)?;
             text_processing::json::to_vec_bounded(
                 &callback.config,
@@ -309,7 +325,17 @@ mod tests {
             }
             let callback: NativeCallback = serde_json::from_value(input).unwrap();
             assert_eq!(callback.plugin_kind(), expected);
+            assert!(callback.message_codec.is_none());
         }
+    }
+
+    #[test]
+    fn message_access_requires_an_explicit_codec_grant() {
+        let input = json!({"path":"callback.so", "package":"trusted.metadata", "hooks":[], "message_codec":"websocket.v1"});
+        let callback: NativeCallback = serde_json::from_value(input).unwrap();
+        assert_eq!(callback.message_codec.as_deref(), Some("websocket.v1"));
+        let input = json!({"path":"callback.so", "package":"trusted.metadata", "hooks":[], "message_codec":true});
+        assert!(serde_json::from_value::<NativeCallback>(input).is_err());
     }
 
     #[test]
