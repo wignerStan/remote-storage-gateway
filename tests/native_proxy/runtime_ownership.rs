@@ -22,15 +22,21 @@ async fn notifier_initialization_and_dispatch_share_the_worker_process() {
             .success()
     );
     let origin = origin(Arc::new(AtomicUsize::new(0))).await;
-    let config = serde_json::from_value(json!({
-        "upstream":format!("http://{}",origin.address),
-        "callbacks":[{"path":library,"package":"worker.metadata.test","hooks":["pre_routing"],
-            "config":{"version":1,"decision":"continue"}}]
-    }))
-    .unwrap();
-    let proxy = pingora_worker::assembly::assemble(config).await.unwrap();
-    let worker = serve_engine(proxy.clone()).await;
-    assert!(get(worker.address).await.ends_with(b"hello"));
-    drop(worker);
-    proxy.shutdown().await.unwrap();
+    for scheduling in [None, Some("inline")] {
+        let mut callback = json!({"path":library,"package":"worker.metadata.test","hooks":["pre_routing"],
+        "config":{"version":1,"decision":"continue"}});
+        if let Some(scheduling) = scheduling {
+            callback["scheduling"] = json!(scheduling);
+        }
+        let config = serde_json::from_value(json!({
+            "upstream":format!("http://{}",origin.address),
+            "callbacks":[callback]
+        }))
+        .unwrap();
+        let proxy = pingora_worker::assembly::assemble(config).await.unwrap();
+        let worker = serve_engine(proxy.clone()).await;
+        assert!(get(worker.address).await.ends_with(b"hello"));
+        drop(worker);
+        proxy.shutdown().await.unwrap();
+    }
 }

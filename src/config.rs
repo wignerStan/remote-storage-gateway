@@ -23,6 +23,9 @@ pub struct Config {
     pub threads: usize,
     #[serde(default = "shutdown_seconds")]
     pub shutdown_seconds: u64,
+    /// Native listener handoff between independently started worker generations.
+    #[serde(default)]
+    pub upgrade: Option<Upgrade>,
     #[serde(default = "connect_timeout")]
     pub connect_timeout_ms: u64,
     #[serde(default = "io_timeout")]
@@ -41,6 +44,17 @@ pub struct Config {
     pub inspection: Inspection,
     #[serde(default)]
     pub management: Option<Management>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Upgrade {
+    /// Shared Unix socket in a private, operator-owned runtime directory.
+    pub socket: String,
+    #[serde(default = "upgrade_grace")]
+    pub grace_period_seconds: u64,
+}
+fn upgrade_grace() -> u64 {
+    1
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -202,6 +216,17 @@ pub struct NativeCallback {
     pub instances: usize,
     #[serde(default)]
     pub execution: CallbackExecution,
+    /// Dispatch blocking callbacks to bounded native workers; inline is a trusted
+    /// declaration that calls finish promptly without blocking the caller.
+    #[serde(default)]
+    pub scheduling: CallbackScheduling,
+}
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallbackScheduling {
+    #[default]
+    Blocking,
+    Inline,
 }
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -267,6 +292,7 @@ impl Config {
         Ok(config)
     }
     pub fn validate(&self) -> Result<(), String> {
+        self.process_options(false)?;
         if !(1..=4096).contains(&self.inspection.max_requests)
             || !(1..=1024 * 1024 * 1024).contains(&self.inspection.max_buffered_bytes)
             || !(1..=300_000).contains(&self.inspection.message_timeout_ms)
@@ -433,6 +459,22 @@ impl Config {
             websocket_keepalive: self.websocket_keepalive,
         })
     }
+    pub fn process_options(
+        &self,
+        upgrade: bool,
+    ) -> Result<proxy_pingora::http_ingress::ProcessOptions, String> {
+        let options = proxy_pingora::http_ingress::ProcessOptions {
+            upgrade_socket: self.upgrade.as_ref().map(|options| options.socket.clone()),
+            upgrade,
+            grace_period_seconds: self
+                .upgrade
+                .as_ref()
+                .map_or(1, |options| options.grace_period_seconds),
+        };
+        options.validate()?;
+        Ok(options)
+    }
+
     pub fn listener(&self) -> proxy_pingora::http_ingress::ListenerConfig {
         proxy_pingora::http_ingress::ListenerConfig {
             addr: self.listen,
@@ -548,6 +590,7 @@ mod tests {
         config.validate().unwrap();
         let callback = &config.callbacks[0];
         assert!(matches!(callback.execution, CallbackExecution::InProcess));
+        assert_eq!(callback.scheduling, CallbackScheduling::Blocking);
         assert_eq!(callback.instances, 1);
         assert_eq!(callback.max_inflight, 32);
         assert_eq!(callback.max_waiting, 32);
@@ -583,6 +626,26 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn callback_scheduling_is_explicit_and_independent_of_native_kind() {
+        for kind in ["object", "function"] {
+            for (scheduling, expected) in [
+                ("blocking", CallbackScheduling::Blocking),
+                ("inline", CallbackScheduling::Inline),
+            ] {
+                let mut callback = selected_callback();
+                callback["kind"] = json!(kind);
+                callback["scheduling"] = json!(scheduling);
+                let config = configured(callback);
+                config.validate().unwrap();
+                assert_eq!(config.callbacks[0].scheduling, expected);
+            }
+        }
+        let mut callback = selected_callback();
+        callback["scheduling"] = json!("unbounded");
+        assert!(serde_json::from_value::<NativeCallback>(callback).is_err());
     }
 
     #[test]

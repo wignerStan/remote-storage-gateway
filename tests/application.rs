@@ -368,3 +368,48 @@ fn executable_rejects_artifact_headers_with_the_wrong_callback_kind() {
         );
     }
 }
+
+#[test]
+fn upgrade_cli_requires_explicit_valid_socket_without_binding_during_check() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("upgrade.json");
+    let args = [
+        "--config",
+        config.to_str().unwrap(),
+        "--check-config",
+        "--upgrade",
+    ];
+    fs::write(
+        &config,
+        json!({"upstream":"http://127.0.0.1:1"}).to_string(),
+    )
+    .unwrap();
+    let mut missing = Process::spawn(directory.path(), &args);
+    assert!(!missing.wait().success());
+    let socket = directory.path().join("upgrade.sock");
+    fs::write(
+        &config,
+        json!({"upstream":"http://127.0.0.1:1", "upgrade":{"socket":socket}}).to_string(),
+    )
+    .unwrap();
+    let mut valid = Process::spawn(directory.path(), &args);
+    assert_eq!(
+        valid.wait().success(),
+        cfg!(target_os = "linux"),
+        "{}",
+        valid.errors()
+    );
+    assert!(!socket.exists(), "check-config bound the handoff socket");
+    for invalid in [
+        "relative.sock".to_string(),
+        "/".to_string() + &"x".repeat(200),
+    ] {
+        fs::write(
+            &config,
+            json!({"upstream":"http://127.0.0.1:1", "upgrade":{"socket":invalid}}).to_string(),
+        )
+        .unwrap();
+        let mut rejected = Process::spawn(directory.path(), &args);
+        assert!(!rejected.wait().success());
+    }
+}
