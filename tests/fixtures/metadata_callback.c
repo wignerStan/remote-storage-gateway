@@ -32,7 +32,13 @@ static uint32_t replace(uint8_t **owned, size_t *length, InfraBytes value) {
     *length = value.len;
     return INFRA_OK;
 }
+#ifdef TEST_EXPECT_PID
+#include <unistd.h>
+#endif
 static uint32_t init(const InfraHostV1 *host, uint64_t *state) {
+#ifdef TEST_EXPECT_PID
+    if ((unsigned long)getpid() != TEST_EXPECT_PID) return INFRA_FAILED;
+#endif
     (void)host; *state = 1; return INFRA_OK;
 }
 static uint32_t open_callback(uint64_t state, uint64_t binding, InfraBytes input, uint64_t *handle) {
@@ -116,6 +122,51 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
         }
         const uint8_t action[] = {0};
         return copy_reply(action, sizeof(action), out);
+    }
+#endif
+#ifdef TEST_RESPONSES_TERMINAL
+    {
+        /* Deltas are not offered when message_responses is off. A completion
+           whose payload contains "cached_tokens":0 is the replay document.
+           Any other completion is forwarded. The socket stays open. */
+        const char *prefix = TEST_API_PREFIX;
+        size_t n = strlen(prefix);
+        if (method.len < n || memcmp(method.ptr, prefix, n) || input.len < 2 || input.ptr[0] != '{')
+            return INFRA_FAILED;
+        const char *rest = method.ptr + n;
+        size_t rest_len = method.len - n;
+        if (rest_len >= 16 && !memcmp(rest, "response.create/", 16)) {
+            const uint8_t action[] = {0};
+            return copy_reply(action, sizeof(action), out);
+        }
+        if ((rest_len >= 15 && !memcmp(rest, "response.event/", 15))
+                || (rest_len >= 16 && !memcmp(rest, "response.binary/", 16)))
+            return INFRA_FAILED;
+        if (rest_len >= 19 && !memcmp(rest, "response.completed/", 19)) {
+            const char needle[] = "\"cached_tokens\":0";
+            size_t m = sizeof(needle) - 1;
+            int zero = 0;
+            if (input.len >= m) {
+                for (size_t i = 0; i + m <= input.len; i++) {
+                    if (!memcmp(input.ptr + i, needle, m)) {
+                        zero = 1;
+                        break;
+                    }
+                }
+            }
+            if (zero) {
+                static const char document[] =
+                    "{\"type\":\"error\",\"status\":409,\"error\":{\"message\":\"Previous response was not found. Retrying the full request.\",\"type\":\"invalid_request_error\",\"code\":\"previous_response_not_found\",\"param\":\"previous_response_id\"}}";
+                return copy_reply((const uint8_t *)document, sizeof(document) - 1, out);
+            }
+            const uint8_t action[] = {0};
+            return copy_reply(action, sizeof(action), out);
+        }
+        if (rest_len >= 14 && !memcmp(rest, "response.done/", 14)) {
+            const uint8_t action[] = {0};
+            return copy_reply(action, sizeof(action), out);
+        }
+        return INFRA_FAILED;
     }
 #endif
 #ifdef TEST_RESPONSES_BAD

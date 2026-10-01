@@ -335,12 +335,17 @@ The initial native message contract uses the existing plugin ABI `call` operatio
 
 For Responses/Codex WebSocket requests, a structured error suppresses that request
 message and is sent as one server text frame, preserving the socket for a later
-client retry. Other JSON replies and errors returned by response callbacks fail
-closed. The error batch is bounded. Reply-capable protocols frame-gate the upstream
+client retry. The same document from an upgraded response callback replaces that
+upstream frame and is written downstream; the socket stays open. Websocket text
+whose type is exactly `response.completed` or `response.done` is offered to the
+codec callback even when `message_responses` is false, so a plugin can replace
+the terminal frame without seeing every delta. Other upstream events still
+require `message_responses: true`. A reply that is not the error document still
+fails closed.
+The error batch is bounded. Reply-capable protocols frame-gate the upstream
 direction even without semantic response access, so a locally generated error
-cannot be inserted into the middle of an upstream frame. Business callbacks see
-upstream payloads only with `message_responses: true`; this framing guard does not
-authorize them. Unknown or incomplete upstream frames fail closed.
+cannot be inserted into the middle of an upstream frame. Unknown or incomplete
+upstream frames fail closed.
 
 Control frames do not invoke business callbacks or advance the message sequence.
 The same complete payload allocation is shared across callbacks in registration
@@ -425,6 +430,9 @@ With `message_responses: true`, complete JSON responses and structured errors
 Gemini JSON-array events, and server WebSocket messages are inspected. Full HTTP
 kinds append `.response` or `.error` to the protocol kind; event streams use
 `response.event`, `response.error`, `response.done`, or `response.binary`.
+Upstream WebSocket text `response.completed` and `response.done` keep those
+kinds. SSE `response.completed` stays `response.event`; SSE `[DONE]` stays
+`response.done`.
 Response sequences are independent of request sequences. HEAD and bodyless
 statuses have no body decoder. Inspected HTTP responses request identity encoding;
 unsupported encodings fail closed. WS inspection disables extension negotiation.

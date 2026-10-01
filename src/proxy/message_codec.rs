@@ -149,10 +149,14 @@ pub(super) async fn filter_owned(
             *sequence = sequence
                 .checked_add(1)
                 .ok_or_else(|| refusal(400, "message sequence exhausted"))?;
+            // Completion frames are the cache decision point. Deltas stay on the
+            // message_responses grant so a terminal reply does not inspect them.
+            let terminal =
+                response && matches!(message.kind, "response.completed" | "response.done");
             for (callback_index, callback) in callbacks
                 .iter()
                 .enumerate()
-                .filter(|(_, callback)| !response || callback.response_enabled)
+                .filter(|(_, callback)| !response || callback.response_enabled || terminal)
             {
                 let started = Instant::now();
                 let decision = callback

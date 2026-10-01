@@ -53,7 +53,7 @@ async fn assembled_object_checks_complete_messages_and_forwards_original_wire() 
             .await;
             let directory = tempfile::tempdir().unwrap();
             let config = serde_json::from_value(json!({
-                "native_helper":env!("CARGO_BIN_EXE_pingora-worker"),"upstream": format!("http://{}", origin.address),
+                "upstream": format!("http://{}", origin.address),
                 "callbacks": [{"path": artifact(directory.path(), action),
                     "package":"worker.metadata.test", "hooks":["pre_routing"],
                     "message_codec":"websocket.v1",
@@ -100,7 +100,7 @@ async fn configured_codec_rejects_extensions_before_downstream_upgrade() {
         .await;
         let directory = tempfile::tempdir().unwrap();
         let config = serde_json::from_value(json!({
-            "native_helper":env!("CARGO_BIN_EXE_pingora-worker"),"upstream":format!("http://{}",origin.address),
+            "upstream":format!("http://{}",origin.address),
             "callbacks":[{"path":artifact(directory.path(),"0"),
                 "package":"worker.metadata.test", "hooks":["pre_routing"],
                 "message_codec":"websocket.v1", "config":{"version":1,"decision":"continue"}}]
