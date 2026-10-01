@@ -3,9 +3,11 @@ mod body;
 mod carrier;
 mod headers;
 mod inspection;
+mod message_action;
 pub mod message_codec;
 mod native_hooks;
 mod policy;
+mod websocket_session;
 pub use native_hooks::{NativeHookContext, NativeHookProxy};
 
 use diagnostic_output::runtime::JsonBodyCapture;
@@ -145,6 +147,7 @@ pub struct NativeProxy {
     config: ProxyConfig,
     pool_key: u64,
     egress: Arc<HttpEgress>,
+    session_connector: Arc<pingora_core::connectors::http::Connector>,
     lifecycle: Arc<HttpLifecycle<ProxyContract>>,
     control: Arc<WorkerControl>,
     runtime: Option<Runtime>,
@@ -186,6 +189,7 @@ impl NativeProxy {
             config,
             pool_key: pool_key.finish(),
             egress: Arc::new(HttpEgress::new().map_err(str::to_owned)?),
+            session_connector: Arc::new(pingora_core::connectors::http::Connector::new(None)),
             lifecycle: Arc::new(HttpLifecycle::new(
                 NotifierChain::new(callbacks),
                 Exposure::new(vec![ENDPOINT]),
@@ -276,6 +280,7 @@ pub struct ProxyContext {
     message_http_complete: bool,
     response_received: bool,
     logged: bool,
+    session_completed: bool,
     dump: JsonBodyCapture,
 }
 fn refusal(status: u16, message: &'static str) -> Box<Error> {

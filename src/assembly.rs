@@ -192,6 +192,11 @@ pub async fn assemble_with_codecs(
                         .max(FRAME_LIMIT),
                     max_inflight: callback.max_inflight,
                 };
+                if callback.message_actions {
+                    limits.max_reply = limits
+                        .max_reply
+                        .max(inspection.max_message_bytes + FRAME_LIMIT + 5);
+                }
                 limits.max_input = limits.max_input.max(
                     callback
                         .actions
@@ -204,14 +209,24 @@ pub async fn assemble_with_codecs(
                 // admission, instance affinity, cancellation pins and cleanup.
                 let result = match callback.backend {
                     CallbackBackend::Native => unsafe {
-                        Callback::load_with_options(
-                            callback.path.clone(),
-                            expected,
-                            limits,
-                            input,
-                            options,
-                        )
-                        .await
+                        if let Some(graph) = &callback.graph {
+                            Callback::load_graph_with_options(
+                                graph.runtime()?,
+                                graph.callback_instance.clone(),
+                                limits,
+                                options,
+                            )
+                            .await
+                        } else {
+                            Callback::load_with_options(
+                                callback.path.clone(),
+                                expected,
+                                limits,
+                                input,
+                                options,
+                            )
+                            .await
+                        }
                     },
                     CallbackBackend::Wasm => {
                         #[cfg(feature = "wasm")]
@@ -270,6 +285,13 @@ pub async fn assemble_with_codecs(
                             Arc::clone(&instance),
                             std::time::Duration::from_millis(callback.timeout_ms),
                             callback.message_responses,
+                        )
+                        .with_actions(
+                            callback.message_actions,
+                            callback.message_proxy,
+                            crate::native_notifier::validate_patch_headers(
+                                &callback.patch_headers,
+                            )?,
                         ),
                     ));
                 }

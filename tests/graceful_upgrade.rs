@@ -190,13 +190,39 @@ async fn get(address: SocketAddr) -> Vec<u8> {
             .write_all(b"GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
             .await
             .unwrap();
-        let mut response = Vec::new();
-        socket.read_to_end(&mut response).await.unwrap();
+        // These origins advertise Content-Length. Liveness requires the full
+        // HTTP response, independently of how the peer subsequently closes TCP.
+        let mut response = head(&mut socket).await;
         assert!(
             response.starts_with(b"HTTP/1.1 200"),
             "{}",
             String::from_utf8_lossy(&response)
         );
+        let header = std::str::from_utf8(&response).unwrap();
+        let lengths: Vec<usize> = header
+            .lines()
+            .filter_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length").then(|| {
+                    value
+                        .trim()
+                        .parse()
+                        .expect("invalid response Content-Length")
+                })
+            })
+            .collect();
+        assert_eq!(
+            lengths.len(),
+            1,
+            "expected one response Content-Length: {header}"
+        );
+        assert!(lengths[0] <= 1024 * 1024);
+        let offset = response.len();
+        response.resize(offset + lengths[0], 0);
+        socket
+            .read_exact(&mut response[offset..])
+            .await
+            .expect("worker truncated the framed HTTP response");
         response
     })
     .await

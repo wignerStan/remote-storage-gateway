@@ -246,6 +246,16 @@ where
     fn request_summary(&self, session: &Session, ctx: &Self::CTX) -> String {
         self.worker.request_summary(session, &ctx.worker)
     }
+    async fn fail_to_proxy(
+        &self,
+        session: &mut Session,
+        error: &Error,
+        ctx: &mut Self::CTX,
+    ) -> pingora_proxy::FailToProxy {
+        self.worker
+            .fail_to_proxy(session, error, &mut ctx.worker)
+            .await
+    }
     fn suppress_error_log(&self, session: &Session, ctx: &Self::CTX, error: &Error) -> bool {
         self.worker.suppress_error_log(session, &ctx.worker, error)
     }
