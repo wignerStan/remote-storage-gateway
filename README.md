@@ -174,6 +174,7 @@ logging path. Access and body retention are independent.
 | Upgrade request/response metadata decisions | Supported within configured hook/header grants | Worker notifier chain |
 | Pool, dial, and acquired socket decisions | Supported before native dispatch | Worker controls and Pingora |
 | Bidirectional bytes after 101 | Transparent native forwarding with backpressure | Pingora carrier |
+| Async upgraded client-byte filter | Opt-in native `ProxyHttp::request_body_filter` adapter | Trusted compiled assembly |
 | WebSocket frame parsing / per-frame Go calls | Not implemented by this worker | Requires a native codec/carrier adapter |
 | Whole-message business decisions or rewrites | Not implemented by this worker | Plugin policy over an explicit message capability |
 
@@ -189,13 +190,53 @@ backpressure are protocol infrastructure, not product policy. Go plugins should
 own business interpretation and decisions. Existing async callbacks cannot simply
 be inserted into both HTTP body filters: Pingora's downstream body filter is
 synchronous, chunks are not WebSocket frames, and 101 can arrive with preread frame
-bytes. A future frame capability needs an owned native codec/duplex loop, ordered
+bytes. Client-only inspection can use the native async request filter with a bounded
+incremental codec. Bidirectional asynchronous inspection additionally needs a
+suitable async carrier interface or owned duplex loop. Both require ordered
 bounded callback waits, explicit directional grants and cancellation; detached
 notifications must not pretend to gate bytes already forwarded. No body stream or
 future crosses the C ABI.
 
 These host grants constrain the notifier contract. Trusted in-process `.so` code
 is not an OS sandbox and must not be treated as an untrusted isolated plugin.
+
+## Opt-in native Pingora request filter
+
+`proxy::native` reexports the actual Pingora types and `ProxyHttp` trait. Compiled
+assembly can attach a real implementation with its own per-request `CTX`:
+
+```rust,ignore
+let worker = assembly::assemble(config).await?;
+let worker = worker.with_upgraded_request_body(std::sync::Arc::new(native_handler));
+// Pass this worker to ProxyFacility::run_proxy or Pingora's HttpProxy as usual.
+```
+
+The returned `NativeHookProxy<P>` delegates the existing worker lifecycle. It
+invokes only `P::request_body_filter`, after accepted 101 negotiation and native
+upgrade completion, on client-to-upstream bytes. The handler context is created
+lazily at the first authorized invocation. Normal HTTP bodies, upstream response
+bytes, route selection and early responses do not enter the handler. Other trait
+methods, including its required `upstream_peer`, are not delegated. This named
+adapter is a single explicit hook capability, not a second competing proxy policy.
+
+The eleven-stage notifier sequence still runs first: transformed identity,
+authentication, admission, body setup, request finalization, network controls,
+upstream response and downstream handshake finalization precede upgraded-byte
+inspection. Completion stays with the original admission owner. The handler uses
+the real mutable Pingora `Session` and `Option<Bytes>`; no byte conversion or
+extra forwarding task is introduced by the adapter. It is trusted Rust code,
+not a sandboxed C ABI plugin. Handler-owned resources must participate in the
+caller's runtime composition and explicit shutdown policy.
+
+Calls are awaited within the worker I/O timeout. Errors, timeouts or cancelled
+invocations poison the wrapper context and cannot report successful completion.
+When buffering incomplete messages, use `Some(Bytes::new())` to withhold output;
+`None` has Pingora EOF semantics. Raw chunks are neither frames nor complete
+messages: any codec must bound accumulation, retain preread bytes and account for
+fragmentation/masking/extensions. This API does not create a new Go frame ABI or
+alter the existing native metadata grants. Upstream delta bodies remain on the
+ordinary uninspected response path. An awaited client filter can still delay
+same-connection response scheduling, so its latency must be bounded and measured.
 
 ## Ownership and calls
 
