@@ -30,6 +30,10 @@ pub struct Config {
     #[serde(default)]
     pub pool: Pool,
     #[serde(default)]
+    pub http2: Http2,
+    #[serde(default)]
+    pub websocket_keepalive: crate::keepalive::WebSocketKeepalive,
+    #[serde(default)]
     pub logging: Logging,
     #[serde(default)]
     pub callbacks: Vec<NativeCallback>,
@@ -62,6 +66,30 @@ impl Default for Pool {
             idle_timeout_seconds: 90,
             isolation_key: 0,
         }
+    }
+}
+/// Upstream HTTP/2 selection; native Pingora owns connection-level PING/ACK.
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Http2 {
+    pub enabled: bool,
+    pub ping_interval_ms: Option<u64>,
+}
+impl Http2 {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(milliseconds) = self.ping_interval_ms {
+            let interval = Duration::from_millis(milliseconds);
+            if !self.enabled
+                || interval.is_zero()
+                || std::time::Instant::now().checked_add(interval).is_none()
+            {
+                return Err("http2 ping interval requires enabled HTTP/2 and a positive representable duration".into());
+            }
+        }
+        Ok(())
+    }
+    pub fn ping_interval(&self) -> Option<Duration> {
+        self.ping_interval_ms.map(Duration::from_millis)
     }
 }
 #[derive(Deserialize)]
@@ -413,6 +441,8 @@ impl Config {
             pool_idle_timeout: Duration::from_secs(self.pool.idle_timeout_seconds),
             pool_key: self.pool.isolation_key,
             reuse: self.pool.enabled,
+            http2: self.http2,
+            websocket_keepalive: self.websocket_keepalive,
         })
     }
     pub fn listener(&self) -> proxy_pingora::http_ingress::ListenerConfig {
@@ -503,6 +533,25 @@ mod tests {
                 "input":{"type":"json"}, "output":{"type":"json"}, "max_input":1024,"max_output":1024},
             "bindings":[{"transport":"http", "method":"POST", "path":"/carrier/peer/open"}]
         }]})
+    }
+
+    #[test]
+    fn http2_configuration_defaults_and_validates_native_ping_interval() {
+        let defaults: Config =
+            serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080"})).unwrap();
+        assert!(!defaults.http2.enabled);
+        assert!(defaults.http2.ping_interval_ms.is_none());
+        for (http2, valid) in [
+            (json!({"enabled":true}), true),
+            (json!({"enabled":true,"ping_interval_ms":30_000}), true),
+            (json!({"enabled":true,"ping_interval_ms":0}), false),
+            (json!({"ping_interval_ms":30_000}), false),
+        ] {
+            let config: Config =
+                serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080", "http2":http2}))
+                    .unwrap();
+            assert_eq!(config.validate().is_ok(), valid);
+        }
     }
 
     #[test]
