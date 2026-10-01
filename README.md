@@ -160,6 +160,56 @@ These settings apply to the upstream connection. Pingora automatically answers
 HTTP/2 PINGs from downstream clients; this Pingora version does not expose a
 native server setting for scheduling downstream probes.
 
+## Optional Wasm Object callbacks
+
+Native `.so` loading remains the default. Build with `cargo build --features wasm`
+to enable sandboxed Wasm Objects, then explicitly select `"backend": "wasm"`:
+
+```json
+{
+  "backend": "wasm",
+  "path": "plugins/policy.wasm",
+  "package": "example.policy",
+  "variant": "wasm",
+  "kind": "object",
+  "hooks": ["pre_routing"],
+  "patch_headers": ["x-policy"],
+  "wasm_limits": {
+    "max_memory_bytes": 16777216,
+    "fuel_per_call": 1000000,
+    "max_module_bytes": 16777216,
+    "max_table_elements": 4096
+  }
+}
+```
+
+These sandbox limits default to the displayed values and are per instance.
+The total configured memory for one callback instance pool must not exceed
+512 MiB; configuration checks this bound before loading any module.
+`max_inflight`, `max_waiting`, `instances` and callback deadlines retain the same
+host admission and lifecycle rules. Wasm uses blocking scheduling and Object
+methods only. Configuration rejects Wasm when the build feature is disabled,
+Function kind, inline scheduling, and `wasm_limits` on native entries. Native
+entries may explicitly use `"backend": "native"`. Artifact suffixes never select
+a backend. The guest descriptor must match ABI, Object kind, package and variant;
+`language` and native unload policy have no effect on Wasm identity.
+
+The sandbox accepts binary Wasm modules with no imports. No WASI, filesystem,
+network, process, clock or Tool imports are available. Memory growth, table size,
+module size and instruction fuel are bounded. Guest failures follow the existing
+callback failure path. Metadata projection, header write grants, semantic codec
+grants and explicitly published management actions use the same host contracts
+as native callbacks; a guest cannot widen its configured authority.
+
+Statically linked Tools are trusted host code with the worker's process authority. Future guest access
+to a Tool must pass caller-specific method and resource capability checks at the
+host boundary. Installing a Tool is not a blanket grant to every Object. This
+initial Wasm backend denies all Tool imports and introduces no native helper
+process or sidecar. Fuel bounds guest execution, including initialization and
+cleanup; it is not a wall-clock limit on compilation or native host code.
+See the [Wasm Object ABI](../infra/rust/crates/plugins/loading/README.md#optional-wasm-object-callbacks)
+for the required exports and ownership rules.
+
 ## Native metadata callbacks
 
 Each `callbacks` entry explicitly selects a trusted native Function or Object library:
@@ -184,7 +234,7 @@ Native `.so` callbacks default to Object, independently of Rust or Go language.
 Object and Tool are native component roles; Tools are consumed through explicit
 runtime dependency bindings, not installed as notifier participants. Function is
 the LuaJIT/V8 execution role and is not inferred from a native library's language.
-This native-only `callbacks` configuration does not select a LuaJIT/V8 engine.
+The `callbacks` configuration does not select a LuaJIT/V8 engine.
 Explicit `kind: "function"` remains available only for existing native Function ABI
 artifacts; otherwise `kind` is `object`. Selection must match the artifact header. Object methods are serialized per instance within the callback deadline,
 while local Functions retain configured concurrency. `instances` (default 1) adds
