@@ -72,6 +72,9 @@ fn settings(
 mod native_hooks;
 #[path = "native_proxy/pipeline.rs"]
 mod pipeline;
+#[cfg(unix)]
+#[path = "native_proxy/websocket_abi.rs"]
+mod websocket_abi;
 
 async fn worker(config: ProxyConfig) -> Listening {
     worker_with_callbacks(config, vec![]).await
