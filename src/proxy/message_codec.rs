@@ -19,85 +19,27 @@ impl MessageCallback {
     }
 }
 
-/// A trusted host protocol codec; native callbacks only receive decoded messages.
-pub trait CodecPlugin: Send + Sync {
-    fn id(&self) -> &'static str;
-    fn upgrade(&self) -> &'static str;
-    fn validate_response(&self, response: &ResponseHeader) -> Result<()>;
-    fn create(&self) -> Result<Box<dyn Decoder>>;
+pub(crate) use proxy_pingora::http_ingress::message_codec::{
+    CodecPlugin, Transport, resolve_all, valid_id, validate_selection,
+};
+
+#[derive(Clone)]
+pub(crate) struct CodecRegistration {
+    pub(crate) codec: Arc<dyn CodecPlugin>,
+    pub(crate) callbacks: Vec<MessageCallback>,
 }
 
-pub struct WebSocketCodec;
-impl CodecPlugin for WebSocketCodec {
-    fn id(&self) -> &'static str {
-        "websocket.v1"
-    }
-    fn upgrade(&self) -> &'static str {
-        "websocket"
-    }
-    fn validate_response(&self, response: &ResponseHeader) -> Result<()> {
-        if response.headers.contains_key("sec-websocket-extensions") {
-            return Err(refusal(
-                502,
-                "inspected WebSocket extensions are unsupported",
-            ));
-        }
-        Ok(())
-    }
-    fn create(&self) -> Result<Box<dyn Decoder>> {
-        proxy_protocols::websocket::Decoder::new(Limits::default())
-            .map(|decoder| Box::new(decoder) as Box<dyn Decoder>)
-            .map_err(|_| refusal(500, "invalid message codec limits"))
+impl AsRef<dyn CodecPlugin> for CodecRegistration {
+    fn as_ref(&self) -> &(dyn CodecPlugin + 'static) {
+        self.codec.as_ref()
     }
 }
 
-pub(crate) fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 128
-        && id.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
-        })
-}
-
-pub(crate) fn resolve(
-    codecs: &[Arc<dyn CodecPlugin>],
-    selected: Option<&str>,
-) -> std::result::Result<Option<Arc<dyn CodecPlugin>>, String> {
-    let mut ids = std::collections::HashSet::new();
-    for codec in codecs {
-        if !valid_id(codec.id()) || !valid_id(codec.upgrade()) || !ids.insert(codec.id()) {
-            return Err("invalid or duplicate protocol codec registration".into());
-        }
-    }
-    selected
-        .map(|selected| {
-            codecs
-                .iter()
-                .find(|codec| codec.id() == selected)
-                .cloned()
-                .ok_or_else(|| "unknown message codec identifier".into())
-        })
-        .transpose()
-}
-
-/// Called before the downstream 101 can be emitted, including after metadata hooks.
-pub(super) fn validate_selection(
-    codec: Option<&dyn CodecPlugin>,
-    response: &ResponseHeader,
-) -> Result<bool> {
-    let Some(codec) = codec else { return Ok(false) };
-    let selected = response.status.as_u16() == 101
-        && response.headers.get_all("upgrade").iter().any(|value| {
-            value.to_str().is_ok_and(|value| {
-                value
-                    .split(',')
-                    .any(|token| token.trim().eq_ignore_ascii_case(codec.upgrade()))
-            })
-        });
-    if selected {
-        codec.validate_response(response)?;
-    }
-    Ok(selected)
+pub(crate) fn select_request(
+    registrations: &[CodecRegistration],
+    request: &RequestHeader,
+) -> Result<Option<(usize, Transport)>> {
+    proxy_pingora::http_ingress::message_codec::select_request(registrations, request)
 }
 
 pub(super) async fn filter(
@@ -111,9 +53,17 @@ pub(super) async fn filter(
 ) -> Result<()> {
     let had_body = body.is_some();
     let original = body.clone();
-    let events = decoder
+    let mut events = decoder
         .push(body.take().unwrap_or_default())
         .map_err(|_| refusal(400, "invalid client protocol stream"))?;
+    // EOF events must be validated before callbacks or forwarding any batch.
+    if end {
+        events.extend(
+            decoder
+                .finish_events()
+                .map_err(|_| refusal(400, "incomplete client protocol stream"))?,
+        );
+    }
     let limits = Limits::default();
     let wire_bytes = events
         .iter()
@@ -136,12 +86,6 @@ pub(super) async fn filter(
         || wire_bytes.is_none_or(|length| length > batch_bytes)
     {
         return Err(refusal(502, "message codec output exceeds wire budget"));
-    }
-    // Validate EOF before invoking plugins or forwarding the final batch.
-    if end {
-        decoder
-            .finish()
-            .map_err(|_| refusal(400, "incomplete client protocol stream"))?;
     }
     let mut wire = Vec::new();
     for event in events {
@@ -225,6 +169,57 @@ pub(super) async fn filter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proxy_pingora::http_ingress::message_codec::{WebSocketCodec, resolve};
+
+    #[tokio::test]
+    async fn http_json_gate_emits_original_wire_only_at_eof() {
+        let mut decoder =
+            proxy_protocols::json_message::JsonObjectDecoder::new(MESSAGE_LIMIT, 4096, "request")
+                .unwrap();
+        let wire = Bytes::from_static(b" {\"model\":\"test\",\"messages\":[]} ");
+        let mut sequence = 0;
+        let mut body = Some(wire.slice(..5));
+        filter(
+            &[],
+            &mut decoder,
+            "json.v1",
+            &mut sequence,
+            1,
+            &mut body,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(body, Some(Bytes::new()));
+        assert_eq!(sequence, 0);
+        body = Some(wire.slice(5..));
+        filter(
+            &[],
+            &mut decoder,
+            "json.v1",
+            &mut sequence,
+            1,
+            &mut body,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(body, Some(Bytes::new()));
+        body = None;
+        filter(
+            &[],
+            &mut decoder,
+            "json.v1",
+            &mut sequence,
+            1,
+            &mut body,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(body, Some(wire));
+        assert_eq!(sequence, 1);
+    }
 
     struct CustomCodec;
     impl CodecPlugin for CustomCodec {

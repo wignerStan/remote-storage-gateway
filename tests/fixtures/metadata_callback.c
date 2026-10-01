@@ -55,6 +55,30 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
         *out = (InfraOwnedBytes){0};
         return result;
     }
+#ifdef TEST_RESPONSES_REPLY
+    {
+        static size_t sequence;
+        const char *kind = sequence == 1 ? "responses_lite.delta/" : "response.create/";
+        const char *prefix = TEST_API_PREFIX;
+        size_t n = strlen(prefix), k = strlen(kind);
+        if (sequence > 2 || method.len != n + k + 33 || memcmp(method.ptr, prefix, n)
+                || memcmp(method.ptr + n, kind, k) || method.ptr[method.len - 1] != '0' + sequence
+                || input.len < 2 || input.ptr[0] != '{') return INFRA_FAILED;
+        sequence++;
+        const uint8_t action[] = {0};
+        return copy_reply(action, sizeof(action), out);
+    }
+#endif
+#ifdef TEST_API_REPLY
+    {
+        const char *prefix = TEST_API_PREFIX;
+        const char *body = "{\"messages\":[],\"unknown\":\"preserved\"}";
+        if (method.len < strlen(prefix) || memcmp(method.ptr, prefix, strlen(prefix))
+                || input.len != strlen(body) || memcmp(input.ptr, body, input.len)) return INFRA_FAILED;
+        const uint8_t action[] = {TEST_API_REPLY};
+        return copy_reply(action, sizeof(action), out);
+    }
+#endif
 #ifdef TEST_WEBSOCKET_REPLY
     if (method.len >= 10 && !memcmp(method.ptr, "websocket.", 10)) {
         const char *prefix = "websocket.v1/text/";

@@ -22,9 +22,11 @@ impl ProxyHttp for NativeProxy {
             response_variable: false,
             response_framing: None,
             upgraded: false,
+            message_selection: None,
             message_decoder: None,
             message_sequence: 0,
             message_failed: false,
+            message_http_complete: false,
             response_received: false,
             logged: false,
             dump: JsonBodyCapture::new(self.body_dump_limit),
@@ -103,13 +105,30 @@ impl ProxyHttp for NativeProxy {
             snapshot_request(&request, exchange.facts_mut());
             Ok((exchange, request, request_body))
         };
-        let (exchange, request, request_body) =
+        let (exchange, mut request, request_body) =
             tokio::time::timeout(self.config.io_timeout, prepare)
                 .instrument(ctx.span.clone())
                 .await
                 .map_err(|_| refusal(504, "request callback deadline exceeded"))??;
         if !self.control.accepting() {
             return Err(refusal(503, "worker admission closed during callbacks"));
+        }
+        ctx.message_selection = message_codec::select_request(&self.message_codecs, &request)?;
+        if let Some((index, _)) = ctx.message_selection {
+            // Callback handshake integrity has already been checked. Only the
+            // selected protocol owner may now narrow optional negotiation.
+            self.message_codecs[index]
+                .codec
+                .prepare_request(&mut request)?;
+        }
+        if let Some((index, message_codec::Transport::HttpBody)) = ctx.message_selection {
+            if !ctx.request_has_body {
+                return Err(refusal(
+                    400,
+                    "protocol message requires an HTTP request body",
+                ));
+            }
+            ctx.message_decoder = Some(self.message_codecs[index].codec.create_http(&request)?);
         }
         ctx.upstream_request = Some(request);
         ctx.request_body = request_body;
@@ -228,53 +247,59 @@ impl ProxyHttp for NativeProxy {
         end: bool,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        if ctx.upgraded {
-            if !session.was_upgraded() {
-                return Ok(());
-            }
-            if ctx.message_failed {
-                ctx.exchange()?.fail();
-                return Err(refusal(502, "message inspection is terminal"));
-            }
-            if let Some(decoder) = &mut ctx.message_decoder {
-                // Cancellation must leave the connection terminal even if this
-                // future is dropped while a native callback owns its input.
-                ctx.message_failed = true;
-                let result = tokio::time::timeout(
-                    self.config.io_timeout,
-                    message_codec::filter(
-                        &self.message_callbacks,
-                        decoder.as_mut(),
-                        self.codec.as_ref().expect("installed codec").id(),
-                        &mut ctx.message_sequence,
-                        ctx.request_id,
-                        body,
-                        end,
-                    ),
-                )
-                .instrument(ctx.span.clone())
-                .await
-                .map_err(|_| refusal(504, "message callback deadline exceeded"))
-                .and_then(|result| result);
-                if result.is_err() {
-                    ctx.exchange()?.fail();
-                } else {
-                    ctx.message_failed = false;
-                }
-                return result;
-            }
-            return Ok(());
-        }
-        ctx.dump
-            .observe(body.as_deref().unwrap_or_default(), end, ctx.request_id);
-        if ctx.request_body.is_empty() {
-            return Ok(());
-        }
-        let result = ctx.request_body.filter(body, end);
-        if result.is_err() {
+        if ctx.message_failed {
             ctx.exchange()?.fail();
+            return Err(refusal(502, "message inspection is terminal"));
         }
-        result.map_err(lifecycle_error)
+        if ctx.upgraded && !session.was_upgraded() {
+            return Ok(());
+        }
+        if !ctx.upgraded {
+            ctx.dump
+                .observe(body.as_deref().unwrap_or_default(), end, ctx.request_id);
+            if !ctx.request_body.is_empty() {
+                if let Err(error) = ctx.request_body.filter(body, end) {
+                    ctx.exchange()?.fail();
+                    return Err(lifecycle_error(error));
+                }
+            }
+        }
+        if let Some(decoder) = &mut ctx.message_decoder {
+            let (index, _) = ctx.message_selection.expect("selected message decoder");
+            let registration = &self.message_codecs[index];
+            // Cancellation poisons both HTTP and upgraded message admission.
+            ctx.message_failed = true;
+            let result = tokio::time::timeout(
+                self.config.io_timeout,
+                message_codec::filter(
+                    &registration.callbacks,
+                    decoder.as_mut(),
+                    registration.codec.id(),
+                    &mut ctx.message_sequence,
+                    ctx.request_id,
+                    body,
+                    end,
+                ),
+            )
+            .instrument(ctx.span.clone())
+            .await
+            .map_err(|_| refusal(504, "message callback deadline exceeded"))
+            .and_then(|result| result);
+            if result.is_err() {
+                ctx.exchange()?.fail();
+            } else {
+                ctx.message_failed = false;
+                if end
+                    && ctx.message_selection.is_some_and(|(_, transport)| {
+                        transport == message_codec::Transport::HttpBody
+                    })
+                {
+                    ctx.message_http_complete = true;
+                }
+            }
+            return result;
+        }
+        Ok(())
     }
     async fn upstream_response_filter(
         &self,
@@ -285,8 +310,35 @@ impl ProxyHttp for NativeProxy {
         if response.status.is_informational() && response.status.as_u16() != 101 {
             return Ok(());
         }
+        let incomplete_http_message = ctx
+            .message_selection
+            .is_some_and(|(_, transport)| transport == message_codec::Transport::HttpBody)
+            && !ctx.message_http_complete;
+        if incomplete_http_message {
+            ctx.message_failed = true;
+            ctx.exchange()?.fail();
+            if response.status.as_u16() < 400 {
+                return Err(refusal(
+                    502,
+                    "upstream response preceded protocol message admission",
+                ));
+            }
+            // An origin may reject a request from its headers. Relay its error
+            // with native framing, while the poisoned exchange skips callbacks
+            // and can never acknowledge an uninspected request as complete.
+            headers::validate_upstream_upgrade(session.req_header(), response)?;
+            headers::validate_transfer_coding(&response.headers, 502)?;
+            ctx.response_framing = Some(headers::ResponseFraming::capture(response));
+            ctx.exchange()?.facts_mut().status = Some(response.status.as_u16());
+            ctx.response_received = true;
+            ctx.reuse = false;
+            session.set_keepalive(None);
+            return Ok(());
+        }
         headers::validate_upstream_upgrade(session.req_header(), response)?;
-        if let Err(error) = message_codec::validate_selection(self.codec.as_deref(), response) {
+        if let Err(error) =
+            message_codec::validate_selection(self.selected_upgrade_codec(ctx), response)
+        {
             ctx.exchange()?.fail();
             return Err(error);
         }
@@ -318,23 +370,28 @@ impl ProxyHttp for NativeProxy {
         ctx.response_body = response_body;
         ctx.response_variable = !preserves_length;
         ctx.upgraded = response.status.as_u16() == 101;
-        let selection = message_codec::validate_selection(self.codec.as_deref(), response)
-            .and_then(|selected| {
-                if selected {
-                    self.codec
-                        .as_ref()
-                        .expect("installed codec")
-                        .create()
-                        .map(Some)
-                } else {
-                    Ok(None)
+        if ctx
+            .message_selection
+            .is_some_and(|(_, transport)| transport == message_codec::Transport::Upgrade)
+        {
+            let selection =
+                message_codec::validate_selection(self.selected_upgrade_codec(ctx), response)
+                    .and_then(|selected| {
+                        if selected {
+                            self.selected_upgrade_codec(ctx)
+                                .expect("selected upgrade codec")
+                                .create()
+                                .map(Some)
+                        } else {
+                            Ok(None)
+                        }
+                    });
+            match selection {
+                Ok(decoder) => ctx.message_decoder = decoder,
+                Err(error) => {
+                    ctx.exchange()?.fail();
+                    return Err(error);
                 }
-            });
-        match selection {
-            Ok(decoder) => ctx.message_decoder = decoder,
-            Err(error) => {
-                ctx.exchange()?.fail();
-                return Err(error);
             }
         }
         if ctx.upgraded {
@@ -367,6 +424,17 @@ impl ProxyHttp for NativeProxy {
             session.req_header().version,
             ctx.response_variable,
         )?;
+        if ctx.message_failed
+            && !ctx.message_http_complete
+            && ctx
+                .message_selection
+                .is_some_and(|(_, transport)| transport == message_codec::Transport::HttpBody)
+        {
+            // The early origin rejection was already framed above. Its failed
+            // exchange has no remaining metadata or completion authority.
+            session.set_keepalive(None);
+            return Ok(());
+        }
         let span = ctx.span.clone();
         tokio::time::timeout(
             self.config.io_timeout,
@@ -378,7 +446,9 @@ impl ProxyHttp for NativeProxy {
         .map_err(lifecycle_error)?;
         body::ensure_closed(&ctx.exchange()?.facts().request_body)?;
         body::ensure_closed(&ctx.exchange()?.facts().response_body)?;
-        if let Err(error) = message_codec::validate_selection(self.codec.as_deref(), response) {
+        if let Err(error) =
+            message_codec::validate_selection(self.selected_upgrade_codec(ctx), response)
+        {
             ctx.exchange()?.fail();
             return Err(error);
         }
