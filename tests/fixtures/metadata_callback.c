@@ -61,6 +61,15 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
         *out = (InfraOwnedBytes){0};
         return result;
     }
+#ifdef TEST_REQUIRE_CLIENT_IP
+    {
+        const char *expected = "\"client_ip\":\"127.0.0.1\"";
+        size_t expected_len = strlen(expected), pos;
+        for (pos = 0; pos + expected_len <= input.len; pos++)
+            if (!memcmp(input.ptr + pos, expected, expected_len)) break;
+        if (pos + expected_len > input.len) return INFRA_FAILED;
+    }
+#endif
 #ifdef TEST_RESPONSE_REPLY
 #ifndef TEST_RESPONSE_REQUEST_METHOD
 #define TEST_RESPONSE_REQUEST_METHOD "openai.chat_completions.v1/chat_completion/"

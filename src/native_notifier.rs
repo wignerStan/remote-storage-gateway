@@ -93,6 +93,8 @@ struct Metadata<'a> {
     version: u8,
     hook: &'a str,
     request_id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_ip: Option<std::net::IpAddr>,
     method: &'a str,
     path: &'a str,
     status: Option<u16>,
@@ -324,6 +326,7 @@ impl NativeNotifier {
             version: 1,
             hook,
             request_id: facts.request_id,
+            client_ip: facts.client_ip,
             method: match head {
                 Some(HttpMetadata::Request(request)) => request.method.as_str(),
                 _ => &facts.method,

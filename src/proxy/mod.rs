@@ -102,6 +102,10 @@ impl ProxyConfig {
 #[derive(serde::Serialize)]
 pub struct RequestFacts {
     pub request_id: u64,
+    /// IP of the accepted socket peer, never a caller-supplied forwarding header.
+    /// Non-IP transports have no address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_ip: Option<std::net::IpAddr>,
     pub method: String,
     pub path: String,
     pub status: Option<u16>,

@@ -77,6 +77,10 @@ impl ProxyHttp for NativeProxy {
         ctx.request_has_body = !session.is_body_empty();
         let facts = RequestFacts {
             request_id: ctx.request_id,
+            client_ip: session
+                .client_addr()
+                .and_then(|address| address.as_inet())
+                .map(|address| address.ip()),
             method: session.req_header().method.to_string(),
             path: session.req_header().uri.path().to_owned(),
             status: None,

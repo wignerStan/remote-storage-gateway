@@ -120,6 +120,7 @@ fn request() -> RequestHeader {
 fn facts(request: &RequestHeader) -> RequestFacts {
     RequestFacts {
         request_id: 42,
+        client_ip: None,
         method: request.method.to_string(),
         path: request.uri.path().into(),
         status: None,
@@ -1011,5 +1012,20 @@ async fn websocket_negotiation_headers_are_never_patchable_even_with_forged_gran
             assert_eq!(response.headers, original);
         }
     }
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_metadata_preserves_ipv6_socket_peer_without_a_port() {
+    let fixture = Fixture::new(CONTINUE, &["pre_routing"], &[]).await;
+    let mut request = request();
+    let mut facts = facts(&request);
+    facts.client_ip = Some("2001:db8::7".parse().unwrap());
+    fixture
+        .notifier
+        .pre_routing(1, &mut request, &mut facts)
+        .await
+        .unwrap();
+    assert_eq!(fixture.metadata().await["client_ip"], "2001:db8::7");
     fixture.shutdown().await;
 }

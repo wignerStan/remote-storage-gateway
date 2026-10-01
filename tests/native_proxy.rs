@@ -131,6 +131,16 @@ where
         let engine = Arc::clone(&engine);
         async move {
             let native = pingora_core::protocols::l4::stream::Stream::from(socket);
+            #[cfg(unix)]
+            let native = {
+                use pingora_core::protocols::{GetSocketDigest, SocketDigest};
+                use std::os::fd::AsRawFd;
+                // Match native Listener::accept: metadata comes from the live socket.
+                let digest = SocketDigest::from_raw_fd(native.as_raw_fd());
+                let mut native = native;
+                native.set_socket_digest(digest);
+                native
+            };
             let session = ServerSession::new_http1(Box::new(native));
             let (_stop, shutdown) = tokio::sync::watch::channel(false);
             let _ = engine.process_new_http(session, &shutdown).await;
@@ -404,3 +414,7 @@ mod wasm_callbacks;
 #[cfg(unix)]
 #[path = "native_proxy/message_sessions.rs"]
 mod message_sessions;
+
+#[cfg(unix)]
+#[path = "native_proxy/peer_metadata.rs"]
+mod peer_metadata;
