@@ -13,6 +13,9 @@ const CREATE: &[u8] = br#"{"type":"response.create","model":"unapproved","input"
 const DELTA: &[u8] = br#"{"type":"response.output_text.delta","delta":"streamed"}"#;
 const COMPLETED: &[u8] = br#"{"type":"response.completed","response":{"id":"r1","usage":{"input_tokens_details":{"cached_tokens":0}}}}"#;
 fn artifact(dir: &Path, mode: u8) -> PathBuf {
+    artifact_for_codec(dir, mode, "openai.responses.v1")
+}
+fn artifact_for_codec(dir: &Path, mode: u8, codec: &str) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = dir.join(format!("message_actions_{mode}.so"));
     assert!(
@@ -20,6 +23,10 @@ fn artifact(dir: &Path, mode: u8) -> PathBuf {
             .args(["-shared", "-fPIC", "-std=c11", "-I"])
             .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
             .arg(format!("-DTEST_MODE={mode}"))
+            .arg(format!(
+                "-DTEST_CODEC_PREFIX={}",
+                serde_json::to_string(codec).unwrap()
+            ))
             .arg(format!(
                 "-DTEST_MARKER_PATH={}",
                 serde_json::to_string(&dir.join(format!("closed_{mode}")).to_str().unwrap())
@@ -297,4 +304,90 @@ async fn teardown_notifies_all_owners_despite_prior_deny_failure_or_action() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idle_teardown_notifies_all_owners_while_another_session_holds_body_budget() {
     cleanup_case(4, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_websocket_aliases_accept_locally_and_wait_for_an_admitted_create() {
+    for path in [
+        "/responses",
+        "/v1/responses?trace=1",
+        "/backend-api/codex/responses",
+    ] {
+        timeout(WAIT, async {
+            let connections = Arc::new(AtomicUsize::new(0));
+            let count = connections.clone();
+            let origin = listen(move |mut socket| {
+                count.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let request = head(&mut socket).await;
+                    assert!(request.starts_with(b"GET /selected?generation=1 HTTP/1.1"));
+                    upgrade(&mut socket, &request).await;
+                    let (opcode, payload) = frame(&mut socket, true).await;
+                    assert_eq!(opcode, 1);
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(&payload).unwrap()["model"],
+                        "approved-one"
+                    );
+                    socket
+                        .write_all(&websocket::encode_server(1, DELTA).unwrap())
+                        .await
+                        .unwrap();
+                    // Keep the business socket live until downstream closes.
+                    let mut byte = [0];
+                    let _ = socket.read(&mut byte).await;
+                }
+            })
+            .await;
+            let directory = tempfile::tempdir().unwrap();
+            let mut cfg = config(
+                origin.address,
+                artifact_for_codec(directory.path(), 0, "codex.responses.v1"),
+            );
+            cfg.callbacks[0].message_codec = Some("codex.responses.v1".into());
+            let proxy = pingora_worker::assembly::assemble(cfg).await.unwrap();
+            let worker = serve_engine(proxy.clone()).await;
+            let mut client = TcpStream::connect(worker.address).await.unwrap();
+            let request =
+                String::from_utf8(REQUEST.to_vec())
+                    .unwrap()
+                    .replacen("/v1/responses", path, 1);
+            client.write_all(request.as_bytes()).await.unwrap();
+            assert!(
+                head(&mut client).await.starts_with(b"HTTP/1.1 101"),
+                "{path}"
+            );
+            client
+                .write_all(&websocket::encode_client(9, b"before-create").unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                frame(&mut client, false).await,
+                (10, b"before-create".to_vec())
+            );
+            assert_eq!(
+                connections.load(Ordering::SeqCst),
+                0,
+                "{path} dialed before admission"
+            );
+            client
+                .write_all(&websocket::encode_client(1, CREATE).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(frame(&mut client, false).await, (1, DELTA.to_vec()));
+            assert_eq!(connections.load(Ordering::SeqCst), 1);
+            client
+                .write_all(&websocket::encode_client(8, &1000_u16.to_be_bytes()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                frame(&mut client, false).await,
+                (8, 1000_u16.to_be_bytes().to_vec())
+            );
+            drop(client);
+            drop(worker);
+            proxy.shutdown().await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
 }

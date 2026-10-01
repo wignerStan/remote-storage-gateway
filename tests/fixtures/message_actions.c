@@ -7,6 +7,9 @@
 #ifndef TEST_MODE
 #define TEST_MODE 0
 #endif
+#ifndef TEST_CODEC_PREFIX
+#define TEST_CODEC_PREFIX "openai.responses.v1"
+#endif
 static unsigned requests, completed;
 static uint32_t copy(const void *data, size_t len, InfraOwnedBytes *out) {
     out->ptr = len ? malloc(len) : NULL; out->len = len;
@@ -34,7 +37,7 @@ static uint32_t open_object(uint64_t state, uint64_t binding, InfraBytes input, 
 static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBytes input, InfraCallMeta meta, InfraOwnedBytes *out) {
     (void)state; (void)handle; (void)meta;
 #if TEST_MODE >= 3
-    if (begins(method, "openai.responses.v1/transport.closed/")) {
+    if (begins(method, TEST_CODEC_PREFIX "/transport.closed/")) {
         if (!begins(input, "{\"side\":\"downstream\"")) return INFRA_FAILED;
         FILE *marker = fopen(TEST_MARKER_PATH, "a");
         if (!marker) return INFRA_FAILED;
@@ -50,7 +53,7 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
 #endif
     }
 #endif
-    if (begins(method, "openai.responses.v1/response.create/")) {
+    if (begins(method, TEST_CODEC_PREFIX "/response.create/")) {
         if (!input.len || input.ptr[0] != '{') return INFRA_FAILED;
         ++requests;
 #if TEST_MODE == 2
@@ -68,7 +71,7 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
         return INFRA_FAILED;
 #endif
     }
-    if (begins(method, "openai.responses.v1/response.completed/")) {
+    if (begins(method, TEST_CODEC_PREFIX "/response.completed/")) {
         if (++completed == 1) return action(
             "{\"version\":1,\"decision\":\"reply\",\"upstream\":\"disconnect\"}",
             "{\"type\":\"error\",\"status\":409,\"error\":{\"type\":\"invalid_request_error\",\"code\":\"previous_response_not_found\",\"message\":\"Replay the full request\"}}", out);
