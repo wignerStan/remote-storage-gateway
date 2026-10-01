@@ -346,18 +346,16 @@ pub async fn assemble_with_codecs(
     } else {
         None
     };
-    if let Some(entry) = &entry {
-        if !actions.is_empty() {
-            if let Err(error) = entry
-                .install_actions(&mut composition, NATIVE_ACTIONS, "native", actions)
-                .await
-            {
-                let cleanup = composition.rollback().await;
-                return Err(format!(
-                    "native action publication failed: {error}; cleanup: {cleanup:?}"
-                ));
-            }
-        }
+    if let Some(entry) = &entry
+        && !actions.is_empty()
+        && let Err(error) = entry
+            .install_actions(&mut composition, NATIVE_ACTIONS, "native", actions)
+            .await
+    {
+        let cleanup = composition.rollback().await;
+        return Err(format!(
+            "native action publication failed: {error}; cleanup: {cleanup:?}"
+        ));
     }
     let runtime = composition.commit().await?;
     let native = runtime.require::<NativeSet>(NOTIFIERS.id)?.enter()?;

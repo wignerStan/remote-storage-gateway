@@ -10,6 +10,12 @@ use proxy_pingora::{
 };
 use proxy_protocols::{message_codec::Decoder, websocket};
 
+/// Mutable route draft retained across upstream generations of one session.
+struct SessionRoute<'a> {
+    request: &'a mut RequestHeader,
+    proxy: &'a mut Option<Url>,
+}
+
 struct Plan {
     decision: Decision,
     upstream: Upstream,
@@ -77,7 +83,6 @@ impl NativeProxy {
                 && self.config.websocket_keepalive.upstream,
             downstream_ping: self.config.websocket_keepalive.enabled
                 && self.config.websocket_keepalive.downstream,
-            ..Default::default()
         };
         let mut transport = carrier::Session::accept_with_decoder(
             &mut session.downstream_session,
@@ -98,8 +103,10 @@ impl NativeProxy {
                 &mut transport,
                 &mut exchange,
                 registration,
-                &mut request,
-                &mut proxy,
+                SessionRoute {
+                    request: &mut request,
+                    proxy: &mut proxy,
+                },
                 ctx,
                 &mut reservation,
             )
@@ -162,11 +169,11 @@ impl NativeProxy {
         transport: &mut carrier::Session<'_>,
         exchange: &mut SessionExchange<ProxyContract>,
         registration: &message_codec::CodecRegistration,
-        request: &mut RequestHeader,
-        proxy: &mut Option<Url>,
+        route: SessionRoute<'_>,
         ctx: &mut ProxyContext,
         reservation: &mut Option<Arc<Reservation>>,
     ) -> Result<()> {
+        let SessionRoute { request, proxy } = route;
         loop {
             let event = transport
                 .next_reserved(|| {

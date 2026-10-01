@@ -127,33 +127,48 @@ pub(super) async fn filter(
     filter_owned(
         callbacks,
         decoder,
-        codec_id,
         sequence,
-        request_id,
         body,
         end,
-        None,
-        false,
-        1024 * 1024,
-        None,
+        FilterContext {
+            codec_id,
+            request_id,
+            reservation: None,
+            response: false,
+            max_bytes: 1024 * 1024,
+            reply_codec: None,
+        },
     )
     .await
     .map(|_| ())
 }
 
+/// Identity, resource ownership and reply grants for one codec filter call.
+pub(super) struct FilterContext<'a> {
+    pub codec_id: &'a str,
+    pub request_id: u64,
+    pub reservation: Option<Arc<admission_gate::budget::Reservation>>,
+    pub response: bool,
+    pub max_bytes: usize,
+    pub reply_codec: Option<&'a dyn CodecPlugin>,
+}
+
 pub(super) async fn filter_owned(
     callbacks: &[MessageCallback],
     decoder: &mut dyn Decoder,
-    codec_id: &str,
     sequence: &mut u64,
-    request_id: u64,
     body: &mut Option<Bytes>,
     end: bool,
-    reservation: Option<Arc<admission_gate::budget::Reservation>>,
-    response: bool,
-    max_bytes: usize,
-    reply_codec: Option<&dyn CodecPlugin>,
+    context: FilterContext<'_>,
 ) -> Result<Option<Bytes>> {
+    let FilterContext {
+        codec_id,
+        request_id,
+        reservation,
+        response,
+        max_bytes,
+        reply_codec,
+    } = context;
     let had_body = body.is_some();
     let original = body.clone();
     let mut events = decoder
