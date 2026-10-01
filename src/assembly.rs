@@ -1,6 +1,6 @@
 //! Process assembly selects and installs infra owners before opening the data path.
 use crate::{
-    config::{Config, Language},
+    config::{CallbackBackend, Config, Language},
     native_notifier::{FRAME_LIMIT, NativeNotifier},
     proxy::{NativeProxy, ProxyContract},
 };
@@ -202,15 +202,35 @@ pub async fn assemble_with_codecs(
                 );
                 // Notifier participants share this process. The plugin runtime owns
                 // admission, instance affinity, cancellation pins and cleanup.
-                let result = unsafe {
-                    Callback::load_with_options(
-                        callback.path.clone(),
-                        expected,
-                        limits,
-                        input,
-                        options,
-                    )
-                    .await
+                let result = match callback.backend {
+                    CallbackBackend::Native => unsafe {
+                        Callback::load_with_options(
+                            callback.path.clone(),
+                            expected,
+                            limits,
+                            input,
+                            options,
+                        )
+                        .await
+                    },
+                    CallbackBackend::Wasm => {
+                        #[cfg(feature = "wasm")]
+                        {
+                            Callback::load_wasm(
+                                callback.path.clone(),
+                                expected,
+                                limits,
+                                input,
+                                options,
+                                callback.wasm_limits.unwrap_or_default().sandbox(),
+                            )
+                            .await
+                        }
+                        #[cfg(not(feature = "wasm"))]
+                        {
+                            Err("Wasm callbacks require the worker wasm feature".into())
+                        }
+                    }
                 };
                 let instance = match result {
                     Ok(instance) => Arc::new(instance),
