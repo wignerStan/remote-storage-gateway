@@ -1,4 +1,4 @@
-//! Real Go shared-object deployment through the worker's isolated action entry.
+//! Real Go shared-object deployment through the worker's same-process runtime action entry.
 use super::*;
 use proxy_pingora::http_ingress::ProxyLifecycle;
 use serde_json::json;
@@ -17,7 +17,7 @@ async fn go_object_webrtc_signaling_is_explicitly_published_and_revoked() {
             "contract": {"id":method,"version":1,"response":"unary","input":{"type":"json"},"output":{"type":"json"},"max_input":65536,"max_output":65536},
             "bindings":[{"transport":"http","method":"POST","path":format!("/{method}")}]
         }));
-        let cfg = json!({"native_helper":env!("CARGO_BIN_EXE_pingora-worker"),"upstream":"http://127.0.0.1:9",
+        let cfg = json!({"upstream":"http://127.0.0.1:9",
             "management":{"listen":management},
             "callbacks":[{"path":artifact,"package":"example.go.llmcodec","language":"go","timeout_ms":10000,"actions":actions}]});
         let proxy = pingora_worker::assembly::assemble(serde_json::from_value(cfg).unwrap()).await.unwrap();

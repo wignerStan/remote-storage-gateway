@@ -1,6 +1,6 @@
 //! Process assembly selects and installs infra owners before opening the data path.
 use crate::{
-    config::{CallbackExecution, Config, Language},
+    config::{Config, Language},
     native_notifier::{FRAME_LIMIT, NativeNotifier},
     proxy::{NativeProxy, ProxyContract},
 };
@@ -65,10 +65,7 @@ impl NativeSet {
     }
 }
 
-pub fn run(mut config: Config) -> Result<(), String> {
-    if config.native_helper.is_none() {
-        config.native_helper = Some(std::env::current_exe().map_err(|error| error.to_string())?);
-    }
+pub fn run(config: Config) -> Result<(), String> {
     config.validate()?;
     let _logging = diagnostic_output::runtime::init_logging(config.logging())
         .map_err(|error| format!("logging initialization failed: {error}"))?;
@@ -103,17 +100,6 @@ pub async fn assemble_with_codecs(
             ));
         }
     }
-    if config.native_helper.is_none()
-        && config
-            .callbacks
-            .iter()
-            .any(|callback| matches!(callback.execution, CallbackExecution::Isolated))
-    {
-        return Err(
-            "isolated callbacks require native_helper when assembling from a library".into(),
-        );
-    }
-    let native_helper = config.native_helper.clone();
     let codecs = crate::proxy::message_codec::resolve_all(
         &codecs,
         config
@@ -195,30 +181,17 @@ pub async fn assemble_with_codecs(
                         .max()
                         .unwrap_or(0),
                 );
-                let result = match callback.execution {
-                    CallbackExecution::Isolated => {
-                        Callback::load_isolated(
-                            native_helper.clone().ok_or("missing native helper")?,
-                            callback.path.clone(),
-                            expected,
-                            limits,
-                            input,
-                            options,
-                        )
-                        .await
-                    }
-                    CallbackExecution::InProcess => unsafe {
-                        // The configuration explicitly selects trusted native code. Infra
-                        // validates its exact identity and owns every call and cleanup lease.
-                        Callback::load_with_options(
-                            callback.path.clone(),
-                            expected,
-                            limits,
-                            input,
-                            options,
-                        )
-                        .await
-                    },
+                // Notifier participants share this process. The plugin runtime owns
+                // admission, instance affinity, cancellation pins and cleanup.
+                let result = unsafe {
+                    Callback::load_with_options(
+                        callback.path.clone(),
+                        expected,
+                        limits,
+                        input,
+                        options,
+                    )
+                    .await
                 };
                 let instance = match result {
                     Ok(instance) => Arc::new(instance),

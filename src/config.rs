@@ -39,10 +39,6 @@ pub struct Config {
     pub callbacks: Vec<NativeCallback>,
     #[serde(default)]
     pub inspection: Inspection,
-    /// Executable implementing the private callback helper entry. `run` defaults
-    /// this to the worker executable; library assembly requires an explicit path.
-    #[serde(default)]
-    pub native_helper: Option<PathBuf>,
     #[serde(default)]
     pub management: Option<Management>,
 }
@@ -210,9 +206,8 @@ pub struct NativeCallback {
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallbackExecution {
+    /// Notifier callbacks share the worker process and runtime ownership.
     #[default]
-    Isolated,
-    /// Explicit full-trust opt-in. No crash or syscall isolation is provided.
     InProcess,
 }
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -272,13 +267,6 @@ impl Config {
         Ok(config)
     }
     pub fn validate(&self) -> Result<(), String> {
-        if self
-            .native_helper
-            .as_ref()
-            .is_some_and(|path| path.as_os_str().is_empty())
-        {
-            return Err("native helper executable path must be nonempty".into());
-        }
         if !(1..=4096).contains(&self.inspection.max_requests)
             || !(1..=1024 * 1024 * 1024).contains(&self.inspection.max_buffered_bytes)
             || !(1..=300_000).contains(&self.inspection.message_timeout_ms)
@@ -555,11 +543,11 @@ mod tests {
     }
 
     #[test]
-    fn callback_defaults_keep_native_execution_isolated_and_queues_finite() {
+    fn callback_defaults_keep_native_execution_in_process_and_queues_finite() {
         let config = configured(selected_callback());
         config.validate().unwrap();
         let callback = &config.callbacks[0];
-        assert!(matches!(callback.execution, CallbackExecution::Isolated));
+        assert!(matches!(callback.execution, CallbackExecution::InProcess));
         assert_eq!(callback.instances, 1);
         assert_eq!(callback.max_inflight, 32);
         assert_eq!(callback.max_waiting, 32);
@@ -577,6 +565,24 @@ mod tests {
             config.callbacks[0].execution,
             CallbackExecution::InProcess
         ));
+    }
+
+    #[test]
+    fn notifier_configuration_rejects_process_splitting() {
+        let mut callback = selected_callback();
+        callback["execution"] = json!("isolated");
+        assert!(
+            serde_json::from_value::<Config>(
+                json!({"upstream":"http://127.0.0.1:9", "callbacks":[callback]})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<Config>(
+                json!({"upstream":"http://127.0.0.1:9", "native_helper":"worker"})
+            )
+            .is_err()
+        );
     }
 
     #[test]
