@@ -2,6 +2,7 @@
 mod body;
 mod carrier;
 mod headers;
+mod inspection;
 pub mod message_codec;
 mod native_hooks;
 mod policy;
@@ -153,6 +154,7 @@ pub struct NativeProxy {
     runtime: Option<Runtime>,
     body_dump_limit: usize,
     message_codecs: Arc<[message_codec::CodecRegistration]>,
+    inspection: Arc<inspection::InspectionBudget>,
 }
 impl NativeProxy {
     /// Grant a trusted native Pingora implementation its async request-body hook
@@ -196,6 +198,9 @@ impl NativeProxy {
             runtime: None,
             body_dump_limit: 0,
             message_codecs: Arc::from([]),
+            inspection: Arc::new(inspection::InspectionBudget::new(
+                crate::config::Inspection::default(),
+            )),
         })
     }
     pub(crate) fn with_message_callbacks(
@@ -228,6 +233,10 @@ impl NativeProxy {
             .filter(|(_, transport)| *transport == message_codec::Transport::Upgrade)
             .map(|(index, _)| self.message_codecs[index].codec.as_ref())
     }
+    pub fn with_inspection_limits(mut self, limits: crate::config::Inspection) -> Self {
+        self.inspection = Arc::new(inspection::InspectionBudget::new(limits));
+        self
+    }
     pub fn with_runtime(mut self, runtime: Runtime) -> Self {
         self.runtime = Some(runtime);
         self
@@ -250,6 +259,7 @@ pub struct ProxyContext {
     peer_selected: bool,
     connected: bool,
     upstream_request: Option<RequestHeader>,
+    inspection_request: Option<RequestHeader>,
     request_has_body: bool,
     request_body: ChunkChain,
     response_body: ChunkChain,
@@ -259,6 +269,13 @@ pub struct ProxyContext {
     message_selection: Option<(usize, message_codec::Transport)>,
     message_decoder: Option<Box<dyn proxy_protocols::message_codec::Decoder>>,
     message_sequence: u64,
+    response_sequence: u64,
+    response_decoder: Option<Box<dyn proxy_protocols::message_codec::Decoder>>,
+    response_message_complete: bool,
+    request_permit: Option<admission_gate::budget::Reservation>,
+    inspection_permit: Option<Arc<admission_gate::budget::Reservation>>,
+    message_deadline: Option<tokio::time::Instant>,
+    response_deadline: Option<tokio::time::Instant>,
     message_failed: bool,
     message_http_complete: bool,
     response_received: bool,

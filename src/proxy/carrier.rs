@@ -16,6 +16,7 @@ impl ProxyHttp for NativeProxy {
             peer_selected: false,
             connected: false,
             upstream_request: None,
+            inspection_request: None,
             request_has_body: false,
             request_body: ChunkChain::default(),
             response_body: ChunkChain::default(),
@@ -25,12 +26,25 @@ impl ProxyHttp for NativeProxy {
             message_selection: None,
             message_decoder: None,
             message_sequence: 0,
+            response_sequence: 0,
+            response_decoder: None,
+            response_message_complete: false,
+            request_permit: None,
+            inspection_permit: None,
+            message_deadline: None,
+            response_deadline: None,
             message_failed: false,
             message_http_complete: false,
             response_received: false,
             logged: false,
             dump: JsonBodyCapture::new(self.body_dump_limit),
         }
+    }
+    fn request_body_deadline(&self, ctx: &Self::CTX) -> Option<tokio::time::Instant> {
+        ctx.message_deadline
+    }
+    fn response_body_deadline(&self, ctx: &Self::CTX) -> Option<tokio::time::Instant> {
+        ctx.response_deadline
     }
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         if std::mem::replace(&mut ctx.request_started, true) {
@@ -39,6 +53,7 @@ impl ProxyHttp for NativeProxy {
         if !self.control.accepting() {
             return Err(refusal(503, "worker admission closed"));
         }
+        ctx.request_permit = Some(self.inspection.request()?);
         headers::validate_ingress(session.req_header())?;
         // Preserve the parsed ingress head: Pingora's body decoder and HEAD /
         // upgrade semantics depend on it. Only outbound metadata is cloned.
@@ -115,6 +130,10 @@ impl ProxyHttp for NativeProxy {
         }
         ctx.message_selection = message_codec::select_request(&self.message_codecs, &request)?;
         if let Some((index, _)) = ctx.message_selection {
+            ctx.inspection_permit = Some(self.inspection.buffers()?);
+            if self.message_codecs[index].response_enabled() {
+                request.insert_header("accept-encoding", "identity")?;
+            }
             // Callback handshake integrity has already been checked. Only the
             // selected protocol owner may now narrow optional negotiation.
             self.message_codecs[index]
@@ -128,7 +147,18 @@ impl ProxyHttp for NativeProxy {
                     "protocol message requires an HTTP request body",
                 ));
             }
-            ctx.message_decoder = Some(self.message_codecs[index].codec.create_http(&request)?);
+            ctx.message_decoder = Some(
+                self.message_codecs[index]
+                    .codec
+                    .create_http_with_limits(&request, self.inspection.limits.max_message_bytes)?,
+            );
+            ctx.message_deadline = Some(self.inspection.deadline());
+        }
+        if ctx
+            .message_selection
+            .is_some_and(|(index, _)| self.message_codecs[index].response_enabled())
+        {
+            ctx.inspection_request = Some(request.clone());
         }
         ctx.upstream_request = Some(request);
         ctx.request_body = request_body;
@@ -258,20 +288,45 @@ impl ProxyHttp for NativeProxy {
             ctx.dump
                 .observe(body.as_deref().unwrap_or_default(), end, ctx.request_id);
             if !ctx.request_body.is_empty() {
-                if let Err(error) = ctx.request_body.filter(body, end) {
+                if let Err(error) = ctx.request_body.filter_bounded(
+                    body,
+                    end,
+                    self.inspection.limits.max_message_bytes.max(64 * 1024),
+                ) {
                     ctx.exchange()?.fail();
                     return Err(lifecycle_error(error));
                 }
             }
         }
+        if ctx.message_decoder.is_some()
+            && ctx.inspection_permit.is_none()
+            && body.as_ref().is_some_and(|bytes| !bytes.is_empty())
+        {
+            ctx.inspection_permit = Some(self.inspection.buffers()?);
+        }
         if let Some(decoder) = &mut ctx.message_decoder {
+            if ctx.message_deadline.is_none() && body.as_ref().is_some_and(|b| !b.is_empty()) {
+                ctx.message_deadline = Some(self.inspection.deadline());
+            }
+            if ctx
+                .message_deadline
+                .is_some_and(|d| tokio::time::Instant::now() >= d)
+            {
+                ctx.message_failed = true;
+                ctx.exchange()?.fail();
+                return Err(refusal(408, "protocol message assembly deadline exceeded"));
+            }
             let (index, _) = ctx.message_selection.expect("selected message decoder");
             let registration = &self.message_codecs[index];
             // Cancellation poisons both HTTP and upgraded message admission.
             ctx.message_failed = true;
-            let result = tokio::time::timeout(
-                self.config.io_timeout,
-                message_codec::filter(
+            let io_deadline = tokio::time::Instant::now() + self.config.io_timeout;
+            let deadline = ctx
+                .message_deadline
+                .map_or(io_deadline, |d| d.min(io_deadline));
+            let result = tokio::time::timeout_at(
+                deadline,
+                message_codec::filter_owned(
                     &registration.callbacks,
                     decoder.as_mut(),
                     registration.codec.id(),
@@ -279,16 +334,47 @@ impl ProxyHttp for NativeProxy {
                     ctx.request_id,
                     body,
                     end,
+                    ctx.inspection_permit.clone(),
+                    false,
+                    self.inspection.limits.max_message_bytes,
+                    (ctx.upgraded && registration.codec.supports_message_replies())
+                        .then_some(registration.codec.as_ref()),
                 ),
             )
             .instrument(ctx.span.clone())
             .await
             .map_err(|_| refusal(504, "message callback deadline exceeded"))
             .and_then(|result| result);
+            if let Ok(Some(frame)) = &result {
+                // The upstream direction is frame-gated for reply-capable codecs,
+                // so a local message cannot bisect a partially forwarded frame.
+                let sent = tokio::time::timeout_at(
+                    deadline,
+                    session.write_response_body(Some(frame.clone()), false),
+                )
+                .await
+                .map_err(|_| refusal(504, "protocol reply write deadline exceeded"))
+                .and_then(|r| r);
+                if let Err(error) = sent {
+                    ctx.exchange()?.fail();
+                    return Err(error);
+                }
+            }
             if result.is_err() {
                 ctx.exchange()?.fail();
             } else {
                 ctx.message_failed = false;
+                if !decoder.has_pending() {
+                    ctx.message_deadline = None;
+                    if ctx.upgraded
+                        && ctx
+                            .response_decoder
+                            .as_ref()
+                            .is_none_or(|d| !d.has_pending())
+                    {
+                        ctx.inspection_permit = None;
+                    }
+                }
                 if end
                     && ctx.message_selection.is_some_and(|(_, transport)| {
                         transport == message_codec::Transport::HttpBody
@@ -297,7 +383,7 @@ impl ProxyHttp for NativeProxy {
                     ctx.message_http_complete = true;
                 }
             }
-            return result;
+            return result.map(|_| ());
         }
         Ok(())
     }
@@ -380,7 +466,7 @@ impl ProxyHttp for NativeProxy {
                         if selected {
                             self.selected_upgrade_codec(ctx)
                                 .expect("selected upgrade codec")
-                                .create()
+                                .create_with_limits(self.inspection.limits.max_message_bytes)
                                 .map(Some)
                         } else {
                             Ok(None)
@@ -396,6 +482,7 @@ impl ProxyHttp for NativeProxy {
         }
         if ctx.upgraded {
             ctx.dump.finish(ctx.request_id);
+            ctx.inspection_permit = None;
         }
         ctx.response_framing = Some(original);
         ctx.exchange()?.facts_mut().status = Some(response.status.as_u16());
@@ -433,6 +520,7 @@ impl ProxyHttp for NativeProxy {
             // The early origin rejection was already framed above. Its failed
             // exchange has no remaining metadata or completion authority.
             session.set_keepalive(None);
+            self.configure_response_inspection(session, response, ctx)?;
             return Ok(());
         }
         let span = ctx.span.clone();
@@ -453,6 +541,7 @@ impl ProxyHttp for NativeProxy {
             return Err(error);
         }
         ctx.exchange()?.facts_mut().status = Some(response.status.as_u16());
+        self.configure_response_inspection(session, response, ctx)?;
         let close_delimited = headers::response_head(
             response,
             ctx.response_framing
@@ -469,24 +558,91 @@ impl ProxyHttp for NativeProxy {
         }
         Ok(())
     }
-    fn response_body_filter(
+    async fn async_response_body_filter(
         &self,
         _session: &mut Session,
         body: &mut Option<bytes::Bytes>,
         end: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
-        if !ctx.response_received || ctx.upgraded {
+        if !ctx.response_received {
             return Ok(None);
         }
-        if ctx.response_body.is_empty() {
-            return Ok(None);
+        if !ctx.response_body.is_empty() {
+            if let Err(error) = ctx.response_body.filter_bounded(
+                body,
+                end,
+                self.inspection.limits.max_message_bytes.max(64 * 1024),
+            ) {
+                ctx.exchange()?.fail();
+                return Err(lifecycle_error(error));
+            }
         }
-        let result = ctx.response_body.filter(body, end);
-        if result.is_err() {
-            ctx.exchange()?.fail();
+        if ctx.response_decoder.is_some()
+            && ctx.inspection_permit.is_none()
+            && body.as_ref().is_some_and(|bytes| !bytes.is_empty())
+        {
+            ctx.inspection_permit = Some(self.inspection.buffers()?);
         }
-        result.map_err(lifecycle_error)?;
+        if let Some(decoder) = &mut ctx.response_decoder {
+            if ctx.response_deadline.is_none() && body.as_ref().is_some_and(|b| !b.is_empty()) {
+                ctx.response_deadline = Some(self.inspection.deadline());
+            }
+            if ctx
+                .response_deadline
+                .is_some_and(|d| tokio::time::Instant::now() >= d)
+            {
+                ctx.message_failed = true;
+                ctx.exchange()?.fail();
+                return Err(refusal(504, "response message assembly deadline exceeded"));
+            }
+            let (index, _) = ctx.message_selection.expect("response codec selection");
+            let registration = &self.message_codecs[index];
+            let previously_failed = ctx.message_failed;
+            ctx.message_failed = true;
+            let io_deadline = tokio::time::Instant::now() + self.config.io_timeout;
+            let deadline = ctx
+                .response_deadline
+                .map_or(io_deadline, |d| d.min(io_deadline));
+            let result = tokio::time::timeout_at(
+                deadline,
+                message_codec::filter_owned(
+                    &registration.callbacks,
+                    decoder.as_mut(),
+                    registration.codec.id(),
+                    &mut ctx.response_sequence,
+                    ctx.request_id,
+                    body,
+                    end,
+                    ctx.inspection_permit.clone(),
+                    true,
+                    self.inspection.limits.max_message_bytes,
+                    None,
+                ),
+            )
+            .await
+            .map_err(|_| refusal(504, "response callback deadline exceeded"))
+            .and_then(|r| r);
+            if let Err(error) = result {
+                ctx.exchange()?.fail();
+                return Err(error);
+            }
+            ctx.message_failed = previously_failed;
+            if !decoder.has_pending() {
+                ctx.response_deadline = None;
+                if ctx
+                    .message_decoder
+                    .as_ref()
+                    .is_none_or(|d| !d.has_pending())
+                {
+                    ctx.inspection_permit = None;
+                }
+            }
+            if end {
+                ctx.response_message_complete = true;
+                ctx.response_deadline = None;
+            }
+        }
         Ok(None)
     }
     async fn logging(&self, session: &mut Session, error: Option<&Error>, ctx: &mut Self::CTX) {
@@ -496,7 +652,9 @@ impl ProxyHttp for NativeProxy {
         ctx.dump.finish(ctx.request_id);
         let status = session.response_written().map(|head| head.status.as_u16());
         let mut completed = false;
-        if ctx.message_failed {
+        if ctx.message_failed || (ctx.response_decoder.is_some() && !ctx.response_message_complete)
+        {
+            ctx.message_failed = true;
             if let Some(exchange) = &mut ctx.exchange {
                 exchange.fail();
             }
@@ -552,5 +710,69 @@ impl ProxyHttp for NativeProxy {
     fn suppress_error_log(&self, _session: &Session, _ctx: &Self::CTX, _error: &Error) -> bool {
         // The structured access outcome above avoids dumping arbitrary peer/header errors.
         true
+    }
+}
+
+impl NativeProxy {
+    fn configure_response_inspection(
+        &self,
+        session: &Session,
+        response: &ResponseHeader,
+        ctx: &mut ProxyContext,
+    ) -> Result<()> {
+        if let Some((index, _)) = ctx.message_selection {
+            let registration = &self.message_codecs[index];
+            if ctx.upgraded
+                && !registration.response_enabled()
+                && registration.codec.supports_message_replies()
+            {
+                use proxy_pingora::http_ingress::message_codec::CodecPlugin;
+                ctx.response_decoder = proxy_pingora::http_ingress::message_codec::WebSocketCodec
+                    .create_upgrade_response_with_limits(
+                    self.inspection.limits.max_message_bytes,
+                )?;
+                ctx.inspection_permit = None;
+                return Ok(());
+            }
+            if registration.response_enabled() && session.req_header().method != http::Method::HEAD
+            {
+                if ctx.upgraded {
+                    ctx.response_decoder = registration.codec.create_upgrade_response_with_limits(
+                        self.inspection.limits.max_message_bytes,
+                    )?;
+                    if registration.codec.supports_message_replies()
+                        && ctx.response_decoder.is_none()
+                    {
+                        return Err(refusal(
+                            502,
+                            "reply-capable codec requires upstream frame inspection",
+                        ));
+                    }
+                    ctx.inspection_permit = None; // Idle upgraded connections retain no assembly buffers.
+                    return Ok(());
+                }
+                ctx.response_decoder = registration.codec.create_http_response_with_limits(
+                    ctx.inspection_request
+                        .as_ref()
+                        .unwrap_or_else(|| session.req_header()),
+                    response,
+                    self.inspection.limits.max_message_bytes,
+                )?;
+                if ctx
+                    .response_decoder
+                    .as_ref()
+                    .is_some_and(|d| d.has_pending())
+                {
+                    ctx.response_deadline = Some(self.inspection.deadline());
+                } else if ctx
+                    .message_decoder
+                    .as_ref()
+                    .is_none_or(|d| !d.has_pending())
+                {
+                    ctx.inspection_permit = None;
+                }
+            }
+        }
+        Ok(())
     }
 }
