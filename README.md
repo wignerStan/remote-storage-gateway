@@ -68,11 +68,13 @@ Each `callbacks` entry explicitly selects a trusted native Function or Object li
 }
 ```
 
-Callback `kind` accepts `function` or `object`. When omitted, Rust defaults to
-Function and Go defaults to Object; `language: "go"` therefore loads Object ABI
-libraries such as `libopenai_oauth.so` without pretending they are Functions.
-Explicit kind selection must match the artifact header. Tools are not notifier
-callbacks. Object methods are serialized per instance within the callback deadline,
+Native `.so` callbacks default to Object, independently of Rust or Go language.
+Object and Tool are native component roles; Tools are consumed through explicit
+runtime dependency bindings, not installed as notifier participants. Function is
+the LuaJIT/V8 execution role and is not inferred from a native library's language.
+This native-only `callbacks` configuration does not select a LuaJIT/V8 engine.
+Explicit `kind: "function"` remains available only for existing native Function ABI
+artifacts; otherwise `kind` is `object`. Selection must match the artifact header. Object methods are serialized per instance within the callback deadline,
 while Functions retain configured concurrency. Go libraries remain mapped after
 shutdown; active calls drain before native instance cleanup.
 
