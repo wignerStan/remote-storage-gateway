@@ -8,14 +8,6 @@ mod native_hooks;
 mod policy;
 pub use native_hooks::{NativeHookContext, NativeHookProxy};
 
-/// The actual Pingora trait and types used by trusted native hook implementations.
-pub mod native {
-    pub use bytes::Bytes;
-    pub use pingora_core::{protocols::Digest, upstreams::peer::HttpPeer};
-    pub use pingora_error::{Error, ErrorType, Result};
-    pub use pingora_http::{RequestHeader, ResponseHeader};
-    pub use pingora_proxy::{ProxyHttp, Session};
-}
 use diagnostic_output::runtime::JsonBodyCapture;
 use policy::{CompiledPolicy, snapshot_request};
 

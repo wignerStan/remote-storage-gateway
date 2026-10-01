@@ -265,8 +265,8 @@ impl WasmLimits {
         }
     }
     #[cfg(feature = "wasm")]
-    pub(crate) fn sandbox(self) -> plugin_loading::WasmLimits {
-        plugin_loading::WasmLimits {
+    pub(crate) fn sandbox(self) -> wasm_sandbox::Limits {
+        wasm_sandbox::Limits {
             max_memory_bytes: self.max_memory_bytes,
             fuel_per_call: self.fuel_per_call,
             max_module_bytes: self.max_module_bytes,
@@ -673,7 +673,7 @@ mod tests {
     #[test]
     fn wasm_defaults_match_primitive_and_pool_memory_is_bounded_before_loading() {
         let local = WasmLimits::default().sandbox();
-        let primitive = plugin_loading::WasmLimits::default();
+        let primitive = wasm_sandbox::Limits::default();
         assert_eq!(local.max_memory_bytes, primitive.max_memory_bytes);
         assert_eq!(local.max_module_bytes, primitive.max_module_bytes);
         assert_eq!(local.max_table_elements, primitive.max_table_elements);

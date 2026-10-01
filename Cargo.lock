@@ -2588,6 +2588,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "wasm-sandbox",
  "wat",
  "zstd",
 ]
@@ -2628,6 +2629,7 @@ dependencies = [
  "stdio-rpc",
  "tokio",
  "wasm-sandbox",
+ "wasmtime",
 ]
 
 [[package]]
