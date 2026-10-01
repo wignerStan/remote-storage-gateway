@@ -22,6 +22,9 @@ impl ProxyHttp for NativeProxy {
             response_variable: false,
             response_framing: None,
             upgraded: false,
+            message_decoder: None,
+            message_sequence: 0,
+            message_failed: false,
             response_received: false,
             logged: false,
             dump: JsonBodyCapture::new(self.body_dump_limit),
@@ -220,12 +223,46 @@ impl ProxyHttp for NativeProxy {
     }
     async fn request_body_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         body: &mut Option<bytes::Bytes>,
         end: bool,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         if ctx.upgraded {
+            if !session.was_upgraded() {
+                return Ok(());
+            }
+            if ctx.message_failed {
+                ctx.exchange()?.fail();
+                return Err(refusal(502, "message inspection is terminal"));
+            }
+            if let Some(decoder) = &mut ctx.message_decoder {
+                // Cancellation must leave the connection terminal even if this
+                // future is dropped while a native callback owns its input.
+                ctx.message_failed = true;
+                let result = tokio::time::timeout(
+                    self.config.io_timeout,
+                    message_codec::filter(
+                        &self.message_callbacks,
+                        decoder.as_mut(),
+                        self.codec.as_ref().expect("installed codec").id(),
+                        &mut ctx.message_sequence,
+                        ctx.request_id,
+                        body,
+                        end,
+                    ),
+                )
+                .instrument(ctx.span.clone())
+                .await
+                .map_err(|_| refusal(504, "message callback deadline exceeded"))
+                .and_then(|result| result);
+                if result.is_err() {
+                    ctx.exchange()?.fail();
+                } else {
+                    ctx.message_failed = false;
+                }
+                return result;
+            }
             return Ok(());
         }
         ctx.dump
@@ -249,6 +286,10 @@ impl ProxyHttp for NativeProxy {
             return Ok(());
         }
         headers::validate_upstream_upgrade(session.req_header(), response)?;
+        if let Err(error) = message_codec::validate_selection(self.codec.as_deref(), response) {
+            ctx.exchange()?.fail();
+            return Err(error);
+        }
         headers::validate_transfer_coding(&response.headers, 502)?;
         let original = headers::ResponseFraming::capture(response);
         ctx.exchange()?.facts_mut().status = Some(response.status.as_u16());
@@ -277,6 +318,25 @@ impl ProxyHttp for NativeProxy {
         ctx.response_body = response_body;
         ctx.response_variable = !preserves_length;
         ctx.upgraded = response.status.as_u16() == 101;
+        let selection = message_codec::validate_selection(self.codec.as_deref(), response)
+            .and_then(|selected| {
+                if selected {
+                    self.codec
+                        .as_ref()
+                        .expect("installed codec")
+                        .create()
+                        .map(Some)
+                } else {
+                    Ok(None)
+                }
+            });
+        match selection {
+            Ok(decoder) => ctx.message_decoder = decoder,
+            Err(error) => {
+                ctx.exchange()?.fail();
+                return Err(error);
+            }
+        }
         if ctx.upgraded {
             ctx.dump.finish(ctx.request_id);
         }
@@ -318,6 +378,10 @@ impl ProxyHttp for NativeProxy {
         .map_err(lifecycle_error)?;
         body::ensure_closed(&ctx.exchange()?.facts().request_body)?;
         body::ensure_closed(&ctx.exchange()?.facts().response_body)?;
+        if let Err(error) = message_codec::validate_selection(self.codec.as_deref(), response) {
+            ctx.exchange()?.fail();
+            return Err(error);
+        }
         ctx.exchange()?.facts_mut().status = Some(response.status.as_u16());
         let close_delimited = headers::response_head(
             response,
@@ -362,7 +426,13 @@ impl ProxyHttp for NativeProxy {
         ctx.dump.finish(ctx.request_id);
         let status = session.response_written().map(|head| head.status.as_u16());
         let mut completed = false;
+        if ctx.message_failed {
+            if let Some(exchange) = &mut ctx.exchange {
+                exchange.fail();
+            }
+        }
         if error.is_none()
+            && !ctx.message_failed
             && let Some(mut exchange) = ctx.exchange.take()
         {
             exchange.facts_mut().completed = true;
@@ -375,7 +445,7 @@ impl ProxyHttp for NativeProxy {
         }
         tracing::info!(target: "proxy_pingora::access", request_id = ctx.request_id, status, completed,
             elapsed_ms = ctx.started.elapsed().as_millis() as u64,
-            upstream_reuse_allowed = ctx.reuse, outcome = if error.is_some() { "failed" } else if completed { "delivered" } else { "completion_failed" },
+            upstream_reuse_allowed = ctx.reuse, outcome = if error.is_some() || ctx.message_failed { "failed" } else if completed { "delivered" } else { "completion_failed" },
             "proxy request completed");
         ctx.logged = true;
     }

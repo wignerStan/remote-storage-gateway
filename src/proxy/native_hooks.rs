@@ -114,9 +114,14 @@ where
                 .request_body_filter(session, body, end, &mut ctx.worker)
                 .await;
         }
-        // The worker carrier bypasses HTTP body transforms and capture after
-        // upgrade. Keep this direct dispatch aligned with that carrier boundary
-        // if it gains any further upgraded-body responsibilities.
+        // Apply configured protocol inspection before exposing approved wire
+        // to this explicitly granted raw native hook.
+        self.worker
+            .request_body_filter(session, body, end, &mut ctx.worker)
+            .await?;
+        if body.as_ref().is_some_and(bytes::Bytes::is_empty) && !end {
+            return Ok(());
+        }
         // Set before invoking eager handler code or polling its future. Dropping
         // this future leaves the context terminal and forbids later completion.
         ctx.native_failed = true;
