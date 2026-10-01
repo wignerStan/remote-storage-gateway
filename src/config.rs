@@ -101,7 +101,7 @@ pub struct NativeCallback {
     pub variant: String,
     #[serde(default)]
     pub language: Language,
-    /// Defaults to Function for Rust and Object for Go.
+    /// Native artifacts default to Object, independently of implementation language.
     #[serde(default)]
     pub kind: Option<CallbackKind>,
     pub hooks: Vec<String>,
@@ -132,11 +132,7 @@ impl NativeCallback {
     pub fn plugin_kind(&self) -> plugin_abi::PluginType {
         match self.kind {
             Some(CallbackKind::Function) => plugin_abi::PluginType::Function,
-            Some(CallbackKind::Object) => plugin_abi::PluginType::Object,
-            None => match self.language {
-                Language::Rust => plugin_abi::PluginType::Function,
-                Language::Go => plugin_abi::PluginType::Object,
-            },
+            Some(CallbackKind::Object) | None => plugin_abi::PluginType::Object,
         }
     }
 }
@@ -286,10 +282,10 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn callback_kind_defaults_follow_language_and_explicit_kinds_are_preserved() {
+    fn native_callbacks_default_to_object_independent_of_language() {
         for (language, kind, expected) in [
-            (None, None, plugin_abi::PluginType::Function),
-            (Some("rust"), None, plugin_abi::PluginType::Function),
+            (None, None, plugin_abi::PluginType::Object),
+            (Some("rust"), None, plugin_abi::PluginType::Object),
             (Some("go"), None, plugin_abi::PluginType::Object),
             (Some("rust"), Some("object"), plugin_abi::PluginType::Object),
             (
