@@ -23,7 +23,7 @@ const MANAGEMENT: Resource = Resource {
 struct NativeSet {
     callbacks: Vec<Arc<dyn Callbacks<ProxyContract>>>,
     instances: Vec<Arc<Callback>>,
-    messages: Vec<crate::proxy::message_codec::MessageCallback>,
+    messages: Vec<(String, crate::proxy::message_codec::MessageCallback)>,
 }
 impl NativeSet {
     async fn shutdown(&self) -> Result<(), String> {
@@ -51,25 +51,28 @@ pub fn run(config: Config) -> Result<(), String> {
 }
 
 pub async fn assemble(config: Config) -> Result<NativeProxy, String> {
-    assemble_with_codecs(
-        config,
-        vec![Arc::new(crate::proxy::message_codec::WebSocketCodec)],
-    )
+    assemble_with_codecs(config, {
+        let mut codecs = llm_protocols::codec::builtins();
+        codecs.push(Arc::new(
+            proxy_pingora::http_ingress::message_codec::WebSocketCodec,
+        ));
+        codecs
+    })
     .await
 }
 
 /// Install trusted host codec implementations before admitting native callbacks.
 pub async fn assemble_with_codecs(
     config: Config,
-    codecs: Vec<Arc<dyn crate::proxy::message_codec::CodecPlugin>>,
+    codecs: Vec<Arc<dyn proxy_pingora::http_ingress::message_codec::CodecPlugin>>,
 ) -> Result<NativeProxy, String> {
     config.validate()?;
-    let codec = crate::proxy::message_codec::resolve(
+    let codecs = crate::proxy::message_codec::resolve_all(
         &codecs,
         config
             .callbacks
             .iter()
-            .find_map(|callback| callback.message_codec.as_deref()),
+            .filter_map(|callback| callback.message_codec.clone()),
     )?;
     let proxy_config = config.proxy_config()?;
     let body_limit = config.logging.body_max_bytes;
@@ -140,13 +143,14 @@ pub async fn assemble_with_codecs(
                     }
                 };
                 native.instances.push(Arc::clone(&instance));
-                if callback.message_codec.is_some() {
-                    native
-                        .messages
-                        .push(crate::proxy::message_codec::MessageCallback::new(
+                if let Some(codec) = &callback.message_codec {
+                    native.messages.push((
+                        codec.clone(),
+                        crate::proxy::message_codec::MessageCallback::new(
                             Arc::clone(&instance),
                             std::time::Duration::from_millis(callback.timeout_ms),
-                        ));
+                        ),
+                    ));
                 }
                 if callback.hooks.is_empty() {
                     continue;
@@ -201,7 +205,7 @@ pub async fn assemble_with_codecs(
         return Err(error);
     }
     Ok(proxy
-        .with_message_callbacks(messages, codec)
+        .with_message_callbacks(messages, codecs)
         .with_body_dump_limit(body_limit)
         .with_runtime(runtime))
 }

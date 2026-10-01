@@ -1560,6 +1560,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
+name = "llm-protocols"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "pingora-error",
+ "pingora-http",
+ "proxy-pingora",
+ "proxy-protocols",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "local-ip-address"
 version = "0.6.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2230,6 +2243,7 @@ dependencies = [
  "diagnostic-output",
  "http",
  "hyper-util",
+ "llm-protocols",
  "network-actions",
  "network-sockets",
  "pingora-core",
@@ -2252,6 +2266,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "zstd",
 ]
 
 [[package]]
@@ -2441,6 +2456,7 @@ dependencies = [
  "pingora-memory-cache",
  "pingora-pool",
  "pingora-proxy",
+ "proxy-protocols",
  "rustls",
  "rustls-native-certs 0.8.4",
  "stream-transfer",
@@ -2469,6 +2485,7 @@ dependencies = [
  "tracing",
  "uuid",
  "webpki-roots",
+ "zstd",
 ]
 
 [[package]]

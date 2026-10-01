@@ -68,6 +68,9 @@ fn settings(
         reuse,
     }
 }
+#[cfg(unix)]
+#[path = "native_proxy/api_codecs.rs"]
+mod api_codecs;
 #[path = "native_proxy/native_hooks.rs"]
 mod native_hooks;
 #[path = "native_proxy/pipeline.rs"]

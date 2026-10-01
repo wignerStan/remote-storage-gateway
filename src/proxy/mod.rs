@@ -152,8 +152,7 @@ pub struct NativeProxy {
     control: Arc<WorkerControl>,
     runtime: Option<Runtime>,
     body_dump_limit: usize,
-    codec: Option<Arc<dyn message_codec::CodecPlugin>>,
-    message_callbacks: Arc<[message_codec::MessageCallback]>,
+    message_codecs: Arc<[message_codec::CodecRegistration]>,
 }
 impl NativeProxy {
     /// Grant a trusted native Pingora implementation its async request-body hook
@@ -196,18 +195,38 @@ impl NativeProxy {
             control,
             runtime: None,
             body_dump_limit: 0,
-            codec: None,
-            message_callbacks: Arc::from([]),
+            message_codecs: Arc::from([]),
         })
     }
     pub(crate) fn with_message_callbacks(
         mut self,
-        callbacks: Vec<message_codec::MessageCallback>,
-        codec: Option<Arc<dyn message_codec::CodecPlugin>>,
+        callbacks: Vec<(String, message_codec::MessageCallback)>,
+        codecs: Vec<Arc<dyn message_codec::CodecPlugin>>,
     ) -> Self {
-        self.message_callbacks = callbacks.into();
-        self.codec = codec;
+        self.message_codecs = codecs
+            .into_iter()
+            .map(|codec| {
+                let selected = callbacks
+                    .iter()
+                    .filter(|(id, _)| id == codec.id())
+                    .map(|(_, callback)| callback.clone())
+                    .collect();
+                message_codec::CodecRegistration {
+                    codec,
+                    callbacks: selected,
+                }
+            })
+            .collect::<Vec<_>>()
+            .into();
         self
+    }
+    fn selected_upgrade_codec(
+        &self,
+        ctx: &ProxyContext,
+    ) -> Option<&dyn message_codec::CodecPlugin> {
+        ctx.message_selection
+            .filter(|(_, transport)| *transport == message_codec::Transport::Upgrade)
+            .map(|(index, _)| self.message_codecs[index].codec.as_ref())
     }
     pub fn with_runtime(mut self, runtime: Runtime) -> Self {
         self.runtime = Some(runtime);
@@ -237,9 +256,11 @@ pub struct ProxyContext {
     response_variable: bool,
     response_framing: Option<headers::ResponseFraming>,
     upgraded: bool,
+    message_selection: Option<(usize, message_codec::Transport)>,
     message_decoder: Option<Box<dyn proxy_protocols::message_codec::Decoder>>,
     message_sequence: u64,
     message_failed: bool,
+    message_http_complete: bool,
     response_received: bool,
     logged: bool,
     dump: JsonBodyCapture,

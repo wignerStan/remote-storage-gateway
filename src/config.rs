@@ -189,16 +189,11 @@ impl Config {
         if self.callbacks.len() > 64 {
             return Err("at most 64 callbacks may be installed".into());
         }
-        let mut selected_codec = None;
         for callback in &self.callbacks {
             if let Some(codec) = &callback.message_codec {
                 if !crate::proxy::message_codec::valid_id(codec) {
                     return Err("invalid message codec identifier".into());
                 }
-                if selected_codec.is_some_and(|selected| selected != codec) {
-                    return Err("all message callbacks must select the same codec".into());
-                }
-                selected_codec = Some(codec);
             }
             if callback.path.as_os_str().is_empty()
                 || callback.package.is_empty()

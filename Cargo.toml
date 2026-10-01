@@ -10,6 +10,7 @@ description = "Plugin-composed Pingora worker process and shared management entr
 resolver = "3"
 
 [dependencies]
+llm-protocols = { path = "../infra/rust/crates/ai/llm-protocols", features = ["codec"] }
 text-processing = { path = "../infra/rust/crates/text/processing", features = ["json"] }
 stream-transfer = { path = "../infra/rust/crates/networking/stream/transfer" }
 network-sockets = { path = "../infra/rust/crates/networking/sockets" }
@@ -36,6 +37,7 @@ tokio = { version = "1", features = ["net", "sync", "rt-multi-thread", "macros",
 tracing = "0.1"
 
 [dev-dependencies]
+zstd = "0.13"
 test-support = { path = "../infra/rust/crates/testing/support" }
 tokio = { version = "1", features = ["io-util"] }
 tonic = { version = "0.14", features = ["transport"] }
