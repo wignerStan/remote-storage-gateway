@@ -184,8 +184,8 @@ async fn executable_accepts_default_go_object_metadata_abi_and_drains_on_sigterm
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn executable_accepts_explicit_rust_object_metadata_callback() {
-    executable_callback_roundtrip("rust", Some("object")).await;
+async fn executable_accepts_explicit_legacy_native_function_callback() {
+    executable_callback_roundtrip("rust", Some("function")).await;
 }
 
 async fn executable_callback_roundtrip(language: &str, configured_kind: Option<&str>) {
@@ -225,11 +225,7 @@ async fn executable_callback_roundtrip(language: &str, configured_kind: Option<&
     let access_dir = directory.path().join("access");
     let body_dir = directory.path().join("body");
     let config = directory.path().join("config.json");
-    let resolved_kind = configured_kind.unwrap_or(if language == "go" {
-        "object"
-    } else {
-        "function"
-    });
+    let resolved_kind = configured_kind.unwrap_or("object");
     let mut callback = json!({"path":callback_artifact_with_identity(directory.path(), resolved_kind, language),
         "package":"worker.metadata.test", "language":language,
         "hooks":["pre_routing"], "config":{"version":1,"decision":"continue","set_headers":[["x-native","installed"]]}});
