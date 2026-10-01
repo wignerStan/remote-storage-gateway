@@ -55,6 +55,17 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
         *out = (InfraOwnedBytes){0};
         return result;
     }
+#ifdef TEST_REALTIME_REPLY
+    {
+        const char *prefix = TEST_REALTIME_METHOD;
+        const char *body = TEST_REALTIME_BODY;
+        size_t n = strlen(prefix);
+        if (method.len != n + 33 || memcmp(method.ptr, prefix, n)
+                || input.len != strlen(body) || memcmp(input.ptr, body, input.len)) return INFRA_FAILED;
+        const uint8_t action[] = {TEST_REALTIME_REPLY};
+        return copy_reply(action, sizeof(action), out);
+    }
+#endif
 #ifdef TEST_RESPONSES_REPLY
     {
         static size_t sequence;

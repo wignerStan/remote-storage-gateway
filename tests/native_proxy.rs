@@ -76,6 +76,9 @@ mod native_hooks;
 #[path = "native_proxy/pipeline.rs"]
 mod pipeline;
 #[cfg(unix)]
+#[path = "native_proxy/realtime_codecs.rs"]
+mod realtime_codecs;
+#[cfg(unix)]
 #[path = "native_proxy/websocket_abi.rs"]
 mod websocket_abi;
 
