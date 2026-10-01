@@ -14,6 +14,7 @@ pub(crate) struct MessageCallback {
     instance: Arc<Callback>,
     timeout: Duration,
     response_enabled: bool,
+    grant: Arc<super::message_action::Grant>,
 }
 impl MessageCallback {
     pub(crate) fn new(instance: Arc<Callback>, timeout: Duration, response_enabled: bool) -> Self {
@@ -21,7 +22,64 @@ impl MessageCallback {
             instance,
             timeout,
             response_enabled,
+            grant: Arc::new(super::message_action::Grant::default()),
         }
+    }
+    pub(crate) fn with_actions(
+        mut self,
+        enabled: bool,
+        proxy: bool,
+        headers: Vec<http::header::HeaderName>,
+    ) -> Self {
+        self.grant = Arc::new(super::message_action::Grant {
+            enabled,
+            proxy,
+            headers,
+        });
+        self
+    }
+    pub(super) fn interested(&self, response: bool, kind: &str) -> bool {
+        !response
+            || self.response_enabled
+            || matches!(kind, "response.completed" | "response.done")
+            || (self.grant.enabled
+                && matches!(
+                    kind,
+                    "response.metadata"
+                        | "response.created"
+                        | "response.error"
+                        | "transport.closed"
+                ))
+    }
+    pub(super) async fn decide(
+        &self,
+        method: &str,
+        input: Bytes,
+        response: bool,
+        max_bytes: usize,
+        reservation: Option<Arc<admission_gate::budget::Reservation>>,
+    ) -> Result<super::message_action::Reply> {
+        let grant = Arc::clone(&self.grant);
+        self.instance
+            .call_with_reply(method, input, self.timeout, reservation, move |reply| {
+                super::message_action::decode(reply, &grant, response, max_bytes)
+            })
+            .await
+            .map_err(|_| refusal(502, "message callback failed"))?
+    }
+
+    /// Teardown output cannot affect an already closed connection. Visit and
+    /// free it in place instead of allocating a replacement or action plan.
+    pub(super) async fn notify_closed(
+        &self,
+        method: &str,
+        input: Bytes,
+        reservation: Option<Arc<admission_gate::budget::Reservation>>,
+    ) -> Result<()> {
+        self.instance
+            .call_with_reply(method, input, self.timeout, reservation, |_| ())
+            .await
+            .map_err(|_| refusal(502, "session cleanup callback failed"))
     }
 }
 
@@ -36,6 +94,9 @@ pub(crate) struct CodecRegistration {
 }
 
 impl CodecRegistration {
+    pub(super) fn session_control(&self) -> bool {
+        self.callbacks.iter().any(|callback| callback.grant.enabled)
+    }
     pub(crate) fn response_enabled(&self) -> bool {
         self.callbacks.iter().any(|c| c.response_enabled)
     }

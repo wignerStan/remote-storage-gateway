@@ -2805,6 +2805,7 @@ dependencies = [
  "rustls-native-certs 0.8.4",
  "serde",
  "serde_json",
+ "sha1",
  "stream-transfer",
  "tokio",
  "tokio-rustls",

@@ -275,9 +275,13 @@ adapter remains available to applications that explicitly own a process boundary
 it is not part of this worker's notifier chain.
 
 Both kinds must implement the configured hook methods and the metadata/reply
-contract below. Object loading does not translate arbitrary business method
-contracts or grant dependency bindings; dependency-bearing instances belong in
-runtime graph composition.
+contract below. A native Object may additionally select `graph` with an explicit
+`callback_instance` and bounded provider `instances`. The selected Object's path,
+identity and configuration must match its callback entry. The runtime validates
+capabilities and dependency order before opening artifacts, injects scoped
+bindings, and retains providers through callback drain and reverse closure.
+Each affinity-pool member owns its own graph. Tools never become notifier
+participants. See the [graph callback configuration](../infra/rust/crates/plugins/loading/README.md).
 
 The native worker enforces this sequence:
 
@@ -364,6 +368,10 @@ logging path. Access and body retention are independent.
 
 ## WebSocket capability boundary
 
+Granted native callbacks can opt into [controlled WebSocket sessions](docs/message-sessions.md):
+approve the first message before dialing, replace complete messages, and retire or
+replace an upstream while keeping the downstream connection open.
+
 | Capability | Current native worker | Owner |
 | --- | --- | --- |
 | Upgrade request/response metadata decisions | Supported within configured hook/header grants | Worker notifier chain |
@@ -371,7 +379,7 @@ logging path. Access and body retention are independent.
 | Bidirectional bytes after 101 | Transparent native forwarding with backpressure | Pingora carrier |
 | Async upgraded client-byte filter | Opt-in native `ProxyHttp::request_body_filter` adapter | Trusted compiled assembly |
 | WebSocket client message inspection | Opt-in `websocket.v1` codec; native ABI call per complete message | Protocol codec and granted plugin |
-| Whole-message decisions | Ordered allow/deny callbacks; no payload rewrites | Native plugin policy |
+| Whole-message decisions | Ordered allow/deny; granted WebSocket actions can rewrite messages and replace upstreams | Native plugin policy |
 
 HTTP body transforms and body dumps are bypassed after upgrade. Handshake fields
 (`Sec-WebSocket-Key`, `Accept`, `Version`, `Protocol`, `Extensions`, with the

@@ -52,6 +52,7 @@ impl ProxyHttp for NativeProxy {
             message_http_complete: false,
             response_received: false,
             logged: false,
+            session_completed: false,
             dump: JsonBodyCapture::new(self.body_dump_limit),
         }
     }
@@ -178,6 +179,12 @@ impl ProxyHttp for NativeProxy {
         ctx.upstream_request = Some(request);
         ctx.request_body = request_body;
         ctx.exchange = Some(exchange);
+        if let Some((index, message_codec::Transport::Upgrade)) = ctx.message_selection
+            && self.message_codecs[index].session_control()
+        {
+            self.serve_websocket_session(session, ctx, index).await?;
+            return Ok(true);
+        }
         Ok(false)
     }
     async fn upstream_peer(
@@ -702,7 +709,7 @@ impl ProxyHttp for NativeProxy {
         }
         ctx.dump.finish(ctx.request_id);
         let status = session.response_written().map(|head| head.status.as_u16());
-        let mut completed = false;
+        let mut completed = ctx.session_completed;
         if ctx.message_failed || (ctx.response_decoder.is_some() && !ctx.response_message_complete)
         {
             ctx.message_failed = true;
@@ -757,6 +764,42 @@ impl ProxyHttp for NativeProxy {
     }
     fn request_summary(&self, _session: &Session, ctx: &Self::CTX) -> String {
         format!("request_id={}", ctx.request_id)
+    }
+    async fn fail_to_proxy(
+        &self,
+        session: &mut Session,
+        error: &Error,
+        _ctx: &mut Self::CTX,
+    ) -> pingora_proxy::FailToProxy {
+        // Pingora's default emits an HTTP error even after a custom handler's
+        // 101. The controlled carrier has already closed the WebSocket.
+        let status = if session
+            .response_written()
+            .is_some_and(|head| head.status.as_u16() == 101)
+        {
+            0
+        } else {
+            match error.etype() {
+                ErrorType::HTTPStatus(code) => *code,
+                _ => match error.esource() {
+                    pingora_error::ErrorSource::Upstream => 502,
+                    pingora_error::ErrorSource::Downstream => match error.etype() {
+                        ErrorType::WriteError
+                        | ErrorType::ReadError
+                        | ErrorType::ConnectionClosed => 0,
+                        _ => 400,
+                    },
+                    _ => 500,
+                },
+            }
+        };
+        if status != 0 {
+            let _ = session.respond_error(status).await;
+        }
+        pingora_proxy::FailToProxy {
+            error_code: status,
+            can_reuse_downstream: false,
+        }
     }
     fn suppress_error_log(&self, _session: &Session, _ctx: &Self::CTX, _error: &Error) -> bool {
         // The structured access outcome above avoids dumping arbitrary peer/header errors.

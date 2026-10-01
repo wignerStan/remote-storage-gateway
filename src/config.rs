@@ -196,6 +196,13 @@ pub struct NativeCallback {
     /// Grant response and error payload access in addition to request messages.
     #[serde(default)]
     pub message_responses: bool,
+    #[serde(default)]
+    pub message_actions: bool,
+    #[serde(default)]
+    pub message_proxy: bool,
+    /// Inject explicitly selected native providers into this Object callback.
+    #[serde(default)]
+    pub graph: Option<CallbackGraph>,
     /// Header metadata explicitly exposed to this trusted callback.
     #[serde(default)]
     pub headers: Vec<String>,
@@ -225,6 +232,87 @@ pub struct NativeCallback {
     /// declaration that calls finish promptly without blocking the caller.
     #[serde(default)]
     pub scheduling: CallbackScheduling,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackGraph {
+    pub callback_instance: String,
+    pub instances: Vec<GraphInstance>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphInstance {
+    pub id: String,
+    pub path: PathBuf,
+    pub package: String,
+    #[serde(default = "variant")]
+    pub variant: String,
+    #[serde(default)]
+    pub language: Language,
+    pub kind: GraphKind,
+    pub provides: Vec<String>,
+    #[serde(default)]
+    pub requires: Vec<GraphRequirement>,
+    #[serde(default)]
+    pub config: serde_json::Value,
+}
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphKind {
+    Object,
+    Tool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphRequirement {
+    pub instance: String,
+    pub capability: String,
+}
+impl CallbackGraph {
+    pub fn runtime(&self) -> Result<plugin_loading::RuntimeGraph, String> {
+        let instances = self
+            .instances
+            .iter()
+            .map(|node| {
+                let (language, unload) = match node.language {
+                    Language::Rust => (
+                        plugin_abi::Language::Rust,
+                        plugin_abi::UnloadPolicy::Explicit,
+                    ),
+                    Language::Go => (plugin_abi::Language::Go, plugin_abi::UnloadPolicy::Retain),
+                };
+                Ok(plugin_loading::RuntimeInstance {
+                    id: node.id.clone(),
+                    path: node.path.clone(),
+                    expected: plugin_abi::Expected::v1(
+                        &node.package,
+                        &node.variant,
+                        match node.kind {
+                            GraphKind::Object => plugin_abi::PluginType::Object,
+                            GraphKind::Tool => plugin_abi::PluginType::Tool,
+                        },
+                        language,
+                        unload,
+                    ),
+                    provides: node.provides.clone(),
+                    requires: node
+                        .requires
+                        .iter()
+                        .map(|r| plugin_loading::RuntimeRequirement {
+                            instance: r.instance.clone(),
+                            capability: r.capability.clone(),
+                        })
+                        .collect(),
+                    config: text_processing::json::to_vec_bounded(
+                        &node.config,
+                        crate::native_notifier::FRAME_LIMIT,
+                    )
+                    .map_err(|_| "graph instance config exceeds frame budget".to_string())?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        plugin_loading::RuntimeGraph::new(instances)
+    }
 }
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -375,6 +463,50 @@ impl Config {
         }
         let mut action_bindings = std::collections::BTreeSet::new();
         for callback in &self.callbacks {
+            if callback.message_actions && callback.message_codec.is_none() {
+                return Err("message actions require an explicit codec grant".into());
+            }
+            if callback.message_proxy
+                && (!callback.message_actions || callback.backend != CallbackBackend::Native)
+            {
+                return Err("message proxy requires message actions and native backend".into());
+            }
+            if let Some(graph) = &callback.graph {
+                if callback.backend != CallbackBackend::Native
+                    || callback.plugin_kind() != plugin_abi::PluginType::Object
+                {
+                    return Err("dependency graphs require native Object callbacks".into());
+                }
+                let runtime = graph.runtime()?;
+                let selected = runtime
+                    .instances()
+                    .iter()
+                    .find(|n| n.id == graph.callback_instance)
+                    .ok_or("graph callback instance is absent")?;
+                if selected.expected.kind != plugin_abi::PluginType::Object
+                    || selected.path != callback.path
+                    || selected.expected.package != callback.package
+                    || selected.expected.variant != callback.variant
+                    || selected.expected.language
+                        != match callback.language {
+                            Language::Rust => plugin_abi::Language::Rust,
+                            Language::Go => plugin_abi::Language::Go,
+                        }
+                    || selected.config
+                        != text_processing::json::to_vec_bounded(
+                            &callback.config,
+                            crate::native_notifier::FRAME_LIMIT,
+                        )
+                        .map_err(|_| "callback config exceeds frame budget")?
+                    || runtime
+                        .instances()
+                        .len()
+                        .checked_mul(callback.instances)
+                        .is_none_or(|n| n > 64)
+                {
+                    return Err("graph selected Object must match callback identity/config and pool must own at most 64 nodes".into());
+                }
+            }
             match callback.backend {
                 CallbackBackend::Native if callback.wasm_limits.is_some() => {
                     return Err("wasm_limits requires backend wasm".into());
@@ -904,5 +1036,29 @@ mod tests {
         assert!(config.validate().is_err());
         let duplicate: Config = serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"127.0.0.1:6199"}, "callbacks":[callback.clone(),callback]})).unwrap();
         assert!(duplicate.validate().unwrap_err().contains("unique"));
+    }
+    #[test]
+    fn runtime_graph_checks_selected_object_bindings_cycles_and_bounds() {
+        let callback = json!({"path":"agent.so", "package":"agent", "hooks":["pre_ingress"], "graph": {
+            "callback_instance":"agent", "instances":[
+                {"id":"agent", "path":"agent.so", "package":"agent", "kind":"object", "provides":["invoke"], "requires":[{"instance":"store", "capability":"read"}]},
+                {"id":"store", "path":"store.so", "package":"store", "kind":"tool", "provides":["read"]}
+            ]
+        }});
+        configured(callback.clone()).validate().unwrap();
+        for mutate in 0..5 {
+            let mut bad = callback.clone();
+            match mutate {
+                0 => bad["graph"]["callback_instance"] = json!("store"),
+                1 => bad["graph"]["instances"][0]["requires"][0]["capability"] = json!("ungranted"),
+                2 => {
+                    bad["graph"]["instances"][1]["requires"] =
+                        json!([{"instance":"agent", "capability":"invoke"}])
+                }
+                3 => bad["graph"]["instances"][0]["config"] = json!({"different":true}),
+                _ => bad["instances"] = json!(64),
+            }
+            assert!(configured(bad).validate().is_err());
+        }
     }
 }

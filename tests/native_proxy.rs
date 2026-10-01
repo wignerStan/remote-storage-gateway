@@ -400,3 +400,7 @@ mod runtime_ownership;
 #[cfg(feature = "wasm")]
 #[path = "native_proxy/wasm_callbacks.rs"]
 mod wasm_callbacks;
+
+#[cfg(unix)]
+#[path = "native_proxy/message_sessions.rs"]
+mod message_sessions;
