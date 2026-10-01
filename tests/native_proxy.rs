@@ -68,6 +68,8 @@ fn settings(
         reuse,
     }
 }
+#[path = "native_proxy/native_hooks.rs"]
+mod native_hooks;
 #[path = "native_proxy/pipeline.rs"]
 mod pipeline;
 
@@ -90,6 +92,13 @@ async fn worker_with_control(
     >,
 ) -> Listening {
     let proxy = NativeProxy::new(config, control, callbacks).unwrap();
+    serve_engine(proxy).await
+}
+async fn serve_engine<P>(proxy: P) -> Listening
+where
+    P: pingora_proxy::ProxyHttp + Send + Sync + 'static,
+    P::CTX: Send + Sync,
+{
     let mut engine = HttpProxy::new(
         proxy,
         Arc::new(ServerConf {
