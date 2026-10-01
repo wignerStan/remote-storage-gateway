@@ -9,6 +9,10 @@ description = "Plugin-composed Pingora worker process and shared management entr
 [workspace]
 resolver = "3"
 
+[features]
+default = []
+wasm = ["plugin-loading/wasm"]
+
 [dependencies]
 admission-gate = { path = "../infra/rust/crates/processes/admission-gate" }
 llm-protocols = { path = "../infra/rust/crates/ai/llm-protocols", features = ["codec"] }
@@ -38,6 +42,7 @@ tokio = { version = "1", features = ["net", "sync", "rt-multi-thread", "macros",
 tracing = "0.1"
 
 [dev-dependencies]
+wat = "1"
 zstd = "0.13"
 test-support = { path = "../infra/rust/crates/testing/support" }
 tokio = { version = "1", features = ["io-util"] }
