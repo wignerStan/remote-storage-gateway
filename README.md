@@ -51,6 +51,70 @@ routes are optional and loopback-only. Callbacks default to separately terminabl
 `execution: "in_process"` calls retain their owners through cancellation until
 the synchronous operation really returns.
 
+## WebSocket Ping/Pong keepalive
+
+Transport keepalive is opt-in and independent of message-codec grants. For
+example, merge these settings into the application configuration:
+
+```json
+{
+  "io_timeout_ms": 60000,
+  "websocket_keepalive": {
+    "enabled": true,
+    "upstream": true,
+    "downstream": true,
+    "interval_ms": 30000,
+    "pong_timeout_ms": 10000
+  },
+  "http2": { "enabled": true, "ping_interval_ms": 30000 }
+}
+```
+
+After a successful WebSocket upgrade, each enabled leg sends one periodic Ping
+and requires its matching Pong before the deadline. Upstream probes use fresh
+random client masks; downstream probes use server framing. Missing or wrong
+Pongs terminate the connection when the probe deadline expires. Ordinary peer
+Ping/Pong frames and business messages continue through the existing forwarding
+and notifier sequence; transport probes never call business plugins. Disable
+either direction independently when only one leg needs probing.
+
+Infra owns the frame cursor and timer state; Pingora's existing duplex task owns
+writes and cancellation. The cursor skips data payloads in place and retains
+only bounded headers and a small Pong token. A generated Ping waits until the
+outgoing frame is complete, including when a wire frame spans multiple chunks.
+Fragmented messages may contain control frames between fragments. No body
+collection, periodic task per socket, or additional C ABI call is introduced.
+Observing a Close frame stops probes on that leg.
+
+Choose an interval below the intermediary's idle cutoff. The interval plus Pong
+timeout must be shorter than `io_timeout_ms`; a stalled partial frame, blocked
+writer or expired inspection deadline still follows the existing timeout policy.
+No frames are injected into ordinary HTTP, rejected upgrades or other upgraded
+protocols. These settings cover HTTP/1 WebSocket upgrades, not RFC 8441 extended
+CONNECT over HTTP/2.
+
+## Upstream HTTP/2 keepalive
+
+HTTP/1.1 remains the default. Set `"http2": {"enabled": true,
+"ping_interval_ms": 30000}` to enable native upstream HTTP/2 PING/ACK probes.
+HTTPS origins negotiate HTTP/2 through ALPN with HTTP/1.1 fallback; plaintext
+origins require HTTP/2 prior knowledge (h2c). Upgrade requests, including
+WebSockets, always select HTTP/1.1 independently of this setting.
+
+Choose a positive interval below the selected proxy's idle cutoff. The native
+Pingora connection driver sends probes through direct connections and selected
+CONNECT/SOCKS tunnels, including while a pooled HTTP/2 connection is idle. It
+closes connections when an ACK does not arrive within its fixed five-second
+native timeout. Omit `ping_interval_ms` to disable probes while retaining
+HTTP/2 selection. An interval requires `enabled: true`.
+
+Keepalive does not extend `pool.idle_timeout_seconds` or the configured HTTP
+body I/O deadline. A server can also reject excessively frequent probes; choose
+an interval compatible with its policy. HTTP/1.1 fallback has no HTTP/2 probes.
+These settings apply to the upstream connection. Pingora automatically answers
+HTTP/2 PINGs from downstream clients; this Pingora version does not expose a
+native server setting for scheduling downstream probes.
+
 ## Native metadata callbacks
 
 Each `callbacks` entry explicitly selects a trusted native Function or Object library:
