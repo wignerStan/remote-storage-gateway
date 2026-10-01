@@ -1,5 +1,7 @@
 # Pingora worker
 
+See the [security model](SECURITY.md) for trust boundaries, implemented controls and deployment responsibilities.
+
 A runnable Pingora application with explicit configuration, assembly, plugin
 runtime and process entry. `main` loads configuration; `assembly` installs native
 notifier Function/Object instances and optional management entry in `plugin-lifecycle`; the
@@ -388,8 +390,9 @@ inspection; omitted grants keep response payloads opaque to callbacks.
 
 ## Opt-in native Pingora request filter
 
-`proxy::native` reexports the actual Pingora types and `ProxyHttp` trait. Compiled
-assembly can attach a real implementation with its own per-request `CTX`:
+Import actual Pingora types and the `ProxyHttp` trait directly from their owning
+crates (`pingora_core`, `pingora_http`, and `pingora_proxy`). Compiled assembly can
+attach a real implementation with its own per-request `CTX`:
 
 ```rust,ignore
 let worker = assembly::assemble(config).await?;
