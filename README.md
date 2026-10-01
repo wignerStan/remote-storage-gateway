@@ -249,10 +249,10 @@ those complete message payloads. Upstream response/delta bytes stay transparent.
 A callback opts in with `"message_codec": "websocket.v1"`. Without a codec grant,
 the existing opaque upgraded-byte path is unchanged. Custom compiled codecs can
 be supplied through `assembly::assemble_with_codecs(config, codecs)`; each implementation of
-`proxy::message_codec::CodecPlugin` supplies its identifier, upgrade selection,
+`proxy_pingora::http_ingress::message_codec::CodecPlugin` supplies its identifier, upgrade selection,
 handshake validation and per-connection decoder. Registration resolves an explicit
-identifier before native plugins are loaded. This initial assembly selects one
-codec for its message callbacks; conflicting selections are rejected. This is a Rust extension
+identifier before native plugins are loaded. Several configured codecs may serve distinct routes; overlapping selections for
+a request are rejected. This is a Rust extension
 point, not a new dynamic `.so` codec loader. A codec must bound pending input,
 message output and frame bookkeeping and fail closed on malformed/incomplete input.
 
@@ -285,11 +285,47 @@ completion. A valid close discards withheld unfinished data and forwards the clo
 frame. Pending work is bounded by carrier timeouts and codec limits.
 
 The WebSocket codec validates masked client framing, continuation/control rules,
-length encoding, text UTF-8 and close payloads. Negotiated extensions are rejected
-before downstream 101 because this implementation does not decode compression.
+length encoding, text UTF-8 and close payloads. Inspected WS requests withdraw extension offers before upstream dispatch;
+unsolicited negotiated extensions are rejected before downstream 101. Uninspected
+connections preserve their original compression negotiation.
 It does not terminate WebSocket sessions or synthesize protocol responses. A
 failure closes the proxy path. The existing notifier authentication, admission,
 `before_upstream_send` and `before_downstream_write` stages remain authoritative.
+
+## AI API codecs from infra
+
+`llm-protocols` provides the API adapters; `llm-client` shares its canonical chat
+DTOs and endpoint constants. The worker owns selection, notifier ordering and
+native callback execution, without its own API decoder implementation.
+
+| Callback `message_codec` | Supported request paths |
+| --- | --- |
+| `openai.chat_completions.v1` | HTTP(S) POST `/chat/completions`, `/v1/chat/completions` |
+| `openai.responses.v1` | HTTP(S) POST and WS GET `/responses`, `/v1/responses` |
+| `anthropic.messages.v1` | HTTP(S) POST `/v1/messages` |
+| `codex.responses.v1` | HTTP(S) POST and WS GET `/backend-api/codex/responses` |
+
+For example, add `"message_codec": "openai.responses.v1"` to a trusted native
+callback. Metadata hooks may be omitted for a message-only callback. All grants
+resolve before loading native code. Only callbacks granted the selected codec
+receive its messages, preserving their registration order.
+
+The existing binary method form is `<codec>/<kind>/<request>/<sequence>`.
+HTTP kinds are `chat_completion`, `message`, `response`, and `responses_lite.full`.
+Responses WS kinds are `response.create`, `responses_lite.create`, and
+`responses_lite.delta`. Lite is detected per message from the actual Codex wire
+marker; incremental input and continuation IDs are preserved, not reconstructed.
+HTTP bodies are validated as complete JSON objects without narrowing them to the
+client's smaller chat DTOs.
+
+HTTP body transforms precede codec inspection. The body is held until EOF and
+native approval; upstream headers may already have been dispatched. Early origin
+success cannot acknowledge an uninspected request; early origin rejection can be
+relayed without successful completion. HTTP zstd is decoded within strict limits
+for inspection while original compressed wire and headers are forwarded unchanged.
+The current input/decoded limit is 1 MiB with at most 4096 retained segments.
+Inspected WS connections negotiate uncompressed framing. Upstream response bodies,
+including SSE and WS deltas, continue unchanged through the native response path.
 
 ## Ownership and calls
 
