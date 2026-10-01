@@ -128,12 +128,39 @@ fn records(directory: &Path) -> (String, Vec<Value>) {
     (text, records)
 }
 fn callback_artifact(directory: &Path) -> PathBuf {
+    callback_artifact_with_identity(directory, "function", "rust")
+}
+fn callback_artifact_with_identity(directory: &Path, kind: &str, language: &str) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let artifact = directory.join("metadata.so");
     assert!(
         Command::new("cc")
             .args(["-shared", "-fPIC", "-std=c11", "-I"])
             .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(format!(
+                "-DTEST_PLUGIN_KIND={}",
+                if kind == "object" {
+                    "INFRA_PLUGIN_OBJECT"
+                } else {
+                    "INFRA_PLUGIN_FUNCTION"
+                }
+            ))
+            .arg(format!(
+                "-DTEST_PLUGIN_LANGUAGE={}",
+                if language == "go" {
+                    "INFRA_LANGUAGE_GO"
+                } else {
+                    "INFRA_LANGUAGE_RUST"
+                }
+            ))
+            .arg(format!(
+                "-DTEST_UNLOAD_POLICY={}",
+                if language == "go" {
+                    "INFRA_UNLOAD_RETAIN"
+                } else {
+                    "INFRA_UNLOAD_EXPLICIT"
+                }
+            ))
             .arg(root.join("tests/fixtures/metadata_callback.c"))
             .arg("-o")
             .arg(&artifact)
@@ -146,6 +173,22 @@ fn callback_artifact(directory: &Path) -> PathBuf {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn executable_loads_callback_proxies_post_and_drains_separate_logs_on_sigterm() {
+    executable_callback_roundtrip("rust", None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn executable_accepts_default_go_object_metadata_abi_and_drains_on_sigterm() {
+    // This C artifact declares the Go Object ABI identity and retained-code policy.
+    // It tests process assembly/metadata dispatch, without claiming to run Go code.
+    executable_callback_roundtrip("go", None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn executable_accepts_explicit_rust_object_metadata_callback() {
+    executable_callback_roundtrip("rust", Some("object")).await;
+}
+
+async fn executable_callback_roundtrip(language: &str, configured_kind: Option<&str>) {
     const BODY: &[u8] = br#"{"api_key":"body-secret","ordinary":"customer-visible"}"#;
     let directory = tempfile::tempdir().unwrap();
     let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -182,14 +225,29 @@ async fn executable_loads_callback_proxies_post_and_drains_separate_logs_on_sigt
     let access_dir = directory.path().join("access");
     let body_dir = directory.path().join("body");
     let config = directory.path().join("config.json");
-    fs::write(&config, json!({
-        "upstream":format!("http://{origin_address}"), "listen":data_address,
-        "management":{"listen":management_address},"threads":1,"shutdown_seconds":2,
-        "logging":{"filter":"off","access_file":{"directory":access_dir,"keep_files":30},
-            "body_file":{"directory":body_dir,"keep_files":2},"body_max_bytes":1024},
-        "callbacks":[{"path":callback_artifact(directory.path()),"package":"worker.metadata.test",
-            "hooks":["pre_routing"], "config":{"version":1,"decision":"continue","set_headers":[["x-native","installed"]]}}]
-    }).to_string()).unwrap();
+    let resolved_kind = configured_kind.unwrap_or(if language == "go" {
+        "object"
+    } else {
+        "function"
+    });
+    let mut callback = json!({"path":callback_artifact_with_identity(directory.path(), resolved_kind, language),
+        "package":"worker.metadata.test", "language":language,
+        "hooks":["pre_routing"], "config":{"version":1,"decision":"continue","set_headers":[["x-native","installed"]]}});
+    if let Some(kind) = configured_kind {
+        callback["kind"] = json!(kind);
+    }
+    fs::write(
+        &config,
+        json!({
+            "upstream":format!("http://{origin_address}"), "listen":data_address,
+            "management":{"listen":management_address},"threads":1,"shutdown_seconds":2,
+            "logging":{"filter":"off","access_file":{"directory":access_dir,"keep_files":30},
+                "body_file":{"directory":body_dir,"keep_files":2},"body_max_bytes":1024},
+            "callbacks":[callback]
+        })
+        .to_string(),
+    )
+    .unwrap();
     drop((data, management));
     let mut process = Process::spawn(directory.path(), &["--config", config.to_str().unwrap()]);
     let deadline = Instant::now() + WAIT;
@@ -281,4 +339,36 @@ async fn executable_loads_callback_proxies_post_and_drains_separate_logs_on_sigt
         std::net::TcpStream::connect_timeout(&management_address, Duration::from_millis(100))
             .is_err()
     );
+}
+
+#[test]
+fn executable_rejects_artifact_headers_with_the_wrong_callback_kind() {
+    for language in ["rust", "go"] {
+        let directory = tempfile::tempdir().unwrap();
+        // Both artifacts declare Function; selecting Object must not relabel them.
+        let artifact = if language == "rust" {
+            callback_artifact(directory.path())
+        } else {
+            callback_artifact_with_identity(directory.path(), "function", language)
+        };
+        let listener = ReservedPort::bind("127.0.0.1:0").unwrap();
+        let config = directory.path().join("config.json");
+        fs::write(&config, json!({
+            "upstream":"http://127.0.0.1:1", "listen":listener.local_addr().unwrap(),
+            "logging":{"filter":"off"},
+            "callbacks":[{"path":artifact, "package":"worker.metadata.test", "language":language,
+                "kind":"object", "hooks":["pre_routing"]}]
+        }).to_string()).unwrap();
+        drop(listener);
+        let mut process = Process::spawn(directory.path(), &["--config", config.to_str().unwrap()]);
+        assert!(
+            !process.wait().success(),
+            "wrong kind unexpectedly accepted for {language}"
+        );
+        assert!(
+            process.errors().contains("HeaderMismatch"),
+            "{}",
+            process.errors()
+        );
+    }
 }

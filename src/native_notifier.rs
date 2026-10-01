@@ -5,7 +5,7 @@ use crate::{
 };
 use network_sockets::{DialRequest, DialTarget, SocketDecision, SocketPhase};
 use pingora_http::{RequestHeader, ResponseHeader};
-use plugin_loading::Function;
+use plugin_loading::Callback;
 use proxy_pingora::worker::surface::{
     CallbackHook, Callbacks, DialDecision, PoolDecision, PoolPhase,
 };
@@ -224,13 +224,13 @@ impl Reply {
 }
 
 pub struct NativeNotifier {
-    function: Arc<Function>,
+    callback: Arc<Callback>,
     interests: u16,
     timeout: Duration,
     headers: Vec<http::header::HeaderName>,
 }
 impl NativeNotifier {
-    pub fn new(function: Arc<Function>, config: &NativeCallback) -> Result<Self, String> {
+    pub fn new(callback: Arc<Callback>, config: &NativeCallback) -> Result<Self, String> {
         validate_hooks(&config.hooks)?;
         let interests = config.hooks.iter().fold(0, |bits, hook| {
             bits | (1 << HOOKS.iter().position(|known| known == hook).unwrap())
@@ -244,7 +244,7 @@ impl NativeNotifier {
             }
         }
         Ok(Self {
-            function,
+            callback,
             interests,
             timeout: Duration::from_millis(config.timeout_ms),
             headers,
@@ -306,7 +306,7 @@ impl NativeNotifier {
             .map_err(|_| "could not encode bounded notifier metadata")?;
 
         let result = self
-            .function
+            .callback
             .call_with_reply(hook, input, self.timeout, (), |bytes| {
                 serde_json::from_slice::<Reply>(bytes)
                     .map_err(|_| "invalid notifier metadata reply".to_string())
