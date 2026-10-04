@@ -10,7 +10,7 @@ use proxy_pingora::{
 };
 use proxy_protocols::{message_codec::Decoder, websocket};
 
-const TURN_TOKEN_REJECTED: &[u8] = br#"{"type":"error","status":503,"error":{"type":"invalid_request_error","code":"turn_token_rejected","message":"Turn token changed."}}"#;
+const REPLAY_REQUIRED: &[u8] = br#"{"type":"error","status":409,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response was not found. Retrying the full request.","param":"previous_response_id"}}"#;
 
 /// Mutable route draft retained across upstream generations of one session.
 struct SessionRoute<'a> {
@@ -420,10 +420,9 @@ impl NativeProxy {
         {
             if error.to_string().contains("upstream control denied") {
                 let _ = transport.disconnect(generation);
-                if let Some(frame) = codec.response_error(TURN_TOKEN_REJECTED) {
+                if let Some(frame) = codec.response_error(REPLAY_REQUIRED) {
                     let _ = transport.send_downstream_wire(Bytes::from(frame)).await;
                 }
-                let _ = transport.send_downstream(8, &1000_u16.to_be_bytes()).await;
             }
             return Err(error);
         }
