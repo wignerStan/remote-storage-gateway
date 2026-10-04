@@ -293,7 +293,8 @@ impl NativeProxy {
                         held.clear();
                     }
                     if plan.hold == "release" {
-                        for saved in held.drain(..) {
+                        // Front to back. Vec::pop would send the newest frame first.
+                        for saved in release_hold(&mut held) {
                             let _ = transport.forward_upstream(&saved).await;
                         }
                     }
@@ -452,6 +453,10 @@ impl NativeProxy {
             "upstream generation admitted");
         Ok(generation)
     }
+}
+
+fn release_hold<T>(held: &mut Vec<T>) -> Vec<T> {
+    held.drain(..).collect()
 }
 
 fn response_decoder(
@@ -687,6 +692,16 @@ fn replacement(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn released_hold_sends_the_oldest_frame_first() {
+        let mut held = Vec::new();
+        for frame in ["delta-1", "delta-2", "delta-3"] {
+            held.push(frame);
+        }
+        assert_eq!(release_hold(&mut held), ["delta-1", "delta-2", "delta-3"]);
+        assert!(held.is_empty());
+    }
 
     #[tokio::test]
     async fn malformed_codec_kind_is_rejected_even_without_interested_callbacks() {
