@@ -193,6 +193,7 @@ impl NativeProxy {
                         match side {
                             Side::Downstream => return Ok(()),
                             Side::Upstream(generation) => {
+                                held.clear();
                                 exchange.upstream_closed().map_err(lifecycle_error)?;
                                 upstream_closed(
                                     transport,
@@ -210,6 +211,7 @@ impl NativeProxy {
                 }
                 Event::Closed(Side::Downstream) => return Ok(()),
                 Event::Closed(Side::Upstream(generation)) => {
+                    held.clear();
                     exchange.upstream_closed().map_err(lifecycle_error)?;
                     upstream_closed(
                         transport,
@@ -275,6 +277,9 @@ impl NativeProxy {
                     ) && let Some(generation) = transport.generation()
                     {
                         transport.disconnect(generation)?;
+                        if plan.hold != "release" {
+                            held.clear();
+                        }
                         if plan.upstream != Upstream::Close && plan.hold != "discard" {
                             exchange.upstream_closed().map_err(lifecycle_error)?;
                         }
@@ -333,9 +338,7 @@ impl NativeProxy {
                         }
                     }
                     if plan.upstream == Upstream::Close {
-                        let _ = transport
-                            .send_downstream(8, &1000_u16.to_be_bytes())
-                            .await;
+                        let _ = transport.send_downstream(8, &1000_u16.to_be_bytes()).await;
                         return Ok(());
                     }
                 }

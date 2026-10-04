@@ -39,17 +39,7 @@ impl MessageCallback {
         self
     }
     pub(super) fn interested(&self, response: bool, kind: &str) -> bool {
-        !response
-            || self.response_enabled
-            || matches!(kind, "response.completed" | "response.done")
-            || (self.grant.enabled
-                && matches!(
-                    kind,
-                    "response.metadata"
-                        | "response.created"
-                        | "response.error"
-                        | "transport.closed"
-                ))
+        response_kind_reaches_plugin(response, self.response_enabled, self.grant.enabled, kind)
     }
     pub(super) async fn decide(
         &self,
@@ -81,6 +71,27 @@ impl MessageCallback {
             .await
             .map_err(|_| refusal(502, "session cleanup callback failed"))
     }
+}
+
+/// `response.event` is a delta. Actions must see it or the post-250s hold never starts.
+fn response_kind_reaches_plugin(
+    response: bool,
+    response_enabled: bool,
+    actions: bool,
+    kind: &str,
+) -> bool {
+    !response
+        || response_enabled
+        || matches!(kind, "response.completed" | "response.done")
+        || (actions
+            && matches!(
+                kind,
+                "response.metadata"
+                    | "response.created"
+                    | "response.error"
+                    | "response.event"
+                    | "transport.closed"
+            ))
 }
 
 pub(crate) use proxy_pingora::http_ingress::message_codec::{
@@ -356,6 +367,34 @@ enum NativeReply {
 mod tests {
     use super::*;
     use proxy_pingora::http_ingress::message_codec::{WebSocketCodec, resolve};
+
+    #[test]
+    fn actions_see_deltas_when_message_responses_is_off() {
+        assert!(response_kind_reaches_plugin(
+            true,
+            false,
+            true,
+            "response.event"
+        ));
+        assert!(response_kind_reaches_plugin(
+            true,
+            false,
+            true,
+            "response.completed"
+        ));
+        assert!(!response_kind_reaches_plugin(
+            true,
+            false,
+            false,
+            "response.event"
+        ));
+        assert!(!response_kind_reaches_plugin(
+            true,
+            false,
+            true,
+            "response.binary"
+        ));
+    }
 
     #[test]
     fn callback_method_rejects_ambiguous_components_and_honors_native_boundary() {
