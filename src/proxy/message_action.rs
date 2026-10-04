@@ -31,6 +31,8 @@ pub(super) enum Upstream {
     Connect,
     Replace,
     Disconnect,
+    /// Drop the upstream, send the reply, then close the client socket.
+    Close,
 }
 
 #[derive(Default, Deserialize)]
@@ -118,7 +120,8 @@ impl Metadata {
             || (self.decision == Decision::Drop && !payload.is_empty())
             || (self.decision != Decision::Forward
                 && matches!(self.upstream, Upstream::Connect | Upstream::Replace))
-            || (self.decision == Decision::Forward && self.upstream == Upstream::Disconnect)
+            || (self.decision == Decision::Forward
+                && matches!(self.upstream, Upstream::Disconnect | Upstream::Close))
         {
             return Err(refusal(502, "inconsistent message action"));
         }
@@ -220,7 +223,7 @@ fn validate_proxy(value: &str) -> Result<Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     fn encoded(metadata: Value, payload: &[u8]) -> Vec<u8> {
         let header = serde_json::to_vec(&metadata).unwrap();
         let mut reply = vec![TAG];
@@ -280,6 +283,14 @@ mod tests {
             json!({"version":1,"decision":"reply","upstream":"disconnect"}),
             b"{\"type\":\"error\"}",
         );
+        let close = encoded(
+            json!({"version":1,"decision":"reply","upstream":"close"}),
+            b"{\"type\":\"error\"}",
+        );
+        assert!(matches!(
+            decode(&close, &grant(), true, 1024).unwrap(),
+            Reply::Action(action) if action.metadata.upstream == Upstream::Close
+        ));
         assert!(matches!(
             decode(&reply, &grant(), true, 1024).unwrap(),
             Reply::Action(_)

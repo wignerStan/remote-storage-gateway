@@ -10,6 +10,8 @@ use proxy_pingora::{
 };
 use proxy_protocols::{message_codec::Decoder, websocket};
 
+const TURN_TOKEN_REJECTED: &[u8] = br#"{"type":"error","status":503,"error":{"type":"invalid_request_error","code":"turn_token_rejected","message":"Turn token changed."}}"#;
+
 /// Mutable route draft retained across upstream generations of one session.
 struct SessionRoute<'a> {
     request: &'a mut RequestHeader,
@@ -249,7 +251,10 @@ impl NativeProxy {
                             patch.apply(&mut next_request, &mut next_proxy)?;
                         }
                         if transport.generation().is_some()
-                            && !matches!(plan.upstream, Upstream::Replace | Upstream::Disconnect)
+                            && !matches!(
+                                plan.upstream,
+                                Upstream::Replace | Upstream::Disconnect | Upstream::Close
+                            )
                             && (next_request.uri != request.uri
                                 || next_request.headers != request.headers
                                 || next_proxy != *proxy)
@@ -262,11 +267,15 @@ impl NativeProxy {
                         *request = next_request;
                         *proxy = next_proxy;
                     }
-                    if matches!(plan.upstream, Upstream::Replace | Upstream::Disconnect)
-                        && let Some(generation) = transport.generation()
+                    if matches!(
+                        plan.upstream,
+                        Upstream::Replace | Upstream::Disconnect | Upstream::Close
+                    ) && let Some(generation) = transport.generation()
                     {
                         transport.disconnect(generation)?;
-                        exchange.upstream_closed().map_err(lifecycle_error)?;
+                        if plan.upstream != Upstream::Close {
+                            exchange.upstream_closed().map_err(lifecycle_error)?;
+                        }
                         tracing::debug!(target: "proxy_pingora::session", request_id = ctx.request_id,
                             generation, decision = "disconnect", "upstream generation retired");
                     }
@@ -300,6 +309,12 @@ impl NativeProxy {
                                 transport.forward_client(generation, selected).await?;
                             }
                         }
+                    }
+                    if plan.upstream == Upstream::Close {
+                        let _ = transport
+                            .send_downstream(8, &1000_u16.to_be_bytes())
+                            .await;
+                        return Ok(());
                     }
                 }
             }
@@ -391,7 +406,7 @@ impl NativeProxy {
         .map_err(|_| refusal(504, "upstream handshake deadline exceeded"))??;
         codec.validate_response(&response)?;
         exchange.facts_mut().status = Some(response.status.as_u16());
-        transport
+        if let Err(error) = transport
             .drive_until(
                 tokio::time::timeout(
                     self.config.io_timeout,
@@ -401,7 +416,17 @@ impl NativeProxy {
             )
             .await?
             .map_err(|_| refusal(504, "upstream response callback deadline exceeded"))?
-            .map_err(lifecycle_error)?;
+            .map_err(control_error)
+        {
+            if error.to_string().contains("upstream control denied") {
+                let _ = transport.disconnect(generation);
+                if let Some(frame) = codec.response_error(TURN_TOKEN_REJECTED) {
+                    let _ = transport.send_downstream_wire(Bytes::from(frame)).await;
+                }
+                let _ = transport.send_downstream(8, &1000_u16.to_be_bytes()).await;
+            }
+            return Err(error);
+        }
         body::ensure_closed(&exchange.facts().response_body)?;
         tracing::debug!(target: "proxy_pingora::session", request_id, generation, decision = "connect",
             "upstream generation admitted");
