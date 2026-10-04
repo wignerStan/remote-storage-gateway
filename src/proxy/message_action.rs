@@ -42,6 +42,9 @@ pub(super) struct Metadata {
     pub decision: Decision,
     #[serde(default)]
     pub upstream: Upstream,
+    /// buffer keeps this frame until release. discard throws that buffer away.
+    #[serde(default)]
+    pub hold: String,
     #[serde(default)]
     pub set_headers: Vec<(String, String)>,
     #[serde(default)]
@@ -110,6 +113,9 @@ pub(super) fn decode(
 
 impl Metadata {
     fn validate(&self, grant: &Grant, response: bool, payload: &[u8]) -> Result<()> {
+        if !self.hold.is_empty() && !matches!(self.hold.as_str(), "buffer" | "release" | "discard") {
+            return Err(refusal(502, "invalid hold"));
+        }
         if self.version != 1 || self.set_headers.len() + self.remove_headers.len() > 64 {
             return Err(refusal(
                 502,

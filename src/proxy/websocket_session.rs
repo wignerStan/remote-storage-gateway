@@ -21,6 +21,7 @@ struct SessionRoute<'a> {
 struct Plan {
     decision: Decision,
     upstream: Upstream,
+    hold: String,
     patches: Vec<Metadata>,
     replacement: Option<Message>,
     reply: Option<Bytes>,
@@ -176,6 +177,7 @@ impl NativeProxy {
         reservation: &mut Option<Arc<Reservation>>,
     ) -> Result<()> {
         let SessionRoute { request, proxy } = route;
+        let mut held: Vec<carrier::Message> = Vec::new();
         loop {
             let event = transport
                 .next_reserved(|| {
@@ -273,11 +275,27 @@ impl NativeProxy {
                     ) && let Some(generation) = transport.generation()
                     {
                         transport.disconnect(generation)?;
-                        if plan.upstream != Upstream::Close {
+                        if plan.upstream != Upstream::Close && plan.hold != "discard" {
                             exchange.upstream_closed().map_err(lifecycle_error)?;
                         }
                         tracing::debug!(target: "proxy_pingora::session", request_id = ctx.request_id,
                             generation, decision = "disconnect", "upstream generation retired");
+                    }
+                    if plan.hold == "buffer" {
+                        held.push(carrier::Message {
+                            side: message.side,
+                            message: None,
+                            wire: message.wire.clone(),
+                        });
+                        continue;
+                    }
+                    if plan.hold == "discard" {
+                        held.clear();
+                    }
+                    if plan.hold == "release" {
+                        for saved in held.drain(..) {
+                            let _ = transport.forward_upstream(&saved).await;
+                        }
                     }
                     match plan.decision {
                         Decision::Reply => {
@@ -290,7 +308,10 @@ impl NativeProxy {
                         Decision::Forward => {
                             let selected = plan.replacement.as_ref().unwrap_or(&message);
                             if response {
-                                transport.forward_upstream(selected).await?;
+                                let sent = transport.forward_upstream(selected).await;
+                                if plan.hold != "release" {
+                                    sent?;
+                                }
                             } else {
                                 let generation = match transport.generation() {
                                     Some(generation) => generation,
@@ -457,6 +478,7 @@ async fn evaluate(
     let mut plan = Plan {
         decision: Decision::Forward,
         upstream: Upstream::Keep,
+        hold: String::new(),
         patches: Vec::new(),
         replacement: None,
         reply: None,
@@ -527,6 +549,9 @@ async fn evaluate(
                         return Err(refusal(502, "conflicting upstream message decisions"));
                     }
                     plan.upstream = action.metadata.upstream;
+                }
+                if !action.metadata.hold.is_empty() {
+                    plan.hold = action.metadata.hold.clone();
                 }
                 plan.decision = action.metadata.decision;
                 match plan.decision {
