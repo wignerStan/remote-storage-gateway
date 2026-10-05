@@ -131,7 +131,8 @@ pub struct LogFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Management {
-    pub listen: SocketAddr,
+    /// Loopback `host:port` or `unix:///absolute/path`.
+    pub listen: String,
 }
 
 /// A host-selected transport and schema grant; plugins cannot publish routes themselves.
@@ -639,11 +640,11 @@ impl Config {
             );
         }
         if let Some(management) = &self.management {
-            if !management.listen.ip().is_loopback() {
-                return Err("management.listen must use loopback".into());
-            }
-            if management.listen == self.listen {
-                return Err("data and management listeners must differ".into());
+            match network_sockets::LocalEndpoint::parse(&management.listen)? {
+                network_sockets::LocalEndpoint::Tcp(address) if address == self.listen => {
+                    return Err("data and management listeners must differ".into());
+                }
+                network_sockets::LocalEndpoint::Tcp(_) | network_sockets::LocalEndpoint::Unix(_) => {}
             }
         }
         if self.logging.body_file.is_some() != (self.logging.body_max_bytes > 0)
@@ -1036,6 +1037,10 @@ mod tests {
         assert!(config.validate().is_err());
         let duplicate: Config = serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"127.0.0.1:6199"}, "callbacks":[callback.clone(),callback]})).unwrap();
         assert!(duplicate.validate().unwrap_err().contains("unique"));
+        let unix: Config = serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"unix:///run/sub2api/actions.sock"}})).unwrap();
+        unix.validate().unwrap();
+        let external: Config = serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"0.0.0.0:6199"}})).unwrap();
+        assert!(external.validate().unwrap_err().contains("loopback"));
     }
     #[test]
     fn runtime_graph_checks_selected_object_bindings_cycles_and_bounds() {

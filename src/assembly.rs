@@ -329,7 +329,7 @@ pub async fn assemble_with_codecs(
             MANAGEMENT,
             crate::entry::Registration {
                 worker_control: Some(Arc::clone(&control)),
-                endpoint: network_sockets::LocalEndpoint::Tcp(management.listen),
+                endpoint: network_sockets::LocalEndpoint::parse(&management.listen)?,
                 permissions: network_sockets::SocketPermissions::default(),
             },
         )
