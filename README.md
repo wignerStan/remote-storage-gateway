@@ -774,6 +774,18 @@ and retains the logging guard through shutdown. Trace verbosity does not enable
 body capture. The HTTP carrier emits access metadata without headers, queries or
 bodies; consumed sessions keep unavailable status/byte counts explicitly unknown.
 
+Explicit `logging.body_file` plus `body_max_bytes` enables bounded request JSON
+and response JSON/SSE dumps; the limit applies separately to each direction.
+Response capture observes consumed origin chunks before body transforms and emits
+one sanitized record at EOF, after buffering within that limit. Streaming delivery
+continues immediately. Credentials, session-cookie values and JWTs are hashed;
+ordinary fields and load-balancer cookies stay visible. Oversized, malformed,
+incomplete, unsupported, compressed, WebSocket and raw tunnel bodies emit metadata
+only. Cancelling before EOF emits one incomplete record. Capture performs no
+per-chunk output, notifier callback, blocking file I/O or lock acquisition; the
+existing bounded logging queue writes the final event. Trace verbosity alone never
+enables this body buffer.
+
 ## Native boundary
 
 The synchronous C ABI is the required effect boundary for Go Object plugins.

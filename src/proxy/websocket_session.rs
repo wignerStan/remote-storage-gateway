@@ -94,6 +94,8 @@ impl NativeProxy {
             codec.create_with_limits(max_bytes)?,
         )
         .await?;
+        ctx.response_dump.set_status(101);
+        ctx.response_dump.set_unavailable("protocol_upgrade");
         ctx.upgraded = true;
         ctx.response_received = true;
         ctx.dump.finish(ctx.request_id);
