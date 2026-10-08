@@ -664,6 +664,25 @@ requests, cumulative latency in nanoseconds, and HTTP status classes (`0` is unk
 measure native HTTP body-filter chunks before transforms and omit headers,
 separately controlled WebSocket sessions, and L4 tunnel traffic. Cancelled
 requests contribute observed bytes but no latency or status observation.
+`worker.events` exposes the same counters through gRPC `Actions/CallStream`
+with action `worker.events` and JSON `null` input. Browser clients can use
+`GET /worker/events` with `Accept: text/event-stream` on that same internal
+management listener; an empty GET body is accepted. SSE emits `event: item`
+with the snapshot as JSON `data`, idle keepalive comments every 15 seconds,
+and a terminal `event: error` with an HTTP status code on failure. Without
+the SSE Accept header, HTTP streaming retains the infra NDJSON format.
+
+Subscriptions immediately return current state, then coalesce counter changes.
+They retain no request bodies or per-request event history, and run outside the
+notifier chain. A slow subscriber never blocks proxy operations. Counters wake
+subscribers at request begin/termination, not on streamed deltas. Access logs
+remain the per-request history. No SSE IDs or replay cursor are published;
+a nonempty `Last-Event-ID` is rejected. Reconnection starts from current state.
+The entry's shared 128-call admission limit and 120-second absolute deadline
+also apply to observers: handle terminal errors and reconnect with backoff.
+Closing their action owner or the entry cancels live streams before draining.
+Keep this read-only surface on the existing privileged internal listener.
+
 `worker.get` retains
 its existing admission-state response. Custom compositions can share counters
 using `NativeProxy::with_operations` and the counters argument of `entry::install`.
