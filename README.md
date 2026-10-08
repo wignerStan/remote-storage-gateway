@@ -472,9 +472,11 @@ client retry. The same document from an upgraded response callback replaces that
 upstream frame and is written downstream; the socket stays open. Websocket text
 whose type is exactly `response.completed` or `response.done` is offered to the
 codec callback even when `message_responses` is false, so a plugin can replace
-the terminal frame without seeing every delta. Other upstream events still
-require `message_responses: true`. A reply that is not the error document still
-fails closed.
+the complete terminal frame. Delta events (`response.event`) bypass notifier
+callbacks even with `message_responses` or action grants; the carrier validates
+framing and preserves their wire bytes. Other upstream message kinds require
+`message_responses: true`, with separately granted session metadata/actions.
+A reply that is not the error document still fails closed.
 The error batch is bounded. Reply-capable protocols frame-gate the upstream
 direction even without semantic response access, so a locally generated error
 cannot be inserted into the middle of an upstream frame. Unknown or incomplete
@@ -558,14 +560,15 @@ new message bytes reacquire it. Assembly deadlines cover idle incomplete message
 an entire SSE/WS session. Completed messages release their deadline; a new partial
 message starts a new one. Per-callback deadlines remain independently bounded.
 
-With `message_responses: true`, complete JSON responses and structured errors
-(including HTTP 200 error envelopes), plain non-JSON HTTP errors, SSE events,
-Gemini JSON-array events, and server WebSocket messages are inspected. Full HTTP
-kinds append `.response` or `.error` to the protocol kind; event streams use
-`response.event`, `response.error`, `response.done`, or `response.binary`.
-Upstream WebSocket text `response.completed` and `response.done` keep those
-kinds. SSE `response.completed` stays `response.event`; SSE `[DONE]` stays
-`response.done`.
+With `message_responses: true`, complete JSON responses, structured errors
+(including HTTP 200 error envelopes), plain non-JSON HTTP errors, and complete
+terminal stream messages can be inspected. Full HTTP kinds append `.response`
+or `.error` to the protocol kind. SSE, Gemini JSON-array and WebSocket delta
+chunks classified as `response.event` bypass notifier callbacks. Complete SSE
+and WebSocket `response.completed` and `response.done` envelopes keep those
+terminal kinds; SSE `[DONE]` is `response.done`. Separately granted binary and
+metadata kinds remain available. No aggregate business response is synthesized
+from deltas by the worker.
 Response sequences are independent of request sequences. HEAD and bodyless
 statuses have no body decoder. Inspected HTTP responses request identity encoding;
 unsupported encodings fail closed. WS inspection disables extension negotiation.

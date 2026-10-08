@@ -73,24 +73,24 @@ impl MessageCallback {
     }
 }
 
-/// `response.event` is a delta. Actions must see it or the post-250s hold never starts.
+/// Delta/event chunks remain in the carrier, regardless of callback grants.
+/// Complete terminal messages and separately granted metadata can be notified.
 fn response_kind_reaches_plugin(
     response: bool,
     response_enabled: bool,
     actions: bool,
     kind: &str,
 ) -> bool {
+    if response && kind == "response.event" {
+        return false;
+    }
     !response
         || response_enabled
         || matches!(kind, "response.completed" | "response.done")
         || (actions
             && matches!(
                 kind,
-                "response.metadata"
-                    | "response.created"
-                    | "response.error"
-                    | "response.event"
-                    | "transport.closed"
+                "response.metadata" | "response.created" | "response.error" | "transport.closed"
             ))
 }
 
@@ -264,16 +264,20 @@ pub(super) async fn filter_owned(
             {
                 return Err(refusal(502, "invalid codec message kind"));
             }
-            let method =
-                callback_method(codec_id, message.kind, request_id, *sequence)?.to_string();
+            let method = callback_method(codec_id, message.kind, request_id, *sequence)?;
             let message_sequence = *sequence;
             *sequence = sequence
                 .checked_add(1)
                 .ok_or_else(|| refusal(400, "message sequence exhausted"))?;
-            // Completion frames are the cache decision point. Deltas stay on the
-            // message_responses grant so a terminal reply does not inspect them.
+            // Validate sequence/kind but bypass delta callbacks before allocating
+            // a method string or entering the native plugin runtime.
             let terminal =
                 response && matches!(message.kind, "response.completed" | "response.done");
+            if response && message.kind == "response.event" {
+                wire.extend(event.wire);
+                continue;
+            }
+            let method = method.to_string();
             for (callback_index, callback) in callbacks
                 .iter()
                 .enumerate()
@@ -369,24 +373,40 @@ mod tests {
     use proxy_pingora::http_ingress::message_codec::{WebSocketCodec, resolve};
 
     #[test]
-    fn actions_see_deltas_when_message_responses_is_off() {
+    fn deltas_bypass_notifier_regardless_of_response_or_action_grants() {
+        for responses in [false, true] {
+            for actions in [false, true] {
+                assert!(!response_kind_reaches_plugin(
+                    true,
+                    responses,
+                    actions,
+                    "response.event"
+                ));
+                assert!(response_kind_reaches_plugin(
+                    true,
+                    responses,
+                    actions,
+                    "response.completed"
+                ));
+                assert!(response_kind_reaches_plugin(
+                    true,
+                    responses,
+                    actions,
+                    "response.done"
+                ));
+                assert!(response_kind_reaches_plugin(
+                    false,
+                    responses,
+                    actions,
+                    "response.create"
+                ));
+            }
+        }
         assert!(response_kind_reaches_plugin(
             true,
             false,
             true,
-            "response.event"
-        ));
-        assert!(response_kind_reaches_plugin(
-            true,
-            false,
-            true,
-            "response.completed"
-        ));
-        assert!(!response_kind_reaches_plugin(
-            true,
-            false,
-            false,
-            "response.event"
+            "response.created"
         ));
         assert!(!response_kind_reaches_plugin(
             true,

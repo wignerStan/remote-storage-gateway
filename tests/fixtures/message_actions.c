@@ -77,7 +77,11 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
             "{\"type\":\"error\",\"status\":409,\"error\":{\"type\":\"invalid_request_error\",\"code\":\"previous_response_not_found\",\"message\":\"Replay the full request\"}}", out);
         const uint8_t allow = 0; return copy(&allow, 1, out);
     }
-    /* Deltas must bypass callbacks when response payload grants are disabled. */
+    /* A delta callback is a host regression, even with action/response grants. */
+    if (begins(method, TEST_CODEC_PREFIX "/response.event/")) {
+        FILE *marker = fopen(TEST_DELTA_MARKER_PATH, "a");
+        if (marker) { fputs("unexpected delta\n", marker); fclose(marker); }
+    }
     return INFRA_FAILED;
 }
 static uint32_t next(uint64_t state, uint64_t handle, uint32_t credit, InfraCallMeta meta, InfraOwnedBytes *out, uint32_t *eof) {
