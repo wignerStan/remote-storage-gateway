@@ -6,6 +6,7 @@ pub mod entry;
 pub mod keepalive;
 pub mod management;
 mod native_notifier;
+mod observability;
 mod process;
 pub mod proxy;
 pub use process::Process;

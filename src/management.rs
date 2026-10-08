@@ -41,56 +41,10 @@ pub fn actions(control: &Arc<WorkerControl>, operations: &Arc<Operations>) -> Ve
         },
         ..get.clone()
     };
-    let metrics = Contract {
-        id: "worker.metrics".into(),
-        output: Schema::Object {
-            fields: [
-                "started",
-                "inflight",
-                "delivered",
-                "failed",
-                "completion_failed",
-                "cancelled",
-                "request_bytes",
-                "response_bytes",
-                "latency_count",
-                "latency_ns",
-            ]
-            .into_iter()
-            .map(|name| Field::required(name, Schema::Integer))
-            .chain(std::iter::once(Field::required(
-                "status_classes",
-                Schema::Array {
-                    items: Box::new(Schema::Integer),
-                },
-            )))
-            .collect(),
-        },
-        ..get.clone()
-    };
-    let operations = Arc::clone(operations);
     let reader = Arc::clone(control);
     let writer = Arc::clone(control);
-    vec![
-        Action {
-            contract: metrics,
-            bindings: vec![Binding::Grpc {
-                action: "worker.metrics".into(),
-            }],
-            handler: Arc::new(JsonHandler::<serde_json::Value, serde_json::Value, _>::new(
-                move |_: serde_json::Value, _: &Context| {
-                    let value = operations.snapshot();
-                    Ok(serde_json::json!({
-                        "started": value.started, "inflight": value.inflight,
-                        "delivered": value.delivered, "failed": value.failed,
-                        "completion_failed": value.completion_failed, "cancelled": value.cancelled,
-                        "request_bytes": value.request_bytes, "response_bytes": value.response_bytes,
-                        "latency_count": value.latency_count, "latency_ns": value.latency_ns,
-                        "status_classes": value.status_classes,
-                    }))
-                },
-            )),
-        },
+    let mut actions = crate::observability::actions(operations);
+    actions.extend([
         Action {
             contract: get,
             bindings: vec![Binding::Grpc {
@@ -120,7 +74,8 @@ pub fn actions(control: &Arc<WorkerControl>, operations: &Arc<Operations>) -> Ve
                 },
             )),
         },
-    ]
+    ]);
+    actions
 }
 
 #[cfg(test)]
