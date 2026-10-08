@@ -44,7 +44,7 @@ fn config(origin: SocketAddr, artifact: &Path, codec: &str, grant: bool) -> serd
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sse_heartbeats_pass_immediately_but_split_data_waits_for_native_approval() {
+async fn sse_delta_bypasses_notifiers_while_complete_terminals_and_errors_require_approval() {
     const HEARTBEAT: &[u8] = b": heartbeat\n\n";
     for (payload, kind) in [
         (
@@ -54,6 +54,10 @@ async fn sse_heartbeats_pass_immediately_but_split_data_waits_for_native_approva
         (
             r#"{"type":"error","message":"overloaded","unknown":true}"#,
             "response.error",
+        ),
+        (
+            r#"{"type":"response.completed","response":{"id":"complete-1","output":[]}}"#,
+            "response.completed",
         ),
     ] {
         for (grant, deny) in [(true, false), (true, true), (false, true)] {
@@ -92,7 +96,7 @@ async fn sse_heartbeats_pass_immediately_but_split_data_waits_for_native_approva
                 else { assert_eq!(first.unwrap().unwrap(),1);body.push(byte[0]); }
                 release.add_permits(1);
                 let _=client.read_to_end(&mut body).await;
-                let expected=if grant && deny { HEARTBEAT.to_vec() } else { [HEARTBEAT,event.as_slice()].concat() };
+                let expected=if grant && deny && kind != "response.event" { HEARTBEAT.to_vec() } else { [HEARTBEAT,event.as_slice()].concat() };
                 assert_eq!(body,expected,"grant={grant} deny={deny}");
                 drop(client);drop(worker);proxy.shutdown().await.unwrap();
             }).await.unwrap();
@@ -153,7 +157,7 @@ async fn upstream_websocket_messages_gate_independently_and_client_wire_stays_ma
                 let mut byte=[0];let first=timeout(Duration::from_millis(40),client.read(&mut byte)).await;let mut body=Vec::new();
                 assert!(first.is_err(),"partial upstream WS frame escaped response/reply framing guard");
                 release.add_permits(1);let _=client.read_to_end(&mut body).await;
-                assert_eq!(body,if grant&&deny {Vec::new()}else{server_frame},"grant={grant} deny={deny} binary={binary}");
+                assert_eq!(body,if grant&&deny && kind != "response.event" {Vec::new()}else{server_frame},"grant={grant} deny={deny} binary={binary}");
                 drop(client);drop(worker);proxy.shutdown().await.unwrap();
             }).await.unwrap();
         }

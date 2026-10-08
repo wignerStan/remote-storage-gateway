@@ -22,6 +22,7 @@ impl ProxyHttp for NativeProxy {
     fn new_ctx(&self) -> Self::CTX {
         let request_id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
         ProxyContext {
+            operation: self.operations.begin(),
             exchange: None,
             request_id,
             span: tracing::info_span!(target: "proxy_pingora::request", "http_request", request_id),
@@ -54,6 +55,7 @@ impl ProxyHttp for NativeProxy {
             logged: false,
             session_completed: false,
             dump: JsonBodyCapture::new(self.body_dump_limit),
+            response_dump: JsonResponseCapture::new(self.body_dump_limit),
         }
     }
     fn request_body_deadline(&self, ctx: &Self::CTX) -> Option<tokio::time::Instant> {
@@ -323,6 +325,8 @@ impl ProxyHttp for NativeProxy {
         end: bool,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        ctx.operation
+            .record_bytes(body.as_ref().map_or(0, bytes::Bytes::len), 0);
         if ctx.message_failed {
             ctx.exchange()?.fail();
             return Err(refusal(502, "message inspection is terminal"));
@@ -444,6 +448,35 @@ impl ProxyHttp for NativeProxy {
     ) -> Result<()> {
         if response.status.is_informational() && response.status.as_u16() != 101 {
             return Ok(());
+        }
+        ctx.response_dump.set_status(response.status.as_u16());
+        if response.status.as_u16() == 101 {
+            ctx.response_dump.set_unavailable("protocol_upgrade");
+        } else if session.req_header().method == http::Method::HEAD
+            || matches!(response.status.as_u16(), 204 | 304)
+        {
+            ctx.response_dump.set_unavailable("body_absent");
+        } else if response
+            .headers
+            .get_all("content-encoding")
+            .iter()
+            .any(|encoding| {
+                !encoding
+                    .to_str()
+                    .is_ok_and(|value| value.trim().eq_ignore_ascii_case("identity"))
+            })
+        {
+            // Native response chunks retain content coding. Do not treat encoded
+            // bytes as JSON or retain a compressed response for logging.
+            ctx.response_dump.set_unavailable("content_encoding");
+        } else {
+            ctx.response_dump.set_content_type(
+                response
+                    .headers
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or(""),
+            );
         }
         let incomplete_http_message = ctx
             .message_selection
@@ -614,6 +647,11 @@ impl ProxyHttp for NativeProxy {
         end: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
+        ctx.operation
+            .record_bytes(0, body.as_ref().map_or(0, bytes::Bytes::len));
+        // Observe the origin's consumed native bytes before any body transform.
+        ctx.response_dump
+            .observe(body.as_deref().unwrap_or_default(), end, ctx.request_id);
         if !ctx.response_received {
             return Ok(None);
         }
@@ -719,6 +757,10 @@ impl ProxyHttp for NativeProxy {
         }
         ctx.dump.finish(ctx.request_id);
         let status = session.response_written().map(|head| head.status.as_u16());
+        if let Some(status) = status {
+            ctx.response_dump.set_status(status);
+        }
+        ctx.response_dump.finish(ctx.request_id);
         let mut completed = ctx.session_completed;
         if ctx.message_failed || (ctx.response_decoder.is_some() && !ctx.response_message_complete)
         {
@@ -739,6 +781,14 @@ impl ProxyHttp for NativeProxy {
                 Ok(Ok(_))
             );
         }
+        let outcome = if error.is_some() || ctx.message_failed {
+            Outcome::Failed
+        } else if completed {
+            Outcome::Delivered
+        } else {
+            Outcome::CompletionFailed
+        };
+        ctx.operation.finish(outcome, status, ctx.started.elapsed());
         tracing::info!(target: "proxy_pingora::access", request_id = ctx.request_id, status, completed,
             elapsed_ms = ctx.started.elapsed().as_millis() as u64,
             upstream_reuse_allowed = ctx.reuse, outcome = if error.is_some() || ctx.message_failed { "failed" } else if completed { "delivered" } else { "completion_failed" },

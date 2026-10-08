@@ -10,7 +10,10 @@ mod policy;
 mod websocket_session;
 pub use native_hooks::{NativeHookContext, NativeHookProxy};
 
-use diagnostic_output::runtime::JsonBodyCapture;
+use diagnostic_output::{
+    operations::{Operation, Operations, Outcome},
+    runtime::{JsonBodyCapture, JsonResponseCapture},
+};
 use policy::{CompiledPolicy, snapshot_request};
 
 use async_trait::async_trait;
@@ -154,6 +157,7 @@ pub struct NativeProxy {
     session_connector: Arc<pingora_core::connectors::http::Connector>,
     lifecycle: Arc<HttpLifecycle<ProxyContract>>,
     control: Arc<WorkerControl>,
+    operations: Arc<Operations>,
     runtime: Option<Runtime>,
     body_dump_limit: usize,
     message_codecs: Arc<[message_codec::CodecRegistration]>,
@@ -199,6 +203,7 @@ impl NativeProxy {
                 Exposure::new(vec![ENDPOINT]),
             )),
             control,
+            operations: Arc::new(Operations::default()),
             runtime: None,
             body_dump_limit: 0,
             message_codecs: Arc::from([]),
@@ -237,6 +242,14 @@ impl NativeProxy {
             .filter(|(_, transport)| *transport == message_codec::Transport::Upgrade)
             .map(|(index, _)| self.message_codecs[index].codec.as_ref())
     }
+    /// Share process operation counters with management or another observer.
+    pub fn with_operations(mut self, operations: Arc<Operations>) -> Self {
+        self.operations = operations;
+        self
+    }
+    pub fn operations(&self) -> Arc<Operations> {
+        Arc::clone(&self.operations)
+    }
     pub fn with_inspection_limits(mut self, limits: crate::config::Inspection) -> Self {
         self.inspection = Arc::new(inspection::InspectionBudget::new(limits));
         self
@@ -245,8 +258,8 @@ impl NativeProxy {
         self.runtime = Some(runtime);
         self
     }
-    /// Opt in to bounded sanitized JSON request-body capture. Response bodies
-    /// stay native and are not captured. Disabled sinks never allocate a buffer.
+    /// Opt in to bounded sanitized request JSON and response JSON/SSE capture.
+    /// Disabled sinks never allocate a body buffer.
     pub fn with_body_dump_limit(mut self, limit: usize) -> Self {
         self.body_dump_limit = limit.min(1024 * 1024);
         self
@@ -254,6 +267,7 @@ impl NativeProxy {
 }
 
 pub struct ProxyContext {
+    operation: Operation,
     exchange: Option<CarrierExchange<ProxyContract>>,
     request_id: u64,
     span: tracing::Span,
@@ -286,6 +300,7 @@ pub struct ProxyContext {
     logged: bool,
     session_completed: bool,
     dump: JsonBodyCapture,
+    response_dump: JsonResponseCapture,
 }
 fn refusal(status: u16, message: &'static str) -> Box<Error> {
     Error::explain(ErrorType::HTTPStatus(status), message)
@@ -311,6 +326,7 @@ impl Drop for ProxyContext {
     fn drop(&mut self) {
         if !self.logged {
             self.dump.finish(self.request_id);
+            self.response_dump.finish(self.request_id);
             tracing::info!(target: "proxy_pingora::access", request_id = self.request_id,
                 completed = false, outcome = "cancelled",
                 elapsed_ms = self.started.elapsed().as_millis() as u64, "proxy request cancelled");

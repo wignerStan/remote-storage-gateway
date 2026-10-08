@@ -122,6 +122,7 @@ pub async fn assemble_with_codecs(
     let body_limit = config.logging.body_max_bytes;
     let inspection = config.inspection;
     let control = Arc::new(WorkerControl::default());
+    let operations = Arc::new(diagnostic_output::operations::Operations::default());
     let resources = if config.callbacks.iter().any(|c| !c.actions.is_empty()) {
         vec![NOTIFIERS, MANAGEMENT, NATIVE_ACTIONS]
     } else if config.management.is_some() {
@@ -332,6 +333,7 @@ pub async fn assemble_with_codecs(
                 endpoint: network_sockets::LocalEndpoint::parse(&management.listen)?,
                 permissions: network_sockets::SocketPermissions::default(),
             },
+            Arc::clone(&operations),
         )
         .await;
         match installed {
@@ -376,6 +378,7 @@ pub async fn assemble_with_codecs(
         return Err(error);
     }
     Ok(proxy
+        .with_operations(operations)
         .with_inspection_limits(inspection)
         .with_message_callbacks(messages, codecs)
         .with_body_dump_limit(body_limit)

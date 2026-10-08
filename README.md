@@ -472,9 +472,11 @@ client retry. The same document from an upgraded response callback replaces that
 upstream frame and is written downstream; the socket stays open. Websocket text
 whose type is exactly `response.completed` or `response.done` is offered to the
 codec callback even when `message_responses` is false, so a plugin can replace
-the terminal frame without seeing every delta. Other upstream events still
-require `message_responses: true`. A reply that is not the error document still
-fails closed.
+the complete terminal frame. Delta events (`response.event`) bypass notifier
+callbacks even with `message_responses` or action grants; the carrier validates
+framing and preserves their wire bytes. Other upstream message kinds require
+`message_responses: true`, with separately granted session metadata/actions.
+A reply that is not the error document still fails closed.
 The error batch is bounded. Reply-capable protocols frame-gate the upstream
 direction even without semantic response access, so a locally generated error
 cannot be inserted into the middle of an upstream frame. Unknown or incomplete
@@ -558,14 +560,15 @@ new message bytes reacquire it. Assembly deadlines cover idle incomplete message
 an entire SSE/WS session. Completed messages release their deadline; a new partial
 message starts a new one. Per-callback deadlines remain independently bounded.
 
-With `message_responses: true`, complete JSON responses and structured errors
-(including HTTP 200 error envelopes), plain non-JSON HTTP errors, SSE events,
-Gemini JSON-array events, and server WebSocket messages are inspected. Full HTTP
-kinds append `.response` or `.error` to the protocol kind; event streams use
-`response.event`, `response.error`, `response.done`, or `response.binary`.
-Upstream WebSocket text `response.completed` and `response.done` keep those
-kinds. SSE `response.completed` stays `response.event`; SSE `[DONE]` stays
-`response.done`.
+With `message_responses: true`, complete JSON responses, structured errors
+(including HTTP 200 error envelopes), plain non-JSON HTTP errors, and complete
+terminal stream messages can be inspected. Full HTTP kinds append `.response`
+or `.error` to the protocol kind. SSE, Gemini JSON-array and WebSocket delta
+chunks classified as `response.event` bypass notifier callbacks. Complete SSE
+and WebSocket `response.completed` and `response.done` envelopes keep those
+terminal kinds; SSE `[DONE]` is `response.done`. Separately granted binary and
+metadata kinds remain available. No aggregate business response is synthesized
+from deltas by the worker.
 Response sequences are independent of request sequences. HEAD and bodyless
 statuses have no body decoder. Inspected HTTP responses request identity encoding;
 unsupported encodings fail closed. WS inspection disables extension negotiation.
@@ -653,8 +656,18 @@ explicitly chooses whether that listener installs worker management under the
 reserved `worker` namespace. Use `None` for a plugin-only listener: it receives
 no worker actions automatically. `SharedEntry::install_actions` and
 `install_native_actions` register each axis's actions into that same router as
-reversible resources in its own composition. Serving begins after `activate`;
-additional owners can register while the entry is live.
+reversible resources in its own composition. Application assembly also publishes
+the read-only gRPC action `worker.metrics` with process-local operation counts,
+in-flight requests, outcomes, consumed request/response chunk bytes of terminated
+requests, cumulative latency in nanoseconds, and HTTP status classes (`0` is unknown, then `1xx` through
+`5xx`). Counts reset on restart; concurrent snapshots are approximate. Byte counts
+measure native HTTP body-filter chunks before transforms and omit headers,
+separately controlled WebSocket sessions, and L4 tunnel traffic. Cancelled
+requests contribute observed bytes but no latency or status observation.
+`worker.get` retains
+its existing admission-state response. Custom compositions can share counters
+using `NativeProxy::with_operations` and the counters argument of `entry::install`.
+Serving begins after `activate`; additional owners can register while the entry is live.
 
 `composition::mount_axis` mounts a committed child runtime as an explicit parent
 resource. Each child keeps its own local resource names, bindings and useflow;
@@ -760,6 +773,18 @@ records. Assembly configures access-file retention independently from body dumps
 and retains the logging guard through shutdown. Trace verbosity does not enable
 body capture. The HTTP carrier emits access metadata without headers, queries or
 bodies; consumed sessions keep unavailable status/byte counts explicitly unknown.
+
+Explicit `logging.body_file` plus `body_max_bytes` enables bounded request JSON
+and response JSON/SSE dumps; the limit applies separately to each direction.
+Response capture observes consumed origin chunks before body transforms and emits
+one sanitized record at EOF, after buffering within that limit. Streaming delivery
+continues immediately. Credentials, session-cookie values and JWTs are hashed;
+ordinary fields and load-balancer cookies stay visible. Oversized, malformed,
+incomplete, unsupported, compressed, WebSocket and raw tunnel bodies emit metadata
+only. Cancelling before EOF emits one incomplete record. Capture performs no
+per-chunk output, notifier callback, blocking file I/O or lock acquisition; the
+existing bounded logging queue writes the final event. Trace verbosity alone never
+enables this body buffer.
 
 ## Native boundary
 

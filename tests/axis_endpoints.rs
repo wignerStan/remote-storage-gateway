@@ -37,6 +37,7 @@ async fn axis(path: &Path, value: u8) -> (Runtime, Arc<SharedEntry>) {
             endpoint: LocalEndpoint::Unix(path.to_owned()),
             permissions: SocketPermissions::default(),
         },
+        Arc::new(diagnostic_output::operations::Operations::default()),
     )
     .await
     .unwrap();
@@ -135,7 +136,8 @@ async fn independent_axis_uds_and_identical_action_names_do_not_conflict() {
                 worker_control: None,
                 endpoint: LocalEndpoint::Unix(a_path.clone()),
                 permissions: SocketPermissions::default(),
-            }
+            },
+            Arc::new(diagnostic_output::operations::Operations::default()),
         )
         .await
         .is_err()

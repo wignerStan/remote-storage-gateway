@@ -418,3 +418,142 @@ mod message_sessions;
 #[cfg(unix)]
 #[path = "native_proxy/peer_metadata.rs"]
 mod peer_metadata;
+
+#[tokio::test]
+async fn native_operations_count_upload_response_and_completion() {
+    use diagnostic_output::operations::Operations;
+    let operations = Arc::new(Operations::default());
+    let upstream = listen(|mut socket| async move {
+        let request = head(&mut socket).await;
+        assert!(request.starts_with(b"POST /resource HTTP/1.1"));
+        let mut upload = [0; 7];
+        socket.read_exact(&mut upload).await.unwrap();
+        assert_eq!(&upload, b"payload");
+        socket
+            .write_all(
+                b"HTTP/1.1 201 Created\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+            )
+            .await
+            .unwrap();
+    })
+    .await;
+    let proxy = NativeProxy::new(
+        settings(upstream.address, None, "", false),
+        Arc::new(WorkerControl::default()),
+        vec![],
+    )
+    .unwrap()
+    .with_operations(Arc::clone(&operations));
+    assert!(Arc::ptr_eq(&proxy.operations(), &operations));
+    let worker = serve_engine(proxy).await;
+    timeout(WAIT, async {
+        let mut client = TcpStream::connect(worker.address).await.unwrap();
+        client.write_all(b"POST /resource HTTP/1.1\r\nHost: downstream\r\nContent-Length: 7\r\nConnection: close\r\n\r\npayload").await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 201"));
+        assert!(response.ends_with(b"hello"));
+        while operations.snapshot().inflight != 0 {
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let value = operations.snapshot();
+    assert_eq!(value.started, 1);
+    assert_eq!(value.delivered, 1);
+    assert_eq!(value.failed, 0);
+    assert_eq!(value.completion_failed, 0);
+    assert_eq!(value.cancelled, 0);
+    assert_eq!(value.request_bytes, 7);
+    assert_eq!(value.response_bytes, 5);
+    assert_eq!(value.latency_count, 1);
+    assert_eq!(value.status_classes[2], 1);
+}
+
+#[tokio::test]
+async fn native_operation_drop_cancels_and_duplicate_logging_finishes_once() {
+    use pingora_proxy::{ProxyHttp, Session};
+    let proxy = NativeProxy::new(
+        settings("127.0.0.1:1".parse().unwrap(), None, "", false),
+        Arc::new(WorkerControl::default()),
+        vec![],
+    )
+    .unwrap();
+    let operations = proxy.operations();
+    let cancelled = proxy.new_ctx();
+    assert_eq!(operations.snapshot().inflight, 1);
+    drop(cancelled);
+    assert_eq!(operations.snapshot().cancelled, 1);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let _client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (socket, _) = listener.accept().await.unwrap();
+    let mut session = Session::new_h1(Box::new(pingora_core::protocols::l4::stream::Stream::from(
+        socket,
+    )));
+    let mut context = proxy.new_ctx();
+    let error =
+        pingora_error::Error::explain(pingora_error::ErrorType::HTTPStatus(503), "test failure");
+    proxy
+        .logging(&mut session, Some(&error), &mut context)
+        .await;
+    proxy
+        .logging(&mut session, Some(&error), &mut context)
+        .await;
+    drop(context);
+    let value = operations.snapshot();
+    assert_eq!(value.started, 2);
+    assert_eq!(value.inflight, 0);
+    assert_eq!(value.failed, 1);
+    assert_eq!(value.cancelled, 1);
+    assert_eq!(value.latency_count, 1);
+    assert_eq!(value.status_classes[0], 1);
+}
+
+#[tokio::test]
+async fn native_operation_completion_failure_preserves_delivered_status() {
+    use diagnostic_output::operations::Operations;
+    use pingora_worker::proxy::{ProxyContract, RequestFacts};
+    use proxy_pingora::worker::surface::Callbacks;
+    struct FailCompletion;
+    #[async_trait::async_trait]
+    impl Callbacks<ProxyContract> for FailCompletion {
+        async fn authenticate(&self, _: u8, _: &RequestFacts) -> Result<Option<()>, String> {
+            Ok(Some(()))
+        }
+        async fn admit(&self, _: u8, _: &RequestFacts) -> Result<Option<()>, String> {
+            Ok(Some(()))
+        }
+        async fn complete(&self, _: &RequestFacts) -> Result<u32, String> {
+            Err("completion rejected".into())
+        }
+        async fn maintain(&self) {}
+    }
+    let operations = Arc::new(Operations::default());
+    let upstream = origin(Arc::new(AtomicUsize::new(0))).await;
+    let proxy = NativeProxy::new(
+        settings(upstream.address, None, "", false),
+        Arc::new(WorkerControl::default()),
+        vec![Arc::new(FailCompletion)],
+    )
+    .unwrap()
+    .with_operations(Arc::clone(&operations));
+    let worker = serve_engine(proxy).await;
+    assert!(get(worker.address).await.starts_with(b"HTTP/1.1 200"));
+    timeout(WAIT, async {
+        while operations.snapshot().inflight != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let value = operations.snapshot();
+    assert_eq!(value.started, 1);
+    assert_eq!(value.delivered, 0);
+    assert_eq!(value.failed, 0);
+    assert_eq!(value.completion_failed, 1);
+    assert_eq!(value.cancelled, 0);
+    assert_eq!(value.response_bytes, 5);
+    assert_eq!(value.status_classes[2], 1);
+}

@@ -32,6 +32,11 @@ fn artifact_for_codec(dir: &Path, mode: u8, codec: &str) -> PathBuf {
                 serde_json::to_string(&dir.join(format!("closed_{mode}")).to_str().unwrap())
                     .unwrap()
             ))
+            .arg(format!(
+                "-DTEST_DELTA_MARKER_PATH={}",
+                serde_json::to_string(&dir.join(format!("delta_{mode}")).to_str().unwrap())
+                    .unwrap()
+            ))
             .arg(root.join("tests/fixtures/message_actions.c"))
             .arg("-o")
             .arg(&path)
@@ -136,6 +141,7 @@ async fn first_message_selects_and_rewrites_before_dial_then_replay_replaces_soc
         client.write_all(&websocket::encode_client(1, CREATE).unwrap()).await.unwrap();
         assert_eq!(frame(&mut client, false).await, (1, DELTA.to_vec()));
         assert_eq!(frame(&mut client, false).await, (1, COMPLETED.to_vec()));
+        assert!(!directory.path().join("delta_0").exists(), "replay generations must bypass delta callbacks");
         assert_eq!(connections.load(Ordering::SeqCst), 2);
         client.write_all(&websocket::encode_client(8, &1000_u16.to_be_bytes()).unwrap()).await.unwrap();
         assert_eq!(frame(&mut client, false).await, (8, 1000_u16.to_be_bytes().to_vec()));
@@ -235,6 +241,10 @@ async fn peer_heartbeat_progresses_while_native_message_policy_waits() {
             "pending policy must not dial"
         );
         assert_eq!(frame(&mut client, false).await, (1, DELTA.to_vec()));
+        assert!(
+            !directory.path().join("delta_2").exists(),
+            "delta must bypass the action policy"
+        );
         client
             .write_all(&websocket::encode_client(8, &1000_u16.to_be_bytes()).unwrap())
             .await
@@ -374,6 +384,10 @@ async fn codex_websocket_aliases_accept_locally_and_wait_for_an_admitted_create(
                 .await
                 .unwrap();
             assert_eq!(frame(&mut client, false).await, (1, DELTA.to_vec()));
+            assert!(
+                !directory.path().join("delta_0").exists(),
+                "{path} must bypass delta callbacks"
+            );
             assert_eq!(connections.load(Ordering::SeqCst), 1);
             client
                 .write_all(&websocket::encode_client(8, &1000_u16.to_be_bytes()).unwrap())

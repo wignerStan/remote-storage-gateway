@@ -304,6 +304,20 @@ async fn executable_callback_roundtrip(language: &str, configured_kind: Option<&
     assert!(process.wait().success(), "{}", process.errors());
     let (access_text, access) = records(&access_dir);
     let (body_text, dumps) = records(&body_dir);
+    assert_eq!(dumps.len(), 2, "{body_text}");
+    let response_dump = dumps
+        .iter()
+        .find(|dump| dump["fields"]["direction"] == "response")
+        .unwrap();
+    assert_eq!(
+        response_dump["fields"]["outcome"],
+        "unsupported_content_type"
+    );
+    assert_eq!(response_dump["fields"]["status"], 200);
+    let dumps = dumps
+        .into_iter()
+        .filter(|dump| dump["fields"]["direction"] == "request")
+        .collect::<Vec<_>>();
     assert_eq!(dumps.len(), 1, "{body_text}");
     assert_eq!(dumps[0]["target"], "proxy_pingora::body_dump");
     assert_eq!(dumps[0]["fields"]["outcome"], "captured");

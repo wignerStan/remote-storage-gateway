@@ -74,6 +74,7 @@ async fn host(schema: &[Resource]) -> (Composition, Arc<SharedEntry>) {
             endpoint: network_sockets::LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
             permissions: network_sockets::SocketPermissions::default(),
         },
+        Arc::new(diagnostic_output::operations::Operations::default()),
     )
     .await
     .unwrap();
