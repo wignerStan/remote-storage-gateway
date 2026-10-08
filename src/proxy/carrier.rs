@@ -22,6 +22,7 @@ impl ProxyHttp for NativeProxy {
     fn new_ctx(&self) -> Self::CTX {
         let request_id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
         ProxyContext {
+            operation: self.operations.begin(),
             exchange: None,
             request_id,
             span: tracing::info_span!(target: "proxy_pingora::request", "http_request", request_id),
@@ -323,6 +324,8 @@ impl ProxyHttp for NativeProxy {
         end: bool,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        ctx.operation
+            .record_bytes(body.as_ref().map_or(0, bytes::Bytes::len), 0);
         if ctx.message_failed {
             ctx.exchange()?.fail();
             return Err(refusal(502, "message inspection is terminal"));
@@ -614,6 +617,8 @@ impl ProxyHttp for NativeProxy {
         end: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
+        ctx.operation
+            .record_bytes(0, body.as_ref().map_or(0, bytes::Bytes::len));
         if !ctx.response_received {
             return Ok(None);
         }
@@ -739,6 +744,14 @@ impl ProxyHttp for NativeProxy {
                 Ok(Ok(_))
             );
         }
+        let outcome = if error.is_some() || ctx.message_failed {
+            Outcome::Failed
+        } else if completed {
+            Outcome::Delivered
+        } else {
+            Outcome::CompletionFailed
+        };
+        ctx.operation.finish(outcome, status, ctx.started.elapsed());
         tracing::info!(target: "proxy_pingora::access", request_id = ctx.request_id, status, completed,
             elapsed_ms = ctx.started.elapsed().as_millis() as u64,
             upstream_reuse_allowed = ctx.reuse, outcome = if error.is_some() || ctx.message_failed { "failed" } else if completed { "delivered" } else { "completion_failed" },

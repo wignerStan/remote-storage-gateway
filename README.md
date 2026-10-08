@@ -653,8 +653,18 @@ explicitly chooses whether that listener installs worker management under the
 reserved `worker` namespace. Use `None` for a plugin-only listener: it receives
 no worker actions automatically. `SharedEntry::install_actions` and
 `install_native_actions` register each axis's actions into that same router as
-reversible resources in its own composition. Serving begins after `activate`;
-additional owners can register while the entry is live.
+reversible resources in its own composition. Application assembly also publishes
+the read-only gRPC action `worker.metrics` with process-local operation counts,
+in-flight requests, outcomes, consumed request/response chunk bytes of terminated
+requests, cumulative latency in nanoseconds, and HTTP status classes (`0` is unknown, then `1xx` through
+`5xx`). Counts reset on restart; concurrent snapshots are approximate. Byte counts
+measure native HTTP body-filter chunks before transforms and omit headers,
+separately controlled WebSocket sessions, and L4 tunnel traffic. Cancelled
+requests contribute observed bytes but no latency or status observation.
+`worker.get` retains
+its existing admission-state response. Custom compositions can share counters
+using `NativeProxy::with_operations` and the counters argument of `entry::install`.
+Serving begins after `activate`; additional owners can register while the entry is live.
 
 `composition::mount_axis` mounts a committed child runtime as an explicit parent
 resource. Each child keeps its own local resource names, bindings and useflow;

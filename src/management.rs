@@ -1,4 +1,5 @@
 //! Runtime-installed transport adapters for worker-axis management operations.
+use diagnostic_output::operations::Operations;
 use proxy_pingora::worker::{Snapshot, Update, UpdateError, WorkerControl};
 use serde::Deserialize;
 
@@ -15,7 +16,7 @@ use action_router::{
 };
 use std::sync::Arc;
 
-pub fn actions(control: &Arc<WorkerControl>) -> Vec<Action> {
+pub fn actions(control: &Arc<WorkerControl>, operations: &Arc<Operations>) -> Vec<Action> {
     let get = Contract {
         id: "worker.get".into(),
         version: 1,
@@ -40,9 +41,56 @@ pub fn actions(control: &Arc<WorkerControl>) -> Vec<Action> {
         },
         ..get.clone()
     };
+    let metrics = Contract {
+        id: "worker.metrics".into(),
+        output: Schema::Object {
+            fields: [
+                "started",
+                "inflight",
+                "delivered",
+                "failed",
+                "completion_failed",
+                "cancelled",
+                "request_bytes",
+                "response_bytes",
+                "latency_count",
+                "latency_ns",
+            ]
+            .into_iter()
+            .map(|name| Field::required(name, Schema::Integer))
+            .chain(std::iter::once(Field::required(
+                "status_classes",
+                Schema::Array {
+                    items: Box::new(Schema::Integer),
+                },
+            )))
+            .collect(),
+        },
+        ..get.clone()
+    };
+    let operations = Arc::clone(operations);
     let reader = Arc::clone(control);
     let writer = Arc::clone(control);
     vec![
+        Action {
+            contract: metrics,
+            bindings: vec![Binding::Grpc {
+                action: "worker.metrics".into(),
+            }],
+            handler: Arc::new(JsonHandler::<serde_json::Value, serde_json::Value, _>::new(
+                move |_: serde_json::Value, _: &Context| {
+                    let value = operations.snapshot();
+                    Ok(serde_json::json!({
+                        "started": value.started, "inflight": value.inflight,
+                        "delivered": value.delivered, "failed": value.failed,
+                        "completion_failed": value.completion_failed, "cancelled": value.cancelled,
+                        "request_bytes": value.request_bytes, "response_bytes": value.response_bytes,
+                        "latency_count": value.latency_count, "latency_ns": value.latency_ns,
+                        "status_classes": value.status_classes,
+                    }))
+                },
+            )),
+        },
         Action {
             contract: get,
             bindings: vec![Binding::Grpc {
@@ -82,10 +130,48 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn worker_metrics_reads_shared_counters_without_mutating_control() {
+        use diagnostic_output::operations::Outcome;
+        let control = Arc::new(WorkerControl::default());
+        let operations = Arc::new(Operations::default());
+        let router = Router::new();
+        let _routes = router.register(actions(&control, &operations)).unwrap();
+        let context = Context::new(Duration::from_secs(2)).unwrap();
+        let binding = Binding::Grpc {
+            action: "worker.metrics".into(),
+        };
+        let read = || {
+            serde_json::from_slice::<serde_json::Value>(
+                &router.call(&binding, b"{}", &context).unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(read()["started"], 0);
+        let mut operation = operations.begin();
+        operation.record_bytes(7, 11);
+        assert_eq!(read()["inflight"], 1);
+        operation.finish(Outcome::Delivered, Some(201), Duration::from_millis(4));
+        let value = read();
+        assert_eq!(value["started"], 1);
+        assert_eq!(value["inflight"], 0);
+        assert_eq!(value["delivered"], 1);
+        assert_eq!(value["request_bytes"], 7);
+        assert_eq!(value["response_bytes"], 11);
+        assert_eq!(value["latency_count"], 1);
+        assert_eq!(value["latency_ns"], 4_000_000);
+        assert_eq!(value["status_classes"][2], 1);
+        assert_eq!(read(), value);
+        assert!(control.accepting());
+        assert_eq!(control.snapshot().revision, 1);
+    }
+
+    #[test]
     fn worker_mutation_and_withdrawal_do_not_govern_plugin_routes() {
         let control = Arc::new(WorkerControl::default());
         let router = Router::new();
-        let worker = router.register(actions(&control)).unwrap();
+        let worker = router
+            .register(actions(&control, &Arc::new(Operations::default())))
+            .unwrap();
         let binding = Binding::Grpc {
             action: "plugin.status".into(),
         };

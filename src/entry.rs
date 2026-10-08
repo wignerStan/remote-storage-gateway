@@ -30,10 +30,12 @@ pub struct Registration {
     pub permissions: SocketPermissions,
 }
 
+/// The caller supplies counters shared with the native proxy.
 pub async fn install(
     composition: &mut Composition,
     resource: Resource,
     registration: Registration,
+    operations: Arc<diagnostic_output::operations::Operations>,
 ) -> Result<Arc<SharedEntry>, String> {
     let (send, receive) = oneshot::channel();
     composition
@@ -58,7 +60,7 @@ pub async fn install(
                     router
                         .with_contract_namespace("worker")
                         .map_err(|e| e.to_string())?
-                        .register(crate::management::actions(&control))
+                        .register(crate::management::actions(&control, &operations))
                         .map_err(|e| e.to_string())
                 })
                 .transpose()?;

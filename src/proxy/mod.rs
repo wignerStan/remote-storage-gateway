@@ -10,7 +10,10 @@ mod policy;
 mod websocket_session;
 pub use native_hooks::{NativeHookContext, NativeHookProxy};
 
-use diagnostic_output::runtime::JsonBodyCapture;
+use diagnostic_output::{
+    operations::{Operation, Operations, Outcome},
+    runtime::JsonBodyCapture,
+};
 use policy::{CompiledPolicy, snapshot_request};
 
 use async_trait::async_trait;
@@ -154,6 +157,7 @@ pub struct NativeProxy {
     session_connector: Arc<pingora_core::connectors::http::Connector>,
     lifecycle: Arc<HttpLifecycle<ProxyContract>>,
     control: Arc<WorkerControl>,
+    operations: Arc<Operations>,
     runtime: Option<Runtime>,
     body_dump_limit: usize,
     message_codecs: Arc<[message_codec::CodecRegistration]>,
@@ -199,6 +203,7 @@ impl NativeProxy {
                 Exposure::new(vec![ENDPOINT]),
             )),
             control,
+            operations: Arc::new(Operations::default()),
             runtime: None,
             body_dump_limit: 0,
             message_codecs: Arc::from([]),
@@ -237,6 +242,14 @@ impl NativeProxy {
             .filter(|(_, transport)| *transport == message_codec::Transport::Upgrade)
             .map(|(index, _)| self.message_codecs[index].codec.as_ref())
     }
+    /// Share process operation counters with management or another observer.
+    pub fn with_operations(mut self, operations: Arc<Operations>) -> Self {
+        self.operations = operations;
+        self
+    }
+    pub fn operations(&self) -> Arc<Operations> {
+        Arc::clone(&self.operations)
+    }
     pub fn with_inspection_limits(mut self, limits: crate::config::Inspection) -> Self {
         self.inspection = Arc::new(inspection::InspectionBudget::new(limits));
         self
@@ -254,6 +267,7 @@ impl NativeProxy {
 }
 
 pub struct ProxyContext {
+    operation: Operation,
     exchange: Option<CarrierExchange<ProxyContract>>,
     request_id: u64,
     span: tracing::Span,
