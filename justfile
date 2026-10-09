@@ -30,3 +30,10 @@ build-browser:
 
 # Explicit convenience selection; individual recipes remain independent.
 build-plugins: build-postgres build-cache build-browser
+
+
+# Actual native carriers, SDK error frames, and Codex interrupt continuation.
+bdd-codecs:
+    cargo test --locked --test native_proxy api_codecs:: -- --nocapture
+    cargo test --locked --test native_proxy response_streams:: -- --nocapture
+    cargo test --locked --test native_proxy realtime_codecs:: -- --nocapture
