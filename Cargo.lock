@@ -1038,6 +1038,7 @@ dependencies = [
 name = "diagnostic-output"
 version = "0.1.0"
 dependencies = [
+ "admission-gate",
  "serde_json",
  "sha2",
  "text-processing",

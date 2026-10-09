@@ -93,7 +93,7 @@ contact. This worker is not a network-wide DLP or transaction rollback boundary.
 `inspection` bounds active requests, retained buffers, complete message sizes and
 incomplete-message assembly time. Defaults are 128 requests, 256 MiB retained
 budget, 1 MiB messages and 30 seconds assembly timeout. Reservations precede
-accumulation; exhaustion fails with 503. Idle framed sessions release reservations;
+accumulation; exhaustion fails with 503. Idle framed sessions with no held messages release reservations;
 new partial messages reacquire them. These limits do not cap every host allocator,
 compiler memory or native callback CPU use. Callback queues, call/startup/shutdown
 deadlines and Wasm instruction fuel have separate meanings; see the common model.
@@ -111,6 +111,13 @@ assembly bounds apply while heartbeats continue. Synthetic `transport.closed`
 notifications let interested Objects release per-session state independently of
 the participant that owns request completion. Native callback deadlines still
 cannot terminate native execution.
+
+Held session messages retain their inspection reservation through release writes.
+A session also caps retained wire and segment/object overhead at twice the message
+limit, and caps held-message count at the protocol frame limit. Exhaustion closes
+the session. The complete message decision chain uses one absolute message
+deadline. Cleanup polls interested owners together; cleanup and completion share
+one I/O deadline. Expired host waits do not cancel native code or release its owners.
 
 Pools keep Object state across requests and use request affinity. Instances do
 not automatically correspond to tenants. Upstream pool isolation incorporates
@@ -137,10 +144,17 @@ selected notifier headers, action inputs or message payloads.
 
 Body capture is off by default (`body_max_bytes: 0`, no `body_file`). Enabling it
 requires a separate `body_file` and a positive `body_max_bytes` capped at 1 MiB.
-Captured body prefixes can contain secrets even when metadata logs are redacted.
+Captured public fields can contain sensitive application data despite credential hashing.
 Protect access/body directories, retention, backups and access permissions according
 to the data being captured. The logging guard remains owned through shutdown;
 bounded queues and retention do not guarantee lossless logging under pressure.
+
+Infra bounds active capture payloads to 64 MiB per assembled proxy. Each capture
+reserves input and encoded detail before allocation. Queue payload allowance is
+at most 16 MiB per sink; record limits are 64 KiB for trace/access and 4 MiB for
+body events. stdout/stderr also use the existing lossy background queue. These
+limits exclude transient formatting, parsed trees and allocator overhead.
+They do not impose physical isolation or a hard process memory limit.
 
 ## Management and publication
 
@@ -153,7 +167,10 @@ budget per entry and the carrier's 128-call admission limit and 120-second
 deadline. This limits idle observers; other action traffic can still consume the
 shared carrier budget. Closing a source returns its observer reservation.
 Counters omit controlled WebSocket session bytes and L4 tunnel bytes and reset on restart; they
-are not durable request history or a logging-health report.
+are not durable request history. Separate `worker.logging` and
+`worker.logging.events` expose the selected logging owner, with error/loss counts
+and payload allowances. Logging streams sample changes once per second and share
+the 32-source event budget. They do not imply durable or lossless output.
 Native actions require one stateful
 instance, bounded unary contracts and unique bindings. Revision checks avoid stale
 state updates; they do not authenticate the caller. There is no built-in management

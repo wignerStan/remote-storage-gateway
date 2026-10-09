@@ -51,6 +51,7 @@ async fn grpc_and_sse_observe_coalesced_operations_and_close_without_notifiers()
         let mut composition = Composition::new(ResourceSchema::new(&[ENTRY]).unwrap());
         let entry = entry::install(&mut composition, ENTRY, Registration {
             worker_control: Some(Arc::clone(&control)),
+            logging_health: None,
             endpoint: LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
             permissions: SocketPermissions::default(),
         }, Arc::clone(&counters)).await.unwrap();
@@ -102,6 +103,7 @@ async fn observer_capacity_keeps_control_available_and_disconnect_returns_a_slot
         let mut composition = Composition::new(ResourceSchema::new(&[ENTRY]).unwrap());
         let entry = entry::install(&mut composition, ENTRY, Registration {
             worker_control: Some(Arc::clone(&control)),
+            logging_health: None,
             endpoint: LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
             permissions: SocketPermissions::default(),
         }, Arc::clone(&counters)).await.unwrap();
@@ -171,6 +173,7 @@ async fn short_grpc_deadline_and_sse_replay_rejection_keep_observations_live_onl
         let mut composition = Composition::new(ResourceSchema::new(&[ENTRY]).unwrap());
         let entry = entry::install(&mut composition, ENTRY, Registration {
             worker_control: Some(control),
+            logging_health: None,
             endpoint: LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
             permissions: SocketPermissions::default(),
         }, counters).await.unwrap();
@@ -214,5 +217,61 @@ async fn short_grpc_deadline_and_sse_replay_rejection_keep_observations_live_onl
         evidence.record("then", "reject_replay", "SSE does not claim durable replay and rejects a resume cursor", json!({"status": 400, "resume_supported": false}));
         timeout(WAIT, runtime.shutdown()).await.unwrap().unwrap();
         assert!(matches!(timeout(WAIT, replacement.message()).await.unwrap(), Err(_) | Ok(None)));
+    }).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn logging_events_report_the_selected_owner_without_using_request_callbacks() {
+    use diagnostic_output::runtime::{FileLogConfig, LoggingConfig, build_logging};
+    timeout(Duration::from_secs(12), async {
+        let mut evidence = workflow::Evidence::new();
+        let directory = tempfile::tempdir().unwrap();
+        let (_subscriber, guard) = build_logging(LoggingConfig {
+            stderr_filter: "off".into(),
+            access_file: Some(FileLogConfig { directory: directory.path().join("access"), keep_files: 1 }),
+            body_file: None, queue_capacity: 128,
+        }).unwrap();
+        let health = guard.health();
+        let budget = guard.capture_budget();
+        let counters = Arc::new(Operations::default());
+        let control = Arc::new(WorkerControl::default());
+        let mut composition = Composition::new(ResourceSchema::new(&[ENTRY]).unwrap());
+        let entry = entry::install(&mut composition, ENTRY, Registration {
+            worker_control: Some(control), logging_health: Some(health.clone()),
+            endpoint: LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
+            permissions: SocketPermissions::default(),
+        }, Arc::clone(&counters)).await.unwrap();
+        let runtime = composition.commit().await.unwrap();
+        entry.activate().unwrap();
+        let address = entry.local_address().unwrap();
+        let mut client = ActionsClient::connect(format!("http://{address}")).await.unwrap();
+        let mut events = client.call_stream(request("worker.logging.events", b"null")).await.unwrap().into_inner();
+        let first: Value = serde_json::from_slice(&events.message().await.unwrap().unwrap().output).unwrap();
+        assert_eq!(first, health.snapshot().to_json());
+        assert_eq!(first["active_capture_bytes"], 0);
+        assert!(first["queue_max_bytes"].as_u64().unwrap() > 0);
+        evidence.record("given", "observe_logging", "the entry publishes the selected logging owner's limits and separate failure counters", first);
+
+        let held = budget.try_reserve(1024).unwrap();
+        let changed: Value = serde_json::from_slice(&timeout(WAIT, events.message()).await.unwrap().unwrap().unwrap().output).unwrap();
+        assert_eq!(changed["active_capture_bytes"], 1024);
+        let unary: Value = serde_json::from_slice(&client.call(request("worker.logging", b"{}")).await.unwrap().into_inner().output).unwrap();
+        assert_eq!(unary, changed);
+        let mut operation_streams = Vec::new();
+        for _ in 0..31 {
+            let mut stream = client.call_stream(request("worker.events", b"null")).await.unwrap().into_inner();
+            assert!(stream.message().await.unwrap().is_some());
+            operation_streams.push(stream);
+        }
+        let mut extra = client.call_stream(request("worker.logging.events", b"null")).await.unwrap().into_inner();
+        assert_eq!(extra.message().await.unwrap_err().code(), tonic::Code::ResourceExhausted);
+        assert_eq!(counters.snapshot().started, 0);
+        evidence.record("when", "sample_health", "logging changes reach observers without data requests; operation and logging streams share the observer limit", json!({"active_capture_bytes": 1024, "observers": 32, "data_requests": 0}));
+        drop(held);
+        let released: Value = serde_json::from_slice(&timeout(WAIT, events.message()).await.unwrap().unwrap().unwrap().output).unwrap();
+        assert_eq!(released["active_capture_bytes"], 0);
+        timeout(WAIT, runtime.shutdown()).await.unwrap().unwrap();
+        assert!(matches!(timeout(WAIT, events.message()).await.unwrap(), Err(_) | Ok(None)));
+        drop(operation_streams);
     }).await.unwrap();
 }

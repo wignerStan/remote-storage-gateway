@@ -16,7 +16,11 @@ use action_router::{
 };
 use std::sync::Arc;
 
-pub fn actions(control: &Arc<WorkerControl>, operations: &Arc<Operations>) -> Vec<Action> {
+pub fn actions(
+    control: &Arc<WorkerControl>,
+    operations: &Arc<Operations>,
+    logging: Option<diagnostic_output::runtime::LoggingHealth>,
+) -> Vec<Action> {
     let get = Contract {
         id: "worker.get".into(),
         version: 1,
@@ -43,7 +47,7 @@ pub fn actions(control: &Arc<WorkerControl>, operations: &Arc<Operations>) -> Ve
     };
     let reader = Arc::clone(control);
     let writer = Arc::clone(control);
-    let mut actions = crate::observability::actions(operations);
+    let mut actions = crate::observability::actions(operations, logging);
     actions.extend([
         Action {
             contract: get,
@@ -90,7 +94,9 @@ mod tests {
         let control = Arc::new(WorkerControl::default());
         let operations = Arc::new(Operations::default());
         let router = Router::new();
-        let _routes = router.register(actions(&control, &operations)).unwrap();
+        let _routes = router
+            .register(actions(&control, &operations, None))
+            .unwrap();
         let context = Context::new(Duration::from_secs(2)).unwrap();
         let binding = Binding::Grpc {
             action: "worker.metrics".into(),
@@ -125,7 +131,7 @@ mod tests {
         let control = Arc::new(WorkerControl::default());
         let router = Router::new();
         let worker = router
-            .register(actions(&control, &Arc::new(Operations::default())))
+            .register(actions(&control, &Arc::new(Operations::default()), None))
             .unwrap();
         let binding = Binding::Grpc {
             action: "plugin.status".into(),

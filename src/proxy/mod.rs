@@ -160,6 +160,7 @@ pub struct NativeProxy {
     operations: Arc<Operations>,
     runtime: Option<Runtime>,
     body_dump_limit: usize,
+    capture_budget: Arc<admission_gate::budget::ResourceBudget>,
     message_codecs: Arc<[message_codec::CodecRegistration]>,
     inspection: Arc<inspection::InspectionBudget>,
 }
@@ -206,6 +207,7 @@ impl NativeProxy {
             operations: Arc::new(Operations::default()),
             runtime: None,
             body_dump_limit: 0,
+            capture_budget: diagnostic_output::runtime::default_capture_budget(),
             message_codecs: Arc::from([]),
             inspection: Arc::new(inspection::InspectionBudget::new(
                 crate::config::Inspection::default(),
@@ -262,6 +264,14 @@ impl NativeProxy {
     /// Disabled sinks never allocate a body buffer.
     pub fn with_body_dump_limit(mut self, limit: usize) -> Self {
         self.body_dump_limit = limit.min(1024 * 1024);
+        self
+    }
+    /// Share the logging owner's active-capture budget across all requests.
+    pub fn with_body_dump_budget(
+        mut self,
+        budget: Arc<admission_gate::budget::ResourceBudget>,
+    ) -> Self {
+        self.capture_budget = budget;
         self
     }
 }

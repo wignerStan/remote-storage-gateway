@@ -2,7 +2,7 @@
 //! Route, account, token and replay policy remain in the selected callbacks.
 use super::message_action::{Decision, Metadata, Reply, Upstream};
 use super::*;
-use admission_gate::budget::Reservation;
+use admission_gate::budget::{Reservation, ResourceBudget};
 use bytes::Bytes;
 use proxy_pingora::{
     connect_upstream::websocket_session::{self as carrier, Event, Message, Side},
@@ -25,6 +25,92 @@ struct Plan {
     patches: Vec<Metadata>,
     replacement: Option<Message>,
     reply: Option<Bytes>,
+}
+
+/// Application-held wire is outside Pingora's decoder and pending-event queues.
+/// Keep each reservation with its bytes, including while a release is writing.
+struct HeldMessage {
+    message: Message,
+    _bytes: Reservation,
+    _count: Reservation,
+    _inspection: Arc<Reservation>,
+}
+
+fn retain_message(
+    message: &Message,
+    bytes: &Arc<ResourceBudget>,
+    count: &Arc<ResourceBudget>,
+    inspection: Arc<Reservation>,
+) -> Result<HeldMessage> {
+    let units = message
+        .wire
+        .iter()
+        .try_fold(std::mem::size_of::<HeldMessage>(), |total, wire| {
+            total
+                .checked_add(wire.len())?
+                .checked_add(std::mem::size_of::<Bytes>())
+        })
+        .ok_or_else(|| refusal(503, "held WebSocket wire budget overflow"))?;
+    let bytes = bytes
+        .try_reserve(units)
+        .ok_or_else(|| refusal(503, "held WebSocket wire budget exhausted"))?;
+    let count = count
+        .try_reserve(1)
+        .ok_or_else(|| refusal(503, "held WebSocket message budget exhausted"))?;
+    Ok(HeldMessage {
+        message: Message {
+            side: message.side,
+            message: None,
+            wire: message.wire.clone(),
+        },
+        _bytes: bytes,
+        _count: count,
+        _inspection: inspection,
+    })
+}
+
+/// Bound host waiting without claiming to interrupt an executing native callback.
+/// The callback owner retains its input and inspection reservation until return.
+async fn within_deadline<T>(
+    deadline: tokio::time::Instant,
+    operation: impl std::future::Future<Output = Result<T>>,
+    reason: &'static str,
+) -> Result<T> {
+    stream_transfer::bounded_io(
+        Some(deadline.into_std()),
+        deadline.saturating_duration_since(tokio::time::Instant::now()),
+        std::future::pending(),
+        operation,
+    )
+    .await
+    .map_err(|failure| match failure {
+        stream_transfer::IoFailure::Transport(error) => error,
+        _ => refusal(504, reason),
+    })
+}
+
+type CleanupFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+
+/// Poll all cleanup owners before waiting for any one owner to finish.
+async fn complete_all(mut operations: Vec<Option<CleanupFuture<'_>>>) {
+    std::future::poll_fn(|cx| {
+        let mut pending = false;
+        for operation in &mut operations {
+            if let Some(future) = operation {
+                if future.as_mut().poll(cx).is_ready() {
+                    *operation = None;
+                } else {
+                    pending = true;
+                }
+            }
+        }
+        if pending {
+            std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(())
+        }
+    })
+    .await;
 }
 
 impl NativeProxy {
@@ -137,28 +223,47 @@ impl NativeProxy {
             ctx.request_id,
             ctx.response_sequence
         );
+        let cleanup_deadline = tokio::time::Instant::now() + self.config.io_timeout;
+        let mut cleanup = Vec::new();
         for (index, callback) in registration.callbacks.iter().enumerate() {
             if !callback.interested(true, "transport.closed") {
                 continue;
             }
-            let result = callback
-                .notify_closed(&method, closed.clone(), reservation.clone())
-                .await;
-            tracing::debug!(target: "proxy_pingora::session", request_id = ctx.request_id,
-                callback_index = index, outcome = if result.is_ok() { "complete" } else { "error" },
-                "session owner cleanup attempted");
+            let method = &method;
+            let closed = closed.clone();
+            let reservation = reservation.clone();
+            let request_id = ctx.request_id;
+            cleanup.push(Some(Box::pin(async move {
+                let result = callback.notify_closed(method, closed, reservation).await;
+                tracing::debug!(target: "proxy_pingora::session", request_id,
+                    callback_index = index, outcome = if result.is_ok() { "complete" } else { "error" },
+                    "session owner cleanup attempted");
+            }) as CleanupFuture<'_>));
         }
+        let cleanup_result = within_deadline(
+            cleanup_deadline,
+            async {
+                complete_all(cleanup).await;
+                Ok(())
+            },
+            "session cleanup callback deadline exceeded",
+        )
+        .await;
         drop(transport);
         drop(reservation);
         match result {
             Ok(()) => {
                 exchange.facts_mut().completed = true;
-                ctx.session_completed =
-                    tokio::time::timeout(self.config.io_timeout, exchange.finish())
-                        .await
-                        .map_err(|_| refusal(504, "completion callback deadline exceeded"))?
-                        .map_err(lifecycle_error)
-                        .map(|_| true)?;
+                ctx.session_completed = within_deadline(
+                    cleanup_deadline,
+                    async {
+                        cleanup_result?;
+                        exchange.finish().await.map_err(lifecycle_error)
+                    },
+                    "completion callback deadline exceeded",
+                )
+                .await
+                .map(|_| true)?;
                 Ok(())
             }
             Err(error) => {
@@ -179,7 +284,10 @@ impl NativeProxy {
         reservation: &mut Option<Arc<Reservation>>,
     ) -> Result<()> {
         let SessionRoute { request, proxy } = route;
-        let mut held: Vec<carrier::Message> = Vec::new();
+        let mut held: Vec<HeldMessage> = Vec::new();
+        let held_bytes =
+            ResourceBudget::new(self.inspection.limits.max_message_bytes.saturating_mul(2));
+        let held_count = ResourceBudget::new(websocket::Limits::default().max_frames);
         loop {
             let event = transport
                 .next_reserved(|| {
@@ -233,13 +341,18 @@ impl NativeProxy {
                     } else {
                         &mut ctx.message_sequence
                     };
-                    let pending = evaluate(
-                        registration,
-                        &message,
-                        sequence,
-                        ctx.request_id,
-                        self.inspection.limits.max_message_bytes,
-                        reservation.clone(),
+                    let deadline = self.inspection.deadline();
+                    let pending = within_deadline(
+                        deadline,
+                        evaluate(
+                            registration,
+                            &message,
+                            sequence,
+                            ctx.request_id,
+                            self.inspection.limits.max_message_bytes,
+                            reservation.clone(),
+                        ),
+                        "message callback chain deadline exceeded",
                     );
                     let plan = transport
                         .drive_until(pending, || {
@@ -289,11 +402,14 @@ impl NativeProxy {
                             generation, decision = "disconnect", "upstream generation retired");
                     }
                     if plan.hold == "buffer" {
-                        held.push(carrier::Message {
-                            side: message.side,
-                            message: None,
-                            wire: message.wire.clone(),
-                        });
+                        held.push(retain_message(
+                            &message,
+                            &held_bytes,
+                            &held_count,
+                            reservation
+                                .clone()
+                                .ok_or_else(|| refusal(500, "missing held wire reservation"))?,
+                        )?);
                         continue;
                     }
                     if plan.hold == "discard" {
@@ -302,7 +418,7 @@ impl NativeProxy {
                     if plan.hold == "release" {
                         // Front to back. Vec::pop would send the newest frame first.
                         for saved in release_hold(&mut held) {
-                            let _ = transport.forward_upstream(&saved).await;
+                            let _ = transport.forward_upstream(&saved.message).await;
                         }
                     }
                     match plan.decision {
@@ -345,7 +461,7 @@ impl NativeProxy {
                     }
                 }
             }
-            if !transport.has_buffered_data() {
+            if !transport.has_buffered_data() && held.is_empty() {
                 *reservation = None;
             }
         }
@@ -641,13 +757,17 @@ async fn upstream_closed(
     };
     let plan = transport
         .drive_until(
-            evaluate(
-                registration,
-                &message,
-                &mut ctx.response_sequence,
-                ctx.request_id,
-                budget.limits.max_message_bytes,
-                reservation.clone(),
+            within_deadline(
+                budget.deadline(),
+                evaluate(
+                    registration,
+                    &message,
+                    &mut ctx.response_sequence,
+                    ctx.request_id,
+                    budget.limits.max_message_bytes,
+                    reservation.clone(),
+                ),
+                "upstream cleanup callback chain deadline exceeded",
             ),
             || Ok(()),
         )
@@ -706,6 +826,115 @@ mod tests {
         }
         assert_eq!(release_hold(&mut held), ["delta-1", "delta-2", "delta-3"]);
         assert!(held.is_empty());
+    }
+
+    fn held_test_message() -> Message {
+        Message {
+            side: Side::Upstream(1),
+            message: None,
+            wire: vec![Bytes::from_static(b"wire")],
+        }
+    }
+
+    #[test]
+    fn held_wire_bounds_bytes_and_count_without_copying_or_releasing_ownership() {
+        let original = held_test_message();
+        let bytes = ResourceBudget::new(4096);
+        let count = ResourceBudget::new(1);
+        let inspection = ResourceBudget::new(100);
+        let pin = Arc::new(inspection.try_reserve(100).unwrap());
+        let saved = retain_message(&original, &bytes, &count, pin.clone()).unwrap();
+        assert_eq!(saved.message.wire[0].as_ptr(), original.wire[0].as_ptr());
+        let held_units = bytes.used();
+        assert!(held_units >= original.wire[0].len());
+        assert!(retain_message(&original, &bytes, &count, pin.clone()).is_err());
+        assert_eq!(
+            bytes.used(),
+            held_units,
+            "failed count reservation must roll back bytes"
+        );
+        drop(pin);
+        let mut held = vec![saved];
+        let released = release_hold(&mut held);
+        assert!(held.is_empty());
+        assert_eq!(
+            inspection.used(),
+            100,
+            "draining the hold does not release pending writes"
+        );
+        assert_eq!(count.used(), 1);
+        drop(released);
+        assert_eq!(inspection.used(), 0);
+        assert_eq!(count.used(), 0);
+        assert_eq!(bytes.used(), 0);
+        let too_small = ResourceBudget::new(held_units - 1);
+        let pin = Arc::new(inspection.try_reserve(100).unwrap());
+        assert!(retain_message(&original, &too_small, &count, pin).is_err());
+        assert_eq!(too_small.used(), 0);
+        assert_eq!(count.used(), 0);
+        assert_eq!(inspection.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn absolute_callback_deadline_bounds_a_whole_chain_and_rejects_expired_work() {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(20);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let result = within_deadline(
+            deadline,
+            async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(12)).await;
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok(())
+            },
+            "test chain expired",
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let result = within_deadline(
+            tokio::time::Instant::now(),
+            async {
+                panic!("expired chain must never poll a callback");
+                #[allow(unreachable_code)]
+                Ok(())
+            },
+            "test chain expired",
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn cleanup_polls_all_owners_with_one_shared_deadline() {
+        let notified = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observer = notified.clone();
+        let operations: Vec<Option<CleanupFuture<'_>>> = vec![
+            Some(Box::pin(std::future::pending())),
+            Some(Box::pin(async move {
+                observer.store(true, std::sync::atomic::Ordering::SeqCst);
+            })),
+        ];
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+        assert!(
+            within_deadline(
+                deadline,
+                async {
+                    complete_all(operations).await;
+                    Ok(())
+                },
+                "test cleanup expired"
+            )
+            .await
+            .is_err()
+        );
+        assert!(notified.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            within_deadline(deadline, async { Ok(()) }, "test completion expired")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
