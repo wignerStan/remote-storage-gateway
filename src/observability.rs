@@ -3,8 +3,12 @@ use action_router::{
     Action, Binding, Context, Contract, Error, Field, JsonHandler, ResponseMode, Schema, Source,
     StreamHandler,
 };
+use admission_gate::budget::{Reservation, ResourceBudget};
 use diagnostic_output::operations::{Operations, Updates};
 use std::sync::Arc;
+
+// Event streams must leave capacity for control calls on the shared 128-call entry.
+pub(crate) const MAX_EVENT_SUBSCRIBERS: usize = 32;
 
 fn output_schema() -> Schema {
     Schema::Object {
@@ -49,6 +53,7 @@ pub(crate) fn actions(operations: &Arc<Operations>) -> Vec<Action> {
     };
     let reader = Arc::clone(operations);
     let publisher = Arc::clone(operations);
+    let subscribers = ResourceBudget::new(MAX_EVENT_SUBSCRIBERS);
     vec![
         Action {
             contract: metrics,
@@ -73,6 +78,7 @@ pub(crate) fn actions(operations: &Arc<Operations>) -> Vec<Action> {
             handler: Arc::new(StreamHandler(
                 move |_: &[u8], _: &Context| -> Result<Box<dyn Source>, Error> {
                     Ok(Box::new(OperationalEvents {
+                        _reservation: subscribers.try_reserve(1).ok_or(Error::Busy)?,
                         updates: publisher.subscribe(),
                         runtime: tokio::runtime::Handle::current(),
                     }))
@@ -82,6 +88,8 @@ pub(crate) fn actions(operations: &Arc<Operations>) -> Vec<Action> {
     ]
 }
 struct OperationalEvents {
+    // Retain admission through the source's actual cancellation/cleanup.
+    _reservation: Reservation,
     updates: Updates,
     runtime: tokio::runtime::Handle,
 }
