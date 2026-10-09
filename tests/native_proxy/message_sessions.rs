@@ -405,3 +405,221 @@ async fn codex_websocket_aliases_accept_locally_and_wait_for_an_admitted_create(
         .unwrap();
     }
 }
+
+fn holding_artifact(dir: &Path) -> PathBuf {
+    session_budget_artifact(dir, true)
+}
+
+fn session_budget_artifact(dir: &Path, hold: bool) -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(root.join("tests/fixtures/message_actions.c")).unwrap();
+    let start = source
+        .find("    if (begins(method, TEST_CODEC_PREFIX \"/response.completed/\"))")
+        .unwrap();
+    let end = source[start..].find("    /* A delta callback").unwrap() + start;
+    let mut source = source;
+    if hold {
+        source.replace_range(
+            start..end,
+            r#"
+    if (begins(method, TEST_CODEC_PREFIX "/response.completed/")) {
+        FILE *marker = fopen(TEST_MARKER_PATH, "a");
+        if (!marker) return INFRA_FAILED;
+        fputs("held\n", marker); fclose(marker);
+        return action("{\"version\":1,\"decision\":\"forward\",\"hold\":\"buffer\"}", "", out);
+    }
+"#,
+        );
+    } else {
+        source = source.replace("#if TEST_MODE == 2", "#if 1");
+    }
+    let source_path = dir.join("holding.c");
+    std::fs::write(&source_path, source).unwrap();
+    let path = dir.join("holding.so");
+    assert!(
+        Command::new("cc")
+            .args(["-shared", "-fPIC", "-std=c11", "-I"])
+            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(format!(
+                "-DTEST_MARKER_PATH={}",
+                serde_json::to_string(&dir.join("held").to_str().unwrap()).unwrap()
+            ))
+            .arg(format!(
+                "-DTEST_DELTA_MARKER_PATH={}",
+                serde_json::to_string(&dir.join("delta").to_str().unwrap()).unwrap()
+            ))
+            .arg(source_path)
+            .arg("-o")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    path
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn held_response_keeps_body_reservation_across_peer_ping() {
+    timeout(WAIT, async {
+        let connections = Arc::new(AtomicUsize::new(0));
+        let count = connections.clone();
+        let origin = listen(move |mut socket| {
+            count.fetch_add(1, Ordering::SeqCst);
+            async move {
+                let request = head(&mut socket).await;
+                upgrade(&mut socket, &request).await;
+                frame(&mut socket, true).await;
+                socket
+                    .write_all(&websocket::encode_server(1, COMPLETED).unwrap())
+                    .await
+                    .unwrap();
+                let mut tail = Vec::new();
+                let _ = socket.read_to_end(&mut tail).await;
+            }
+        })
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let mut cfg = config(origin.address, holding_artifact(directory.path()));
+        cfg.inspection.max_message_bytes = 1024;
+        cfg.inspection.max_buffered_bytes = 8 * 1024 + 8 * 1024 * 1024 + 512 * 1024;
+        let proxy = pingora_worker::assembly::assemble(cfg).await.unwrap();
+        let worker = serve_engine(proxy.clone()).await;
+        let mut first = TcpStream::connect(worker.address).await.unwrap();
+        first.write_all(REQUEST).await.unwrap();
+        assert!(head(&mut first).await.starts_with(b"HTTP/1.1 101"));
+        // Both handshakes need a temporary inspection reservation. Accept the
+        // idle peer before the first session consumes the sole reservation.
+        let mut second = TcpStream::connect(worker.address).await.unwrap();
+        second.write_all(REQUEST).await.unwrap();
+        assert!(head(&mut second).await.starts_with(b"HTTP/1.1 101"));
+        first
+            .write_all(&websocket::encode_client(1, CREATE).unwrap())
+            .await
+            .unwrap();
+        while !directory.path().join("held").exists() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        // This maintenance event used to drop the reservation while held wire remained.
+        first
+            .write_all(&websocket::encode_client(9, b"held").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(frame(&mut first, false).await, (10, b"held".to_vec()));
+        second
+            .write_all(&websocket::encode_client(1, CREATE).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(frame(&mut second, false).await.0, 8);
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            1,
+            "held wire must keep the sole memory reservation"
+        );
+        first
+            .write_all(&websocket::encode_client(8, &1000_u16.to_be_bytes()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(frame(&mut first, false).await.0, 8);
+        drop(first);
+        drop(second);
+        drop(worker);
+        proxy.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_held_responses_close_at_cumulative_wire_limit() {
+    timeout(WAIT, async {
+        let origin = listen(|mut socket| async move {
+            let request = head(&mut socket).await;
+            upgrade(&mut socket, &request).await;
+            frame(&mut socket, true).await;
+            for _ in 0..32 {
+                if socket
+                    .write_all(&websocket::encode_server(1, COMPLETED).unwrap())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            let mut tail = Vec::new();
+            let _ = socket.read_to_end(&mut tail).await;
+        })
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let mut cfg = config(origin.address, holding_artifact(directory.path()));
+        cfg.inspection.max_message_bytes = 1024;
+        let proxy = pingora_worker::assembly::assemble(cfg).await.unwrap();
+        let worker = serve_engine(proxy.clone()).await;
+        let mut client = TcpStream::connect(worker.address).await.unwrap();
+        client.write_all(REQUEST).await.unwrap();
+        assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
+        client
+            .write_all(&websocket::encode_client(1, CREATE).unwrap())
+            .await
+            .unwrap();
+        let (opcode, payload) = frame(&mut client, false).await;
+        assert_eq!(opcode, 8, "held responses must not accumulate forever");
+        assert_eq!(&payload[..2], &1011_u16.to_be_bytes());
+        drop(client);
+        drop(worker);
+        proxy.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn callback_chain_uses_one_message_deadline_before_any_upstream_dial() {
+    timeout(WAIT, async {
+        let connections = Arc::new(AtomicUsize::new(0));
+        let count = connections.clone();
+        let origin = listen(move |_socket| {
+            count.fetch_add(1, Ordering::SeqCst);
+            async {}
+        })
+        .await;
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let mut cfg: pingora_worker::config::Config = serde_json::from_value(json!({
+            "upstream":format!("http://{}", origin.address),
+            "callbacks":[
+                {"path":session_budget_artifact(first.path(), false),"package":"worker.sessions.test", "message_codec":"openai.responses.v1", "message_actions":true,"patch_headers":["cookie","x-request-id"]},
+                {"path":session_budget_artifact(second.path(), false),"package":"worker.sessions.test", "message_codec":"openai.responses.v1", "message_actions":true,"patch_headers":["cookie","x-request-id"]}
+            ]
+        })).unwrap();
+        cfg.inspection.message_timeout_ms = 200;
+        for callback in &mut cfg.callbacks {
+            callback.timeout_ms = 1000;
+        }
+        let proxy = pingora_worker::assembly::assemble(cfg).await.unwrap();
+        let worker = serve_engine(proxy.clone()).await;
+        let mut client = TcpStream::connect(worker.address).await.unwrap();
+        client.write_all(REQUEST).await.unwrap();
+        assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
+        client
+            .write_all(&websocket::encode_client(1, CREATE).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            frame(&mut client, false).await.0,
+            8,
+            "two 150ms callbacks must exhaust one 200ms chain deadline"
+        );
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            0,
+            "an expired callback chain cannot authorize dialing"
+        );
+        // Native execution can outlive the host deadline. Shutdown awaits its owner.
+        drop(client);
+        drop(worker);
+        proxy.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
