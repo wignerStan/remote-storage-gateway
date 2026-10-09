@@ -71,6 +71,7 @@ async fn host(schema: &[Resource]) -> (Composition, Arc<SharedEntry>) {
         ENTRY,
         entry::Registration {
             worker_control: Some(Arc::default()),
+            logging_health: None,
             endpoint: network_sockets::LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
             permissions: network_sockets::SocketPermissions::default(),
         },

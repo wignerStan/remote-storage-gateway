@@ -79,27 +79,45 @@ pub fn run_with_options(
     let _logging = diagnostic_output::runtime::init_logging(config.logging())
         .map_err(|error| format!("logging initialization failed: {error}"))?;
     let listener = config.listener();
+    let health = _logging.health();
+    let capture_budget = _logging.capture_budget();
     proxy_pingora::ProxyFacility::run_proxy_with_options(listener, options, move || {
-        assemble(config)
+        assemble_selected(config, default_codecs(), Some(health), capture_budget)
     })
     .map_err(|error| error.to_string())
 }
 
 pub async fn assemble(config: Config) -> Result<NativeProxy, String> {
-    assemble_with_codecs(config, {
-        let mut codecs = llm_protocols::codec::builtins();
-        codecs.push(Arc::new(
-            proxy_pingora::http_ingress::message_codec::WebSocketCodec,
-        ));
-        codecs
-    })
-    .await
+    assemble_with_codecs(config, default_codecs()).await
+}
+
+fn default_codecs() -> Vec<Arc<dyn proxy_pingora::http_ingress::message_codec::CodecPlugin>> {
+    let mut codecs = llm_protocols::codec::builtins();
+    codecs.push(Arc::new(
+        proxy_pingora::http_ingress::message_codec::WebSocketCodec,
+    ));
+    codecs
 }
 
 /// Install trusted host codec implementations before admitting native callbacks.
 pub async fn assemble_with_codecs(
     config: Config,
+    codecs: Vec<Arc<dyn proxy_pingora::http_ingress::message_codec::CodecPlugin>>,
+) -> Result<NativeProxy, String> {
+    assemble_selected(
+        config,
+        codecs,
+        None,
+        diagnostic_output::runtime::default_capture_budget(),
+    )
+    .await
+}
+
+async fn assemble_selected(
+    config: Config,
     mut codecs: Vec<Arc<dyn proxy_pingora::http_ingress::message_codec::CodecPlugin>>,
+    logging_health: Option<diagnostic_output::runtime::LoggingHealth>,
+    capture_budget: Arc<admission_gate::budget::ResourceBudget>,
 ) -> Result<NativeProxy, String> {
     config.validate()?;
     for callback in &config.callbacks {
@@ -330,6 +348,7 @@ pub async fn assemble_with_codecs(
             MANAGEMENT,
             crate::entry::Registration {
                 worker_control: Some(Arc::clone(&control)),
+                logging_health,
                 endpoint: network_sockets::LocalEndpoint::parse(&management.listen)?,
                 permissions: network_sockets::SocketPermissions::default(),
             },
@@ -382,5 +401,6 @@ pub async fn assemble_with_codecs(
         .with_inspection_limits(inspection)
         .with_message_callbacks(messages, codecs)
         .with_body_dump_limit(body_limit)
+        .with_body_dump_budget(capture_budget)
         .with_runtime(runtime))
 }

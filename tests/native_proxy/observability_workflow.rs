@@ -72,6 +72,7 @@ async fn stream_delivery_completion_and_reconnect_have_independent_observers() {
         let mut composition = Composition::new(ResourceSchema::new(&[ENTRY]).unwrap());
         let entry = entry::install(&mut composition, ENTRY, entry::Registration {
             worker_control: Some(Arc::clone(&control)),
+            logging_health: None,
             endpoint: LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
             permissions: SocketPermissions::default(),
         }, Arc::clone(&operations)).await.unwrap();

@@ -54,8 +54,14 @@ impl ProxyHttp for NativeProxy {
             response_received: false,
             logged: false,
             session_completed: false,
-            dump: JsonBodyCapture::new(self.body_dump_limit),
-            response_dump: JsonResponseCapture::new(self.body_dump_limit),
+            dump: JsonBodyCapture::with_budget(
+                self.body_dump_limit,
+                Arc::clone(&self.capture_budget),
+            ),
+            response_dump: JsonResponseCapture::with_budget(
+                self.body_dump_limit,
+                Arc::clone(&self.capture_budget),
+            ),
         }
     }
     fn request_body_deadline(&self, ctx: &Self::CTX) -> Option<tokio::time::Instant> {

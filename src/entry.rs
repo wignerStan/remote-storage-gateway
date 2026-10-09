@@ -26,6 +26,8 @@ impl SharedEntry {
 pub struct Registration {
     /// Some installs worker management; None exposes only explicitly registered actions.
     pub worker_control: Option<Arc<proxy_pingora::worker::WorkerControl>>,
+    /// Selected logging owner. None publishes no logging-health contracts.
+    pub logging_health: Option<diagnostic_output::runtime::LoggingHealth>,
     pub endpoint: LocalEndpoint,
     pub permissions: SocketPermissions,
 }
@@ -42,6 +44,7 @@ pub async fn install(
         .install(resource, async move {
             let Registration {
                 worker_control,
+                logging_health,
                 endpoint,
                 permissions,
             } = registration;
@@ -60,7 +63,11 @@ pub async fn install(
                     router
                         .with_contract_namespace("worker")
                         .map_err(|e| e.to_string())?
-                        .register(crate::management::actions(&control, &operations))
+                        .register(crate::management::actions(
+                            &control,
+                            &operations,
+                            logging_health,
+                        ))
                         .map_err(|e| e.to_string())
                 })
                 .transpose()?;

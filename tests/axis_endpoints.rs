@@ -34,6 +34,7 @@ async fn axis(path: &Path, value: u8) -> (Runtime, Arc<SharedEntry>) {
         ENTRY,
         entry::Registration {
             worker_control: None,
+            logging_health: None,
             endpoint: LocalEndpoint::Unix(path.to_owned()),
             permissions: SocketPermissions::default(),
         },
@@ -134,6 +135,7 @@ async fn independent_axis_uds_and_identical_action_names_do_not_conflict() {
             ENTRY,
             entry::Registration {
                 worker_control: None,
+                logging_health: None,
                 endpoint: LocalEndpoint::Unix(a_path.clone()),
                 permissions: SocketPermissions::default(),
             },

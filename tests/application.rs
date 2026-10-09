@@ -283,6 +283,22 @@ async fn executable_callback_roundtrip(language: &str, configured_kind: Option<&
         serde_json::from_slice::<Value>(&snapshot.output).unwrap(),
         json!({"revision":1,"accepting":true})
     );
+    let logging = timeout(
+        WAIT,
+        management.call(CallRequest {
+            binding: "worker.logging".into(),
+            input: b"{}".to_vec(),
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .into_inner();
+    let logging: Value = serde_json::from_slice(&logging.output).unwrap();
+    assert_eq!(logging["capture_max_bytes"], 64 * 1024 * 1024);
+    assert_eq!(logging["queue_max_bytes"], 48 * 1024 * 1024);
+    assert_eq!(logging["active_capture_bytes"], 0);
+    assert_eq!(logging["write_failures"], 0);
     drop(management);
     timeout(WAIT, async {
         client.write_all(format!("POST /upload?q=kept HTTP/1.1\r\nHost: downstream\r\nAuthorization: Bearer header-secret\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", BODY.len()).as_bytes()).await.unwrap();
