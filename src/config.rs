@@ -644,7 +644,8 @@ impl Config {
                 network_sockets::LocalEndpoint::Tcp(address) if address == self.listen => {
                     return Err("data and management listeners must differ".into());
                 }
-                network_sockets::LocalEndpoint::Tcp(_) | network_sockets::LocalEndpoint::Unix(_) => {}
+                network_sockets::LocalEndpoint::Tcp(_)
+                | network_sockets::LocalEndpoint::Unix(_) => {}
             }
         }
         if self.logging.body_file.is_some() != (self.logging.body_max_bytes > 0)
@@ -1039,7 +1040,10 @@ mod tests {
         assert!(duplicate.validate().unwrap_err().contains("unique"));
         let unix: Config = serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"unix:///run/sub2api/actions.sock"}})).unwrap();
         unix.validate().unwrap();
-        let external: Config = serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"0.0.0.0:6199"}})).unwrap();
+        let external: Config = serde_json::from_value(
+            json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"0.0.0.0:6199"}}),
+        )
+        .unwrap();
         assert!(external.validate().unwrap_err().contains("loopback"));
     }
     #[test]

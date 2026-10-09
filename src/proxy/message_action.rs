@@ -113,7 +113,8 @@ pub(super) fn decode(
 
 impl Metadata {
     fn validate(&self, grant: &Grant, response: bool, payload: &[u8]) -> Result<()> {
-        if !self.hold.is_empty() && !matches!(self.hold.as_str(), "buffer" | "release" | "discard") {
+        if !self.hold.is_empty() && !matches!(self.hold.as_str(), "buffer" | "release" | "discard")
+        {
             return Err(refusal(502, "invalid hold"));
         }
         if self.version != 1 || self.set_headers.len() + self.remove_headers.len() > 64 {
@@ -229,7 +230,7 @@ fn validate_proxy(value: &str) -> Result<Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     fn encoded(metadata: Value, payload: &[u8]) -> Vec<u8> {
         let header = serde_json::to_vec(&metadata).unwrap();
         let mut reply = vec![TAG];
