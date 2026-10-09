@@ -80,6 +80,8 @@ mod hardening;
 mod http2_keepalive;
 #[path = "native_proxy/native_hooks.rs"]
 mod native_hooks;
+#[path = "native_proxy/observability_workflow.rs"]
+mod observability_workflow;
 #[path = "native_proxy/pipeline.rs"]
 mod pipeline;
 #[cfg(unix)]
