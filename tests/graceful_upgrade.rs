@@ -418,3 +418,310 @@ async fn invalid_replacement_plugin_fails_before_handoff_and_old_keeps_serving()
     old.signal("-TERM");
     assert!(old.wait().await.success(), "{}", old.output());
 }
+
+struct NativeCall {
+    library: PathBuf,
+    markers: PathBuf,
+    release: PathBuf,
+}
+impl NativeCall {
+    fn compile(directory: &Path, name: &str, fail_init: bool) -> Self {
+        let library = directory.join(format!("{name}.so"));
+        let markers = directory.join(format!("{name}.markers"));
+        let release = directory.join(format!("{name}.release"));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut command = Command::new("cc");
+        command
+            .args(["-shared", "-fPIC", "-std=c11", "-Wall", "-Wextra", "-I"])
+            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(format!("-DTEST_MARKERS=\"{}\"", markers.display()))
+            .arg(format!("-DTEST_RELEASE=\"{}\"", release.display()));
+        if fail_init {
+            command.arg("-DTEST_FAIL_INIT=1");
+        }
+        assert!(
+            command
+                .arg(root.join("tests/fixtures/graceful_handoff_callback.c"))
+                .arg("-o")
+                .arg(&library)
+                .status()
+                .unwrap()
+                .success()
+        );
+        Self {
+            library,
+            markers,
+            release,
+        }
+    }
+    fn configure(&self, path: &Path, timeout_ms: u64) {
+        let mut value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        value["shutdown_seconds"] = json!(1);
+        value["callbacks"] = json!([{
+            "path":self.library,"package":"worker.handoff.test","kind":"function",
+            "hooks":["pre_routing"],"timeout_ms":timeout_ms,"shutdown_timeout_ms":200,
+            "max_inflight":4,"config":{"version":1,"decision":"continue"}
+        }]);
+        fs::write(path, value.to_string()).unwrap();
+    }
+    fn events(&self, process: &Process) -> Vec<String> {
+        fs::read_to_string(&self.markers)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                let (event, pid) = line.split_once(' ').unwrap();
+                assert_eq!(
+                    pid.parse::<u32>().unwrap(),
+                    process.child.id(),
+                    "native code ran outside its worker"
+                );
+                event.to_owned()
+            })
+            .collect()
+    }
+    async fn entered(&self, process: &mut Process) {
+        timeout(WAIT, async {
+            loop {
+                process.assert_running();
+                if self.events(process).iter().any(|event| event == "enter") {
+                    return;
+                }
+                sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("native call did not enter");
+    }
+    fn assert_held(&self, process: &Process) {
+        let events = self.events(process);
+        assert!(events.iter().any(|event| event == "enter"), "{events:?}");
+        for event in ["return", "free", "close", "destroy"] {
+            assert!(
+                !events.iter().any(|seen| seen == event),
+                "premature {event}: {events:?}"
+            );
+        }
+    }
+    fn assert_cleaned(&self, process: &Process) {
+        assert_eq!(
+            self.events(process),
+            [
+                "init", "open", "enter", "return", "free", "close", "destroy"
+            ]
+        );
+    }
+}
+async fn hold_native(address: SocketAddr) -> TcpStream {
+    let mut held = TcpStream::connect(address).await.unwrap();
+    held.write_all(b"GET /native-held HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    held
+}
+async fn native_handoff(
+    old: &mut Process,
+    replacement: &mut Process,
+    socket: &Path,
+    address: SocketAddr,
+) {
+    timeout(WAIT, async {
+        loop {
+            old.assert_running();
+            replacement.assert_running();
+            if fs::symlink_metadata(socket).is_ok_and(|metadata| metadata.file_type().is_socket()) {
+                break;
+            }
+            sleep(POLL).await;
+        }
+    })
+    .await
+    .expect("replacement did not enter native FD receive");
+    old.signal("-QUIT");
+    timeout(WAIT, async {
+        loop {
+            old.assert_running();
+            replacement.assert_running();
+            if old
+                .output()
+                .contains("Broadcast graceful shutdown complete")
+                && get(address).await.ends_with(b"new")
+            {
+                break;
+            }
+            sleep(POLL).await;
+        }
+    })
+    .await
+    .expect("native handoff did not complete");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn executable_handoff_retains_native_call_until_return_and_cleanup() {
+    let directory = tempfile::tempdir_in("/tmp").unwrap();
+    let socket = directory.path().join("upgrade.sock");
+    let old_origin = origin("old").await;
+    let new_origin = origin("new").await;
+    let reservation = ReservedPort::bind("127.0.0.1:0").unwrap();
+    let address = reservation.local_addr().unwrap();
+    let old_config = config(
+        directory.path(),
+        "old",
+        address,
+        old_origin.address,
+        &socket,
+    );
+    let new_config = config(
+        directory.path(),
+        "new",
+        address,
+        new_origin.address,
+        &socket,
+    );
+    let native = NativeCall::compile(directory.path(), "old-native", false);
+    native.configure(&old_config, 30000);
+    drop(reservation);
+    let mut old = Process::spawn(directory.path(), "old", &old_config, false);
+    ready(&mut old, address).await;
+    let inode = listener_inode(address);
+    let mut held = hold_native(address).await;
+    native.entered(&mut old).await;
+    let mut replacement = Process::spawn(directory.path(), "new", &new_config, true);
+    native_handoff(&mut old, &mut replacement, &socket, address).await;
+    assert_eq!(listener_inode(address), inode);
+    assert!(owns_socket(&replacement, &inode));
+    native.assert_held(&old);
+    fs::write(&native.release, b"return").unwrap();
+    let mut response = Vec::new();
+    timeout(WAIT, held.read_to_end(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+    assert!(response.ends_with(b"old"), "{response:?}");
+    assert!(old.wait().await.success(), "{}", old.output());
+    native.assert_cleaned(&old);
+    assert!(get(address).await.ends_with(b"new"));
+    replacement.signal("-TERM");
+    assert!(
+        replacement.wait().await.success(),
+        "{}",
+        replacement.output()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replacement_native_init_failure_preserves_old_active_call_and_listener() {
+    let directory = tempfile::tempdir_in("/tmp").unwrap();
+    let socket = directory.path().join("upgrade.sock");
+    let origin = origin("old").await;
+    let reservation = ReservedPort::bind("127.0.0.1:0").unwrap();
+    let address = reservation.local_addr().unwrap();
+    let old_config = config(directory.path(), "old", address, origin.address, &socket);
+    let invalid_config = config(
+        directory.path(),
+        "invalid",
+        address,
+        origin.address,
+        &socket,
+    );
+    let native = NativeCall::compile(directory.path(), "old-native", false);
+    let failing = NativeCall::compile(directory.path(), "failing-native", true);
+    native.configure(&old_config, 30000);
+    failing.configure(&invalid_config, 30000);
+    drop(reservation);
+    let mut old = Process::spawn(directory.path(), "old", &old_config, false);
+    ready(&mut old, address).await;
+    let inode = listener_inode(address);
+    let mut held = hold_native(address).await;
+    native.entered(&mut old).await;
+    let mut invalid = Process::spawn(directory.path(), "invalid", &invalid_config, true);
+    assert!(
+        !invalid.wait().await.success(),
+        "failed native init unexpectedly succeeded"
+    );
+    assert!(
+        invalid
+            .output()
+            .contains("native notifier initialization failed"),
+        "{}",
+        invalid.output()
+    );
+    assert_eq!(failing.events(&invalid), ["init_failed"]);
+    assert!(
+        !socket.exists(),
+        "replacement entered FD handoff before native init succeeded"
+    );
+    old.assert_running();
+    assert_eq!(listener_inode(address), inode);
+    assert!(owns_socket(&old, &inode));
+    native.assert_held(&old);
+    assert!(get(address).await.ends_with(b"old"));
+    native.assert_held(&old);
+    fs::write(&native.release, b"return").unwrap();
+    let mut response = Vec::new();
+    timeout(WAIT, held.read_to_end(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.ends_with(b"old"), "{response:?}");
+    old.signal("-TERM");
+    assert!(old.wait().await.success(), "{}", old.output());
+    native.assert_cleaned(&old);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn handoff_bounds_shutdown_without_claiming_native_cancellation_stops_code() {
+    let directory = tempfile::tempdir_in("/tmp").unwrap();
+    let socket = directory.path().join("upgrade.sock");
+    let old_origin = origin("old").await;
+    let new_origin = origin("new").await;
+    let reservation = ReservedPort::bind("127.0.0.1:0").unwrap();
+    let address = reservation.local_addr().unwrap();
+    let old_config = config(
+        directory.path(),
+        "old",
+        address,
+        old_origin.address,
+        &socket,
+    );
+    let new_config = config(
+        directory.path(),
+        "new",
+        address,
+        new_origin.address,
+        &socket,
+    );
+    let native = NativeCall::compile(directory.path(), "old-native", false);
+    // The host deadline expires, but the native fixture keeps waiting for release.
+    native.configure(&old_config, 100);
+    drop(reservation);
+    let mut old = Process::spawn(directory.path(), "old", &old_config, false);
+    ready(&mut old, address).await;
+    let held = hold_native(address).await;
+    native.entered(&mut old).await;
+    let mut replacement = Process::spawn(directory.path(), "new", &new_config, true);
+    native_handoff(&mut old, &mut replacement, &socket, address).await;
+    native.assert_held(&old);
+    // WAIT bounds the whole process exit. The release file is never created.
+    let status = old.wait().await;
+    assert!(
+        !status.success(),
+        "unfinished native state must report failed shutdown"
+    );
+    assert!(
+        old.output()
+            .contains("native shutdown timed out; native state quarantined"),
+        "{}",
+        old.output()
+    );
+    native.assert_held(&old);
+    assert!(!native.release.exists());
+    drop(held);
+    assert!(get(address).await.ends_with(b"new"));
+    replacement.signal("-TERM");
+    assert!(
+        replacement.wait().await.success(),
+        "{}",
+        replacement.output()
+    );
+}
