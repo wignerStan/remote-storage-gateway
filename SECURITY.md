@@ -146,7 +146,15 @@ bounded queues and retention do not guarantee lossless logging under pressure.
 
 Configured `management.listen` must be loopback and differ from the data listener.
 The worker publishes `worker.get` and revision-checked `worker.apply`, plus only
-explicitly selected native action bindings. Native actions require one stateful
+explicitly selected native action bindings. Read-only `worker.metrics` and
+`worker.events` expose fixed-shape process counters. Event subscriptions use
+gRPC or SSE and remain independent of notifier policy. They share a 32-source
+budget per entry and the carrier's 128-call admission limit and 120-second
+deadline. This limits idle observers; other action traffic can still consume the
+shared carrier budget. Closing a source returns its observer reservation.
+Counters omit controlled WebSocket session bytes and L4 tunnel bytes and reset on restart; they
+are not durable request history or a logging-health report.
+Native actions require one stateful
 instance, bounded unary contracts and unique bindings. Revision checks avoid stale
 state updates; they do not authenticate the caller. There is no built-in management
 authentication here: any process with access to that listener can call its routes.
@@ -195,6 +203,9 @@ shutdown window are separate. See the [upgrade procedure](README.md#graceful-ver
 | Assembled Wasm callback obeys explicit header patch grant | `tests/native_proxy/wasm_callbacks.rs` (Wasm feature) |
 | Incomplete-message deadlines, reservations and response approval | `tests/native_proxy/hardening.rs` |
 | Access persistence without diagnostic/body capture | `tests/access_logging.rs` |
+| Native lifecycle counters, observer isolation, reconnect and revocation | `tests/native_proxy/observability_workflow.rs` |
+| Shared gRPC/SSE observer limits, control availability, disconnect, deadline and replay rejection | `tests/operational_events.rs` |
+| One response dump at EOF, selective hashes, bounded/default-off capture | `tests/response_dumps.rs` |
 | Listener transfer/drain; invalid replacement leaves old process serving | `tests/graceful_upgrade.rs` (Linux) |
 | Independent action/axis lifecycle | `tests/axis_endpoints.rs`, `tests/multiple_axes.rs`, `tests/notifier_lifecycle.rs` |
 | Limited first-party source boundary guard | `tools/plugin-contract/main_test.go` |

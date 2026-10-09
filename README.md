@@ -678,8 +678,13 @@ notifier chain. A slow subscriber never blocks proxy operations. Counters wake
 subscribers at request begin/termination, not on streamed deltas. Access logs
 remain the per-request history. No SSE IDs or replay cursor are published;
 a nonempty `Last-Event-ID` is rejected. Reconnection starts from current state.
-The entry's shared 128-call admission limit and 120-second absolute deadline
-also apply to observers: handle terminal errors and reconnect with backoff.
+gRPC and SSE share at most 32 live `worker.events` sources per entry, using an
+infra resource reservation held until the source drops. Extra subscribers receive
+gRPC `ResourceExhausted` or a terminal SSE error with code 503. This prevents idle
+event subscriptions alone from taking all 128 shared entry slots; it does not
+reserve capacity against other plugin actions or simultaneous request bursts.
+The shared entry's 120-second absolute deadline still applies to observers:
+handle terminal errors and reconnect with backoff.
 Closing their action owner or the entry cancels live streams before draining.
 Keep this read-only surface on the existing privileged internal listener.
 
@@ -746,6 +751,22 @@ route/theme/affinity cookies. Additional credential field and session-cookie nam
 are explicit policy inputs. Runtime notifier traces use the
 `proxy_pingora::worker::notifier` target and contain callback indices and decisions,
 without serializing request facts.
+
+Run `just bdd-observability` for the focused observation workflow. It reuses
+the matching infra main checkout beside this repository, as the worker's Cargo
+path dependencies require. It uses infra `WorkflowTrace` and prints bounded
+`DECISION`, `WHY` and `FACTS` records
+once per scenario, including earlier evidence when an assertion fails. The native
+scenario forwards response bytes before origin EOF, checks exactly-once completion
+and settled byte counts, reconnects to current counters, and closes idle observers.
+It asserts that observation calls do not invoke notifier policy or become data
+requests. Mixed gRPC/SSE scenarios check subscriber pressure, control availability,
+disconnect capacity release, caller deadlines and rejection of SSE replay cursors.
+The same recipe runs real access-file persistence and default-off/bounded response
+dump tests, including credential hashing and visible routing cookies. `just bdd`
+includes these tests alongside the notifier and complete native proxy suite.
+See the [current hardening review](docs/hardening-review-20261009.md) for confirmed
+remaining defects, known limits and missing integration evidence.
 
 For managed HTTP requests, `RequestFlow::execute_http` runs protocol validation,
 header/metadata transforms, authentication, routing/admission, request-body setup,
