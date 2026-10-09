@@ -101,13 +101,37 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
 #ifdef TEST_RESPONSES_REPLY
     {
         static size_t sequence;
-        const char *kind = sequence == 1 ? "responses_lite.delta/" : "response.create/";
+        const char *kind = sequence == 1 ? "responses_lite.delta/" : sequence == 3 ? "response.append/" : "response.create/";
         const char *prefix = TEST_API_PREFIX;
         size_t n = strlen(prefix), k = strlen(kind);
-        if (sequence > 2 || method.len != n + k + 33 || memcmp(method.ptr, prefix, n)
+        if (sequence > 3 || method.len != n + k + 33 || memcmp(method.ptr, prefix, n)
                 || memcmp(method.ptr + n, kind, k) || method.ptr[method.len - 1] != '0' + sequence
                 || input.len < 2 || input.ptr[0] != '{') return INFRA_FAILED;
         sequence++;
+        const uint8_t action[] = {0};
+        return copy_reply(action, sizeof(action), out);
+    }
+#endif
+#ifdef TEST_STEERING_REPLY
+    {
+        const char *prefix = TEST_API_PREFIX;
+        size_t n = strlen(prefix);
+        if (method.len <= n || memcmp(method.ptr, prefix, n)) return INFRA_FAILED;
+        const char *rest = method.ptr + n;
+        size_t len = method.len - n;
+        static size_t creates;
+        static int interrupted;
+        if (len >= 16 && !memcmp(rest, "response.create/", 16)) {
+            if (creates && !interrupted) return INFRA_FAILED;
+            creates++;
+        }
+        if (len >= 20 && !memcmp(rest, "response.incomplete/", 20)) interrupted = 1;
+        if (!((len >= 16 && !memcmp(rest, "response.create/", 16))
+            || (len >= 17 && !memcmp(rest, "response.created/", 17))
+            || (len >= 19 && !memcmp(rest, "response.interrupt/", 19))
+            || (len >= 20 && !memcmp(rest, "response.incomplete/", 20))
+            || (len >= 19 && !memcmp(rest, "response.completed/", 19))
+            || (len >= 17 && !memcmp(rest, "transport.closed/", 17)))) return INFRA_FAILED;
         const uint8_t action[] = {0};
         return copy_reply(action, sizeof(action), out);
     }
@@ -125,8 +149,10 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
                 || input.len < 2 || input.ptr[0] != '{') return INFRA_FAILED;
         sequence++;
         if (sequence == 1) {
-            static const char document[] =
-                "{\"type\":\"error\",\"status\":409,\"error\":{\"message\":\"Previous response was not found. Retrying the full request.\",\"type\":\"invalid_request_error\",\"code\":\"previous_response_not_found\",\"param\":\"previous_response_id\"}}";
+#ifndef TEST_RESPONSES_ERROR_DOCUMENT
+#define TEST_RESPONSES_ERROR_DOCUMENT "{\"type\":\"error\",\"status\":409,\"error\":{\"message\":\"Previous response was not found. Retrying the full request.\",\"type\":\"invalid_request_error\",\"code\":\"previous_response_not_found\",\"param\":\"previous_response_id\"}}"
+#endif
+            static const char document[] = TEST_RESPONSES_ERROR_DOCUMENT;
             return copy_reply((const uint8_t *)document, sizeof(document) - 1, out);
         }
         const uint8_t action[] = {0};

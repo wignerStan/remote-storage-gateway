@@ -150,6 +150,7 @@ async fn responses_ws_selects_lite_per_message_and_keeps_upstream_delta_opaque()
             frame(br#"{"type":"response.create","input":[],"generate":false}"#),
             frame(br#"{"type":"response.create","previous_response_id":"r1","input":[],"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"}}"#),
             frame(br#"{"type":"response.create","input":[]}"#),
+            frame(br#"{"type":"response.append","input":[{"type":"function_call_output","output":"ok"}]}"#),
         ]);
         let upstream_frames = frames.clone();
         let origin = listen(move |mut socket| {
@@ -178,22 +179,40 @@ async fn responses_ws_selects_lite_per_message_and_keeps_upstream_delta_opaque()
 
 const REPLAY_DOCUMENT: &[u8] = br#"{"type":"error","status":409,"error":{"message":"Previous response was not found. Retrying the full request.","type":"invalid_request_error","code":"previous_response_not_found","param":"previous_response_id"}}"#;
 
+// SDK BuildOpenAIResponsesStreamErrorChunk emits null param and preserves provider codes.
+const SDK_ERROR: &[u8] = br#"{"type":"error","error":{"type":"server_error","code":"request_timeout","message":"stream interrupted","param":null},"sequence_number":0}"#;
+const SDK_PROVIDER_ERROR: &[u8] = br#"{"type":"error","error":{"code":429,"message":"busy","param":null,"status":"RESOURCE_EXHAUSTED","details":[]},"sequence_number":0}"#;
+
 fn responses_plugin(dir: &Path, mode: &str) -> std::path::PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = dir.join(format!("codex.responses.v1.{mode}.so"));
     let define = match mode {
-        "error" => "-DTEST_RESPONSES_ERROR=1",
+        "error" | "sdk_error" | "sdk_provider_error" => "-DTEST_RESPONSES_ERROR=1",
         "bad" => "-DTEST_RESPONSES_BAD=1",
         "terminal" => "-DTEST_RESPONSES_TERMINAL=1",
+        "steering" => "-DTEST_STEERING_REPLY=1",
         _ => panic!("unknown responses plugin mode"),
     };
+    let mut command = Command::new("cc");
+    command
+        .args(["-shared", "-fPIC", "-std=c11", "-I"])
+        .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+        .arg("-DTEST_PLUGIN_KIND=INFRA_PLUGIN_OBJECT")
+        .arg(define)
+        .arg("-DTEST_API_PREFIX=\"codex.responses.v1/\"");
+    let document = match mode {
+        "sdk_error" => Some(SDK_ERROR),
+        "sdk_provider_error" => Some(SDK_PROVIDER_ERROR),
+        _ => None,
+    };
+    if let Some(document) = document {
+        command.arg(format!(
+            "-DTEST_RESPONSES_ERROR_DOCUMENT={}",
+            serde_json::to_string(std::str::from_utf8(document).unwrap()).unwrap()
+        ));
+    }
     assert!(
-        Command::new("cc")
-            .args(["-shared", "-fPIC", "-std=c11", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
-            .arg("-DTEST_PLUGIN_KIND=INFRA_PLUGIN_OBJECT")
-            .arg(define)
-            .arg("-DTEST_API_PREFIX=\"codex.responses.v1/\"")
+        command
             .arg(root.join("tests/fixtures/metadata_callback.c"))
             .arg("-o")
             .arg(&path)
@@ -230,7 +249,12 @@ async fn responses_error_document_is_written_and_the_socket_stays_open() {
         );
         out
     }
-    timeout(WAIT, async {
+    for (mode, document) in [
+        ("error", REPLAY_DOCUMENT),
+        ("sdk_error", SDK_ERROR),
+        ("sdk_provider_error", SDK_PROVIDER_ERROR),
+    ] {
+        timeout(WAIT, async {
         let continued = frame(br#"{"type":"response.create","previous_response_id":"resp_old","input":[]}"#);
         let replay = frame(br#"{"type":"response.create","input":[{"type":"message","role":"user","content":"continue the patch"}]}"#);
         let continued_wire = continued.clone();
@@ -256,7 +280,7 @@ async fn responses_error_document_is_written_and_the_socket_stays_open() {
         let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({
             "upstream": format!("http://{}", origin.address),
             "callbacks": [{
-                "path": responses_plugin(dir.path(), "error"),
+                "path": responses_plugin(dir.path(), mode),
                 "package": "worker.metadata.test",
                 "message_codec": "codex.responses.v1"
             }]
@@ -267,7 +291,7 @@ async fn responses_error_document_is_written_and_the_socket_stays_open() {
         assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
         assert!(timeout(Duration::from_millis(30), client.read_u8()).await.is_err(), "partial upstream frame escaped reply guard");
         client.write_all(&continued).await.unwrap();
-        let expected = server_text(REPLAY_DOCUMENT);
+        let expected = server_text(document);
         let mut error_frame = vec![0; expected.len()];
         client.read_exact(&mut error_frame).await.unwrap();
         assert_eq!(error_frame, expected);
@@ -279,6 +303,7 @@ async fn responses_error_document_is_written_and_the_socket_stays_open() {
         drop(worker);
         proxy.shutdown().await.unwrap();
     }).await.unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -407,4 +432,67 @@ async fn responses_terminal_frame_can_replace_a_completion_without_gating_deltas
         drop(worker);
         proxy.shutdown().await.unwrap();
     }).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_0162_interrupt_relays_during_response_and_preserves_interrupted_boundary() {
+    const INTERRUPT: &[u8] =
+        br#"{"type":"response.interrupt","response_id":"resp_1","mode":"discard_partial_items"}"#;
+    const CREATED: &[u8] = br#"{"type":"response.created","response":{"id":"resp_1"}}"#;
+    const INCOMPLETE: &[u8] = br#"{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"interrupted"},"error":null}}"#;
+    const COMPLETED: &[u8] =
+        br#"{"type":"response.completed","response":{"id":"resp_2","output":[]}}"#;
+    for actions in [false, true] {
+        timeout(WAIT, async {
+            let frame = |payload: &[u8]| proxy_protocols::websocket::encode_client(1, payload).unwrap();
+            let first = frame(br#"{"type":"response.create","input":[]}"#);
+            let interrupt = frame(INTERRUPT);
+            let followup = frame(br#"{"type":"response.create","previous_response_id":"resp_1","input":[{"role":"user","content":"steer"}]}"#);
+            let origin_first = first.clone();
+            let origin_interrupt = interrupt.clone();
+            let origin_followup = followup.clone();
+            let origin = listen(move |mut socket| {
+                let first = origin_first.clone();
+                let interrupt = origin_interrupt.clone();
+                let followup = origin_followup.clone();
+                async move {
+                    let request = String::from_utf8(head(&mut socket).await).unwrap();
+                    let key = request.lines().find_map(|line| {
+                        line.split_once(':')
+                            .filter(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-key"))
+                            .map(|(_, value)| value.trim())
+                    }).unwrap();
+                    // Controlled sessions use a fresh upstream nonce.
+                    let accept = proxy_pingora::connect_upstream::websocket_session::handshake::accept_key(key).unwrap();
+                    socket.write_all(format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").as_bytes()).await.unwrap();
+                    for (request, response) in [(first, CREATED), (interrupt, INCOMPLETE), (followup, COMPLETED)] {
+                        let mut actual = vec![0; request.len()];
+                        socket.read_exact(&mut actual).await.unwrap();
+                        assert_eq!(actual, request, "worker changed the active response control or continuation");
+                        socket.write_all(&server_text(response)).await.unwrap();
+                    }
+                }
+            }).await;
+            let dir = tempfile::tempdir().unwrap();
+            let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({
+                "upstream":format!("http://{}",origin.address),
+                "callbacks":[{"path":responses_plugin(dir.path(),"steering"),"package":"worker.metadata.test",
+                    "message_codec":"codex.responses.v1","message_actions":actions}]
+            })).unwrap()).await.unwrap();
+            let worker = serve_engine(proxy.clone()).await;
+            let mut client = TcpStream::connect(worker.address).await.unwrap();
+            client.write_all(b"GET /backend-api/codex/responses HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();
+            assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
+            for (request, response) in [(first, CREATED), (interrupt, INCOMPLETE), (followup, COMPLETED)] {
+                client.write_all(&request).await.unwrap();
+                let expected = server_text(response);
+                let mut actual = vec![0; expected.len()];
+                client.read_exact(&mut actual).await.unwrap();
+                assert_eq!(actual, expected);
+            }
+            drop(client);
+            drop(worker);
+            proxy.shutdown().await.unwrap();
+        }).await.unwrap();
+    }
 }

@@ -46,18 +46,76 @@ fn config(origin: SocketAddr, artifact: &Path, codec: &str, grant: bool) -> serd
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sse_delta_bypasses_notifiers_while_complete_terminals_and_errors_require_approval() {
     const HEARTBEAT: &[u8] = b": heartbeat\n\n";
-    for (payload, kind) in [
+    for (codec, path, request_kind, payload, kind) in [
         (
+            "openai.chat_completions.v1",
+            "/v1/chat/completions",
+            "chat_completion",
             r#"{"choices":[{"delta":{"content":"hello"}}],"future":7}"#,
             "response.event",
         ),
         (
+            "openai.chat_completions.v1",
+            "/v1/chat/completions",
+            "chat_completion",
             r#"{"type":"error","message":"overloaded","unknown":true}"#,
             "response.error",
         ),
         (
+            "openai.chat_completions.v1",
+            "/v1/chat/completions",
+            "chat_completion",
             r#"{"type":"response.completed","response":{"id":"complete-1","output":[]}}"#,
             "response.completed",
+        ),
+        (
+            "openai.chat_completions.v1",
+            "/v1/chat/completions",
+            "chat_completion",
+            r#"{"choices":[{"finish_reason":"stop"}]}"#,
+            "response.metadata",
+        ),
+        (
+            "openai.chat_completions.v1",
+            "/v1/chat/completions",
+            "chat_completion",
+            r#"{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#,
+            "response.metadata",
+        ),
+        (
+            "anthropic.messages.v1",
+            "/v1/messages",
+            "message",
+            r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}"#,
+            "response.event",
+        ),
+        (
+            "anthropic.messages.v1",
+            "/v1/messages",
+            "message",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}"#,
+            "response.metadata",
+        ),
+        (
+            "anthropic.messages.v1",
+            "/v1/messages",
+            "message",
+            r#"{"type":"message_stop"}"#,
+            "response.done",
+        ),
+        (
+            "google.gemini.v1",
+            "/v1/models/test:streamGenerateContent?alt=sse",
+            "stream_generate_content",
+            r#"{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}"#,
+            "response.event",
+        ),
+        (
+            "google.gemini.v1",
+            "/v1/models/test:streamGenerateContent?alt=sse",
+            "stream_generate_content",
+            r#"{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":2}}"#,
+            "response.metadata",
         ),
     ] {
         for (grant, deny) in [(true, false), (true, true), (false, true)] {
@@ -81,11 +139,11 @@ async fn sse_delta_bypasses_notifiers_while_complete_terminals_and_errors_requir
                     }
                 }).await;
                 let dir=tempfile::tempdir().unwrap();
-                let library=artifact(dir.path(),"openai.chat_completions.v1","chat_completion",kind,payload,deny);
-                let proxy=pingora_worker::assembly::assemble(serde_json::from_value(config(origin.address,&library,"openai.chat_completions.v1",grant)).unwrap()).await.unwrap();
+                let library=artifact(dir.path(),codec,request_kind,kind,payload,deny);
+                let proxy=pingora_worker::assembly::assemble(serde_json::from_value(config(origin.address,&library,codec,grant)).unwrap()).await.unwrap();
                 let worker=serve_engine(proxy.clone()).await;
                 let mut client=TcpStream::connect(worker.address).await.unwrap();
-                client.write_all(b"POST /v1/chat/completions HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+                client.write_all(format!("POST {path} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await.unwrap();
                 assert!(head(&mut client).await.starts_with(b"HTTP/1.1 200"));
                 let mut heartbeat=vec![0;HEARTBEAT.len()]; client.read_exact(&mut heartbeat).await.unwrap();
                 assert_eq!(heartbeat,HEARTBEAT,"standalone heartbeat waited for data approval");

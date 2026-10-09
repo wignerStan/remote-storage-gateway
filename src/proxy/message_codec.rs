@@ -86,7 +86,10 @@ fn response_kind_reaches_plugin(
     }
     !response
         || response_enabled
-        || matches!(kind, "response.completed" | "response.done")
+        || matches!(
+            kind,
+            "response.completed" | "response.done" | "response.incomplete"
+        )
         || (actions
             && matches!(
                 kind,
@@ -271,18 +274,22 @@ pub(super) async fn filter_owned(
                 .ok_or_else(|| refusal(400, "message sequence exhausted"))?;
             // Validate sequence/kind but bypass delta callbacks before allocating
             // a method string or entering the native plugin runtime.
-            let terminal =
-                response && matches!(message.kind, "response.completed" | "response.done");
             if response && message.kind == "response.event" {
                 wire.extend(event.wire);
                 continue;
             }
-            let method = method.to_string();
-            for (callback_index, callback) in callbacks
+            if !callbacks
                 .iter()
-                .enumerate()
-                .filter(|(_, callback)| !response || callback.response_enabled || terminal)
+                .any(|callback| callback.interested(response, message.kind))
             {
+                wire.extend(event.wire);
+                continue;
+            }
+            let method = method.to_string();
+            for (callback_index, callback) in callbacks.iter().enumerate() {
+                if !callback.interested(response, message.kind) {
+                    continue;
+                }
                 let started = Instant::now();
                 let decision = callback
                     .instance
