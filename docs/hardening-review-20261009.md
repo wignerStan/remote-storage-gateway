@@ -1,110 +1,98 @@
 # Worker hardening review
 
-Reviewed 2026-10-09, Asia/Singapore. The review covers the current worker and
-its matching infra main dependency, `cd347723`. It excludes sidecar business
-policy. Native plugins remain trusted code in the same process. Host limits do
-not provide memory or syscall isolation and cannot stop native execution.
+Reviewed 2026-10-09, Asia/Singapore. Scope: worker infrastructure and its matching
+infra dependency. Sidecar business policy is excluded. Native plugins remain
+trusted code in the worker process. Host deadlines cannot stop native execution.
 
-## Fixed in this change
+## Check native Pingora before adding wrappers
 
-Idle event subscriptions previously held all 128 shared management admission
-slots. This could prevent `worker.get`, `worker.apply`, `worker.metrics` and
-plugin actions from starting until disconnect or the 120-second deadline.
+This review checked the installed Pingora 0.8.1 source and the local infra vendor.
+The ordinary proxy path already delegates transport ownership to Pingora.
+No second connection pool, retry engine, listener-transfer mechanism or worker
+supervisor was added. The following source paths are relative to each named crate.
 
-[Observability](../src/observability.rs) now uses the existing infra
-`ResourceBudget` to cap live event sources at 32 per entry. gRPC and SSE share
-the cap. A source owns its reservation through cancellation and cleanup. This
-preserves shared entry capacity during steady event subscriptions. It does not
-provide control priority against every request burst or other plugin action.
+| Capability | Existing owner and source | Worker decision |
+| --- | --- | --- |
+| H1/H2 acquisition, reuse and idle eviction | `pingora-core/src/connectors/http/mod.rs`; `http/v2.rs` | Keep native connectors and pool. |
+| ALPN and upstream H2 PING | `pingora-core/src/protocols/http/v2/client.rs` | Set native peer options. Native missing-PING-ACK timeout is 5 seconds. |
+| Dial/TLS deadline | `pingora-core/src/connectors/mod.rs` | Keep native connection deadlines. They do not bound guest callback chains. |
+| Proxy attempts | `pingora-proxy/src/lib.rs` | Keep native attempt loop; the initial attempt counts toward its limit. |
+| Transparent H1 upgrade duplex | `pingora-proxy/src/proxy_h1.rs` | Keep native byte forwarding and backpressure. Semantic message control is separate. |
+| Listener FD transfer and graceful shutdown | `pingora-core/src/server/mod.rs`, `server/transfer_fd/mod.rs`, `server/bootstrap_services.rs` | Keep native handoff, grace period and runtime shutdown. |
+| Request logging hook | `pingora-proxy/src/proxy_trait.rs` | Emit application outcomes through the existing infra diagnostic runtime. |
 
-`just bdd-observability` verifies the cap with 16 gRPC and 16 SSE subscriptions,
-rejects extra subscriptions, executes real control reads/updates, and proves
-capacity reuse after disconnect. It also checks real native streaming delivery,
-termination counts, observer reconnect, deadline, revocation and replay rejection.
-Access persistence and response capture tests run in the same recipe. These tests
-provide contract evidence, not production throughput or tail-latency measurements.
+Pool isolation includes ALPN because native `HttpPeer` hashing omits it. This is a
+key correction around the native pool, not another pool. Native connection timeouts
+cover L4/TLS work; message policy and owner cleanup need separate absolute deadlines.
+Native logging hooks and daemon file redirection do not provide rotating,
+nonblocking application sinks or expose their storage failures.
 
-## Remaining work, in priority order
+The local `infra/rust/vendor/pingora-proxy` extends the upstream trait with
+WebSocket heartbeat hooks, absolute body-admission deadlines and an awaited
+response-body filter. These are **local extensions**, not raw Pingora 0.8.1
+features. Raw response-body filtering is synchronous. Infra owns protocol framing
+and approved-message session control; it preserves native transport ownership.
 
-### 1. Bound held WebSocket messages — confirmed defect, P1
+Diagnostic queues and workers remain owned by `tracing-appender` 0.2.5. Its
+nonblocking queue bounds record count and reports queue drops. It copies bytes
+before enqueue and does not expose disk write failures. The existing rotating
+file wrapper is retained: it opens and flushes before swapping and pruning, so a
+failed reopen cannot prune the still-active file. `ResourceBudget` remains the
+single exact weighted reservation primitive. Native `pingora-limits::Inflight`
+provides estimated keyed counts, not weighted byte ownership.
 
-At [websocket_session.rs](../src/proxy/websocket_session.rs), the
-`plan.hold == "buffer"` branch appends complete message wire buffers to `held`
-without an aggregate byte or message limit. Repeated valid buffer decisions can
-retain unbounded data. The fixed inspection reservation cannot cover that growth.
-The loop also releases its reservation when `transport.has_buffered_data()` is
-false, without checking `held`; a later event can leave held data unreserved.
+## Fixes and contract evidence
 
-Add aggregate held-byte/message bounds and retain reservations until both the
-transport and held messages release their data. Charge shared allocations once
-where possible. Preserve forward order and fail before retaining data beyond the
-budget. Test repeated buffer decisions, intervening control/maintenance events,
-release, discard and cancellation. Existing hold-order and partial-message tests
-do not prove these bounds. This review does not fix this path.
+| Previous issue | Fix | Validation |
+| --- | --- | --- |
+| Unbounded `hold=buffer`; reservation released while held wire survived | Held wire plus segment/object overhead is capped at twice the message limit. Message count uses the protocol frame limit. Each held message pins the inspection reservation through release writes. Payload storage stays shared. | Unit rollback/ownership checks; real repeated-hold exhaustion and held-response reservation across peer PING. |
+| Diagnostic captures and queued records had no aggregate payload bound | One 64 MiB capture allowance per assembled proxy. Each capture reserves twice its limit before allocation. Each queue has at most 16 MiB payload allowance, using per-channel record limits and the existing lossy queue. | Concurrent request/response captures, denied reservations, overflow/drop/settlement release, escaping and oversized-record rejection. |
+| stdout could block a request; storage failures were invisible | stdout and stderr use existing background sinks. Health separates queue drops, rejected records, write/flush/rotation/retention failures and capture usage. | Stalled stdout, full queue, failing writes/flushes and failed rollover/pruning tests; real process health binding. |
+| Serial callback timeouts did not bound the complete chain | Message decisions use one absolute message deadline. All downstream cleanup owners are polled together; cleanup and completion share one I/O deadline. Native execution retains its owners after waiter expiry. | Two slow native callbacks exceed one total deadline before dial; concurrent cleanup and shared completion deadline checks. |
+| Handoff tests lacked native callbacks | Real replacement-process tests track PID-tagged entry, return, output free, session close and instance destruction. | Successful handoff retains active call ownership; failed replacement initialization leaves old listener/call intact; stuck native code causes bounded failure exit without false cleanup claims. |
 
-### 2. Bound diagnostic memory across requests and sinks — confirmed limit, P2
+`worker.logging` exposes the selected logging owner over gRPC.
+`worker.logging.events` uses the existing gRPC stream/SSE carrier and reports an
+initial snapshot followed by changed health samples, once per second. It shares
+the existing 32-source budget with `worker.events`; neither belongs to the notifier
+chain. Entry cancellation and the 120-second carrier deadline remain authoritative.
 
-[Logging configuration](../src/config.rs) permits a 1 MiB capture limit and
-defaults to 8,192 queued records. Infra capture limits each request and response
-buffer. The infra logging queue bounds record count, not retained bytes. With
-explicitly enabled capture and a slow sink, 8,192 near-limit body details alone
-can approach 8 GiB, before JSON escaping and allocation overhead. Inspection
-reservations do not own diagnostic buffers or queued logging records.
+`just bdd` includes native proxy, notifier, observation, capture and real process
+handoff workflows. `just bdd-observability` covers real operation events, logging
+health, shared observer capacity, persistence and response dumps. Infra tests
+cover the reusable sink and capture primitives. Test success proves these
+contracts; it does not establish production throughput or tail latency.
 
-Add an aggregate diagnostic byte budget in infra for active capture and queued
-output. Make overload discard detail or drop records without waiting on request
-tasks. Test a stalled sink, concurrent near-limit captures, hashing expansion and
-shutdown. Raw/sanitized capture consent and access retention must remain separate.
-Disabled capture already avoids these body allocations.
+## Verification
 
-### 3. Make stdout nonblocking and expose log loss — existing limits, P2
+The full worker suite passed 144 tests. One existing Go carrier integration test
+requires an explicitly built `GO_CODEC_ARTIFACT` and remains ignored by default.
+The diagnostic runtime suite passed 46 tests, including continuous-change sampling.
+The Go plugin source guard and Rust formatting checks passed. Worker process and
+observation tests were rerun after the final sampling fix.
 
-Without `access_file`, infra `diagnostic-output::runtime::AccessWriter` writes to
-stdout directly. A blocked pipe can stall request completion. Configured file
-sinks already use a nonblocking lossy queue.
+## Remaining limits
 
-`LoggingGuard::dropped_records` reports queue losses, but assembly retains the
-guard privately. Disk write/flush failures are excluded from that count. Current
-`worker.metrics/events` expose operation counters only. Forwarding can therefore
-look healthy while diagnostic records are lost.
+Payload allowances are finite partitions, not a hard process RSS limit. With all
+three sinks enabled, default queues account for at most 48 MiB, plus 64 MiB active
+capture allowance. Active writes, concurrent formatting, parsed JSON trees,
+allocator overhead and temporary copies need additional memory. Large native
+allocations and syscalls remain outside host-interface admission.
 
-Give stdout a background owner with bounded admission. Expose queue drops and
-storage errors as separate health facts through infra observability, outside the
-notifier chain. Test blocked stdout, queue exhaustion and disk failure separately;
-they have different causes. Do not describe operation counters as log health.
+Logging is lossy and shutdown drain is best effort. A health snapshot independently
+samples counters. Usage changes can coalesce between samples. Error counters remain
+cumulative, but no durable replay or per-record delivery acknowledgement is promised.
 
-### 4. Add a complete session-decision deadline — existing limit, P2
+Native `.so` code cannot be forcibly stopped safely by a host callback deadline.
+Its executing owner keeps inputs, handles and reservations until actual return.
+A stuck native call can therefore consume capacity until process termination.
+These changes add no helper process or claim of physical sandbox isolation.
 
-[Session evaluation](../src/proxy/websocket_session.rs) visits callbacks serially
-with individual timeouts. `transport.drive_until(evaluate(...))` has no absolute
-deadline for the entire chain. Cleanup also awaits participants serially. Healthy
-heartbeats can keep a connection alive while its admission and buffers remain
-held for the sum of participant timeouts.
+Native listener transfer is not a transactional rollback protocol. Operator
+sequencing and replacement readiness remain necessary. The tests do not claim
+that every failed FD transfer resumes an old worker after SIGQUIT.
 
-Add explicit total decision and cleanup deadlines. Keep native call owners and
-reservations pinned until actual return when a host wait expires. Test several
-slow callbacks, heartbeat progress and cleanup retry. Existing single-slow-callback
-tests do not establish a total chain bound.
-
-### 5. Test native callbacks during process handoff — validation gap, P2
-
-[Graceful upgrade tests](../tests/graceful_upgrade.rs) prove listener transfer
-and ordinary HTTP draining with no native callbacks configured. Separate callback
-tests prove native owner pinning and bounded host waits. Their combination is
-not yet tested in a real replacement process.
-
-Add handoff tests while native calls run. Cover failed replacement initialization,
-an old generation reaching its drain deadline, and native return/cleanup markers.
-These tests should verify resource ownership, rather than assume a signal stopped
-native code. This is missing integration evidence, not a confirmed handoff defect.
-
-## Intentional observation limits
-
-Snapshots independently sample atomics and coalesce transitions. They reset on
-restart and offer no durable replay. Access logs retain per-request history.
-HTTP byte counters currently omit controlled WebSocket session bytes and L4
-tunnels. Passive upgrades still enter the native body accounting hooks; their
-counts are not semantic WebSocket payload measurements. Add separate counters after defining payload versus
-wire-byte accounting; do not silently widen the current HTTP counter contract.
-Management reachability remains an operator trust boundary, without built-in
-caller authentication. These limits are distinct from the defects listed above.
+Operation counters omit controlled WebSocket-session bytes and L4 tunnel traffic.
+Passive upgrades enter native body accounting; this is not semantic payload
+measurement. Management reachability remains an operator trust boundary, without
+built-in caller authentication. Observation cannot replace access-log history.

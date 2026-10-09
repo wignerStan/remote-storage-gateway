@@ -5,7 +5,7 @@ check:
 
 # Show the callback decisions and reasons from a real TCP workflow.
 bdd:
-    cargo test --locked --test notifier_workflow --test notifier_lifecycle --test native_proxy --test operational_events --test access_logging --test response_dumps -- --nocapture
+    cargo test --locked --test notifier_workflow --test notifier_lifecycle --test native_proxy --test operational_events --test access_logging --test response_dumps --test graceful_upgrade -- --nocapture
 
 # Native traffic, event subscriptions, access persistence and bounded body dumps.
 bdd-observability:

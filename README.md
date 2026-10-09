@@ -678,7 +678,7 @@ notifier chain. A slow subscriber never blocks proxy operations. Counters wake
 subscribers at request begin/termination, not on streamed deltas. Access logs
 remain the per-request history. No SSE IDs or replay cursor are published;
 a nonempty `Last-Event-ID` is rejected. Reconnection starts from current state.
-gRPC and SSE share at most 32 live `worker.events` sources per entry, using an
+gRPC and SSE share at most 32 live operation/logging event sources per entry, using an
 infra resource reservation held until the source drops. Extra subscribers receive
 gRPC `ResourceExhausted` or a terminal SSE error with code 503. This prevents idle
 event subscriptions alone from taking all 128 shared entry slots; it does not
@@ -687,6 +687,15 @@ The shared entry's 120-second absolute deadline still applies to observers:
 handle terminal errors and reconnect with backoff.
 Closing their action owner or the entry cancels live streams before draining.
 Keep this read-only surface on the existing privileged internal listener.
+
+Application assembly also exposes `worker.logging` through gRPC and
+`worker.logging.events` through gRPC or `GET /worker/logging/events` SSE.
+Logging snapshots report queue drops, oversized records, write/flush/rotation/
+retention failures, active capture bytes and configured payload allowances.
+Logging events return an initial snapshot, then sample changes once per second.
+They share the same 32-source budget, cancellation and deadline as operation events.
+Custom entries select the actual logging owner with `Registration::logging_health`;
+`None` publishes no logging-health actions. Observation runs outside callbacks.
 
 `worker.get` retains
 its existing admission-state response. Custom compositions can share counters
@@ -825,6 +834,16 @@ only. Cancelling before EOF emits one incomplete record. Capture performs no
 per-chunk output, notifier callback, blocking file I/O or lock acquisition; the
 existing bounded logging queue writes the final event. Trace verbosity alone never
 enables this body buffer.
+
+All diagnostic destinations, including stdout and stderr, use infra's existing
+lossy background writer. Each queue has at most 16 MiB of payload capacity;
+trace/access records are capped at 64 KiB and body records at 4 MiB. Oversized
+records are rejected whole. Request and response captures share a 64 MiB
+allowance per assembled proxy and reserve twice their limit before allocation.
+Pressure emits `capture_budget` metadata instead of retaining detail. These
+allowances exclude temporary JSON trees, formatting, active writes and allocator
+overhead; they are not a process RSS limit. Logging health exposes losses separately
+from successful request delivery. Shutdown drain is bounded and best effort.
 
 ## Native boundary
 
