@@ -47,6 +47,9 @@ pub struct Config {
     pub inspection: Inspection,
     #[serde(default)]
     pub management: Option<Management>,
+    /// Dedicated plugin-axis RPC ingress; never mounted on worker management.
+    #[serde(default)]
+    pub plugin_ingress: Option<crate::remote_axis::entry::Config>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -703,6 +706,30 @@ impl Config {
                 | network_sockets::LocalEndpoint::Unix(_) => {}
             }
         }
+        if let Some(ingress) = &self.plugin_ingress {
+            let endpoint = network_sockets::LocalEndpoint::parse(&ingress.listen)?;
+            if matches!(&endpoint, network_sockets::LocalEndpoint::Tcp(address) if *address == self.listen)
+            {
+                return Err("plugin ingress and data listeners must differ".into());
+            }
+            if let Some(management) = &self.management {
+                let other = network_sockets::LocalEndpoint::parse(&management.listen)?;
+                let same = match (&endpoint, &other) {
+                    (
+                        network_sockets::LocalEndpoint::Tcp(a),
+                        network_sockets::LocalEndpoint::Tcp(b),
+                    ) => a == b,
+                    (
+                        network_sockets::LocalEndpoint::Unix(a),
+                        network_sockets::LocalEndpoint::Unix(b),
+                    ) => a == b,
+                    _ => false,
+                };
+                if same {
+                    return Err("plugin ingress must not use the worker management entry".into());
+                }
+            }
+        }
         if self.logging.body_file.is_some() != (self.logging.body_max_bytes > 0)
             || self.logging.body_max_bytes > 1024 * 1024
         {
@@ -1203,5 +1230,28 @@ mod tests {
             }
             assert!(configured(bad).validate().is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod plugin_ingress_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn plugin_ingress_is_local_and_separate_from_worker_entries() {
+        for input in [
+            json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"127.0.0.1:9191"}, "plugin_ingress":{"listen":"127.0.0.1:9191"}}),
+            json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"unix:///run/worker.sock"}, "plugin_ingress":{"listen":"unix:///run/worker.sock"}}),
+            json!({"upstream":"http://127.0.0.1:8080", "plugin_ingress":{"listen":"0.0.0.0:9191"}}),
+        ] {
+            assert!(
+                serde_json::from_value::<Config>(input)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
+        let config: Config = serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"unix:///run/worker.sock"}, "plugin_ingress":{"listen":"unix:///run/plugin.sock"}})).unwrap();
+        config.validate().unwrap();
     }
 }

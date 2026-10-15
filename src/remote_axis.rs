@@ -1,9 +1,18 @@
-//! Worker metadata binding. Infra owns connections; the host owns axis grants.
-use crate::config::{CallbackBackend, NativeCallback};
+//! Remote plugin membership and its outbound RPC binding.
+//! Plugin ingress calls this use-flow, which selects the pure axis surface.
+pub mod entry;
+pub(crate) mod surface;
+#[cfg(test)]
+mod tests;
+use crate::config::{CallbackBackend, CallbackBinding, NativeCallback};
+use event_stamp::StampSource;
 use network_actions::client::{Limits, RemoteBindings};
 use network_sockets::LocalEndpoint;
+use plugin_lifecycle::Reversal;
+use plugin_lifecycle::manager::{PluginManager, RegistrationSpec};
 use serde::Deserialize;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use surface::{Grant, Surface};
 
 /// A control-only RPC profile. Bodies and message payloads are not admitted.
 #[derive(Clone, Deserialize)]
@@ -94,15 +103,64 @@ pub(crate) fn validate_callback(
     Ok(())
 }
 
-/// Stable host handles share one replaceable connection generation per axis.
-/// Replacing a client changes no hook grant or participant identity.
-#[derive(Default)]
-pub struct RemoteAxisBindings {
-    axes: BTreeMap<String, (Arc<RemoteBindings>, Duration)>,
+/// Interpret configuration once before constructing the pure publication surface.
+pub(crate) fn publication(callbacks: &[NativeCallback]) -> Result<Surface, String> {
+    Surface::new(
+        callbacks
+            .iter()
+            .filter(|c| c.resolved_binding() == CallbackBinding::Remote)
+            .map(|callback| {
+                Ok(Grant::new(
+                    callback.axis.clone().ok_or("remote axis is absent")?,
+                    callback
+                        .registration
+                        .clone()
+                        .ok_or("remote registration is absent")?,
+                    &callback.hooks,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+    )
 }
-impl RemoteAxisBindings {
-    pub(crate) async fn connect(config: BTreeMap<String, AxisBinding>) -> Result<Self, String> {
-        let mut result = Self::default();
+
+/// One installed participant retains its immutable host-issued hook grant.
+struct Participant {
+    client: Arc<RemoteBindings>,
+    grant: Arc<Grant>,
+}
+struct Axis {
+    client: Arc<RemoteBindings>,
+    members: PluginManager<Participant>,
+    shutdown_timeout: Duration,
+}
+
+/// Remote plugin membership, independent of the worker management entry.
+/// Infra owns registration generations and draining; this use-flow applies the surface.
+#[derive(Default)]
+pub struct RemotePluginManager {
+    axes: BTreeMap<String, Arc<Axis>>,
+    surface: Surface,
+    incarnation: String,
+}
+#[derive(serde::Serialize)]
+pub struct PluginState {
+    pub incarnation: String,
+    pub axis: String,
+    pub registration: String,
+    pub contract: &'static str,
+    pub available: bool,
+    pub generation: Option<u64>,
+}
+impl RemotePluginManager {
+    pub(crate) async fn connect(
+        config: BTreeMap<String, AxisBinding>,
+        surface: Surface,
+    ) -> Result<Self, String> {
+        let mut result = Self {
+            axes: BTreeMap::new(),
+            surface,
+            incarnation: event_stamp::SystemSource.new_id().to_string(),
+        };
         for (axis, binding) in config {
             let connected = RemoteBindings::connect(
                 LocalEndpoint::parse(&binding.endpoint)?,
@@ -118,10 +176,11 @@ impl RemoteAxisBindings {
                 Ok(client) => {
                     result.axes.insert(
                         axis,
-                        (
-                            Arc::new(client),
-                            Duration::from_millis(binding.shutdown_timeout_ms),
-                        ),
+                        Arc::new(Axis {
+                            client: Arc::new(client),
+                            members: PluginManager::new(64)?,
+                            shutdown_timeout: Duration::from_millis(binding.shutdown_timeout_ms),
+                        }),
                     );
                 }
                 Err(error) => {
@@ -130,33 +189,130 @@ impl RemoteAxisBindings {
                 }
             }
         }
+        for grant in result.surface.grants() {
+            if let Err(error) = result.activate(&grant.axis, &grant.registration).await {
+                let cleanup = result.close().await;
+                return Err(format!(
+                    "remote plugin installation failed: {error}; cleanup: {cleanup:?}"
+                ));
+            }
+        }
         Ok(result)
     }
-    pub(crate) fn client(&self, axis: &str) -> Result<Arc<RemoteBindings>, String> {
+    pub(crate) fn check_incarnation(&self, incarnation: &str) -> Result<(), String> {
+        if incarnation != self.incarnation {
+            return Err("stale plugin manager incarnation".into());
+        }
+        Ok(())
+    }
+    fn axis(&self, name: &str) -> Result<&Arc<Axis>, String> {
         self.axes
-            .get(axis)
-            .map(|(client, _)| Arc::clone(client))
+            .get(name)
             .ok_or_else(|| "remote axis is absent".into())
     }
-    /// Connect first, then replace atomically. Admitted calls finish on the old client.
+    pub(crate) fn binding(
+        &self,
+        axis: &str,
+        registration: &str,
+    ) -> Result<RemotePluginBinding, String> {
+        let grant = self.surface.select(axis, registration)?;
+        Ok(RemotePluginBinding {
+            axis: Arc::clone(self.axis(axis)?),
+            grant,
+        })
+    }
+    /// Activate only the existing host publication. No remote grant or endpoint is accepted.
+    pub async fn activate(&self, axis: &str, registration: &str) -> Result<PluginState, String> {
+        let grant = self.surface.select(axis, registration)?;
+        let axis_owner = self.axis(axis)?;
+        let participant = Arc::new(Participant {
+            client: Arc::clone(&axis_owner.client),
+            grant,
+        });
+        let installed = axis_owner
+            .members
+            .install(
+                RegistrationSpec {
+                    name: registration.into(),
+                    contract: surface::CONTRACT.into(),
+                },
+                async move {
+                    let inverse: Reversal = Box::new(|| Box::pin(async { Ok(()) }));
+                    Ok((participant, inverse))
+                },
+            )
+            .await?;
+        Ok(PluginState {
+            incarnation: self.incarnation.clone(),
+            axis: axis.into(),
+            registration: registration.into(),
+            contract: surface::CONTRACT,
+            available: true,
+            generation: Some(installed.identity().generation),
+        })
+    }
+    pub fn state(&self, axis: &str, registration: &str) -> Result<PluginState, String> {
+        self.surface.select(axis, registration)?;
+        let active = self.axis(axis)?.members.resolve(registration).ok();
+        Ok(PluginState {
+            incarnation: self.incarnation.clone(),
+            axis: axis.into(),
+            registration: registration.into(),
+            contract: surface::CONTRACT,
+            available: active.is_some(),
+            generation: active.map(|r| r.identity().generation),
+        })
+    }
+    /// Fence an exact registration incarnation before joining its local exchanges.
+    pub async fn withdraw(
+        &self,
+        axis: &str,
+        registration: &str,
+        generation: u64,
+    ) -> Result<(), String> {
+        self.surface.select(axis, registration)?;
+        let members = &self.axis(axis)?.members;
+        let selected = members.resolve(registration)?;
+        if selected.identity().generation != generation {
+            return Err("stale plugin registration generation".into());
+        }
+        members
+            .withdraw(selected.identity())
+            .await
+            .map_err(|errors| errors.join("; "))
+    }
+    /// Connect first; transport replacement changes no grant or participant incarnation.
+    /// This method is host-controlled and is not published by the plugin ingress.
     pub async fn replace(&self, axis: &str, endpoint: &str) -> Result<(), String> {
-        self.client(axis)?
+        self.axis(axis)?
+            .client
             .replace(LocalEndpoint::parse(endpoint)?)
             .await
             .map_err(|e| e.to_string())
     }
     pub(crate) async fn close(&self) -> Result<(), String> {
         let mut pending = tokio::task::JoinSet::new();
-        for (client, timeout) in self.axes.values() {
-            let client = Arc::clone(client);
-            let timeout = *timeout;
-            pending.spawn(async move { client.close(timeout).await });
+        for axis in self.axes.values() {
+            let axis = Arc::clone(axis);
+            pending.spawn(async move {
+                let membership =
+                    tokio::time::timeout(axis.shutdown_timeout, axis.members.close()).await;
+                let transport = axis.client.close(axis.shutdown_timeout).await;
+                let mut errors = match membership {
+                    Ok(Ok(())) => Vec::new(),
+                    Ok(Err(errors)) => errors,
+                    Err(_) => vec!["remote plugin memberships still draining".into()],
+                };
+                if let Err(error) = transport {
+                    errors.push(error.to_string());
+                }
+                errors
+            });
         }
         let mut errors = Vec::new();
         while let Some(result) = pending.join_next().await {
             match result {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => errors.push(error.to_string()),
+                Ok(failures) => errors.extend(failures),
                 Err(error) => errors.push(error.to_string()),
             }
         }
@@ -168,7 +324,34 @@ impl RemoteAxisBindings {
     }
 }
 
-/// One method namespace names the host's versioned metadata contract.
-pub(crate) fn method(registration: &str, hook: &str) -> String {
-    format!("worker.metadata.v1.{registration}.{hook}")
+/// A stable slot handle. Each call pins the currently admitted incarnation.
+pub(crate) struct RemotePluginBinding {
+    axis: Arc<Axis>,
+    grant: Arc<Grant>,
+}
+impl RemotePluginBinding {
+    pub async fn call(
+        &self,
+        hook: &str,
+        input: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, String> {
+        let participant = self
+            .axis
+            .members
+            .resolve(&self.grant.registration)?
+            .enter()?;
+        let method = participant.grant.method(hook)?.to_owned();
+        // Retain membership until the owned local exchange actually settles, even
+        // when the caller stops waiting. A peer timeout still has unknown outcome.
+        tokio::spawn(async move {
+            participant
+                .client
+                .call(method, input, timeout)
+                .await
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("remote plugin exchange task failed: {e}"))?
+    }
 }

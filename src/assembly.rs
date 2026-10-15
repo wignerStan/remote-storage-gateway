@@ -15,6 +15,14 @@ const REMOTE_AXES: Resource = Resource {
     provides: &["remote-axis-bindings"],
     requires: &[],
 };
+const PLUGIN_ENTRY: Resource = Resource {
+    id: "plugin-entry",
+    provides: &["plugin-ingress"],
+    requires: &[plugin_lifecycle::ResourceRequirement {
+        resource: "remote-axes",
+        capability: "remote-axis-bindings",
+    }],
+};
 const NOTIFIERS: Resource = Resource {
     id: "native-notifiers",
     provides: &["worker-notifiers"],
@@ -149,19 +157,24 @@ async fn assemble_selected(
     let inspection = config.inspection;
     let control = Arc::new(WorkerControl::default());
     let operations = Arc::new(diagnostic_output::operations::Operations::default());
-    let resources = if config.callbacks.iter().any(|c| !c.actions.is_empty()) {
+    let mut resources = if config.callbacks.iter().any(|c| !c.actions.is_empty()) {
         vec![REMOTE_AXES, NOTIFIERS, MANAGEMENT, NATIVE_ACTIONS]
     } else if config.management.is_some() {
         vec![REMOTE_AXES, NOTIFIERS, MANAGEMENT]
     } else {
         vec![REMOTE_AXES, NOTIFIERS]
     };
+    if config.plugin_ingress.is_some() {
+        resources.push(PLUGIN_ENTRY);
+    }
+    let surface = crate::remote_axis::publication(&config.callbacks)?;
     let mut composition = Composition::new(ResourceSchema::new(&resources)?);
     let (remote_send, remote_receive) = tokio::sync::oneshot::channel();
     composition
         .install(REMOTE_AXES, async move {
             let axes = Arc::new(
-                crate::remote_axis::RemoteAxisBindings::connect(config.axis_bindings).await?,
+                crate::remote_axis::RemotePluginManager::connect(config.axis_bindings, surface)
+                    .await?,
             );
             let closing = Arc::clone(&axes);
             let _ = remote_send.send(Arc::clone(&axes));
@@ -194,9 +207,14 @@ async fn assemble_selected(
             };
             for (callback, input) in callbacks {
                 if callback.resolved_binding() == CallbackBinding::Remote {
-                    let client = callback_axes
-                        .client(callback.axis.as_deref().ok_or("remote axis is absent")?)?;
-                    match NativeNotifier::remote(client, &callback) {
+                    let binding = callback_axes.binding(
+                        callback.axis.as_deref().ok_or("remote axis is absent")?,
+                        callback
+                            .registration
+                            .as_deref()
+                            .ok_or("remote registration is absent")?,
+                    )?;
+                    match NativeNotifier::remote(binding, &callback) {
                         Ok(notifier) => native.callbacks.push(Arc::new(notifier)),
                         Err(error) => {
                             let _ = native.shutdown().await;
@@ -408,6 +426,26 @@ async fn assemble_selected(
             "native action publication failed: {error}; cleanup: {cleanup:?}"
         ));
     }
+    let plugin_entry = if let Some(ingress) = config.plugin_ingress {
+        match crate::remote_axis::entry::install(
+            &mut composition,
+            PLUGIN_ENTRY,
+            ingress,
+            Arc::clone(&remote_axes),
+        )
+        .await
+        {
+            Ok(entry) => Some(entry),
+            Err(error) => {
+                let cleanup = composition.rollback().await;
+                return Err(format!(
+                    "plugin ingress setup failed: {error}; cleanup: {cleanup:?}"
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let runtime = composition.commit().await?;
     let native = runtime.require::<NativeSet>(NOTIFIERS.id)?.enter()?;
     let callbacks = native.callbacks.clone();
@@ -426,8 +464,14 @@ async fn assemble_selected(
         let _ = runtime.shutdown().await;
         return Err(error);
     }
+    if let Some(entry) = plugin_entry
+        && let Err(error) = entry.activate()
+    {
+        let _ = runtime.shutdown().await;
+        return Err(error);
+    }
     Ok(proxy
-        .with_remote_bindings(remote_axes)
+        .with_remote_plugins(remote_axes)
         .with_operations(operations)
         .with_inspection_limits(inspection)
         .with_message_callbacks(messages, codecs)

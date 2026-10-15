@@ -263,10 +263,7 @@ impl Reply {
 
 enum NotifierBinding {
     Direct(Arc<Callback>),
-    Remote {
-        client: Arc<network_actions::client::RemoteBindings>,
-        registration: String,
-    },
+    Remote(crate::remote_axis::RemotePluginBinding),
 }
 
 pub struct NativeNotifier {
@@ -281,20 +278,10 @@ impl NativeNotifier {
         Self::with_binding(NotifierBinding::Direct(callback), config)
     }
     pub(crate) fn remote(
-        client: Arc<network_actions::client::RemoteBindings>,
+        binding: crate::remote_axis::RemotePluginBinding,
         config: &NativeCallback,
     ) -> Result<Self, String> {
-        let registration = config
-            .registration
-            .clone()
-            .ok_or("remote registration is absent")?;
-        Self::with_binding(
-            NotifierBinding::Remote {
-                client,
-                registration,
-            },
-            config,
-        )
+        Self::with_binding(NotifierBinding::Remote(binding), config)
     }
     fn with_binding(callback: NotifierBinding, config: &NativeCallback) -> Result<Self, String> {
         validate_hooks(&config.hooks)?;
@@ -388,16 +375,9 @@ impl NativeNotifier {
                 })
                 .await
                 .map_err(|_| "native notifier call failed".to_string())?,
-            NotifierBinding::Remote {
-                client,
-                registration,
-            } => {
-                let bytes = client
-                    .call(
-                        crate::remote_axis::method(registration, hook),
-                        input,
-                        self.timeout,
-                    )
+            NotifierBinding::Remote(binding) => {
+                let bytes = binding
+                    .call(hook, input, self.timeout)
                     .await
                     .map_err(|error| format!("remote metadata call failed: {error}"))?;
                 serde_json::from_slice::<Reply>(&bytes)

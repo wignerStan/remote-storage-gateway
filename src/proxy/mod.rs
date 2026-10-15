@@ -157,7 +157,7 @@ pub struct NativeProxy {
     control: Arc<WorkerControl>,
     operations: Arc<Operations>,
     runtime: Option<Runtime>,
-    remote_bindings: Arc<crate::remote_axis::RemoteAxisBindings>,
+    remote_plugins: Arc<crate::remote_axis::RemotePluginManager>,
     body_dump_limit: usize,
     capture_budget: Arc<admission_gate::budget::ResourceBudget>,
     message_codecs: Arc<[message_codec::CodecRegistration]>,
@@ -165,14 +165,14 @@ pub struct NativeProxy {
 }
 impl NativeProxy {
     /// Stable axis manager for host-controlled client replacement.
-    pub fn remote_bindings(&self) -> &Arc<crate::remote_axis::RemoteAxisBindings> {
-        &self.remote_bindings
+    pub fn remote_plugins(&self) -> &Arc<crate::remote_axis::RemotePluginManager> {
+        &self.remote_plugins
     }
-    pub(crate) fn with_remote_bindings(
+    pub(crate) fn with_remote_plugins(
         mut self,
-        bindings: Arc<crate::remote_axis::RemoteAxisBindings>,
+        bindings: Arc<crate::remote_axis::RemotePluginManager>,
     ) -> Self {
-        self.remote_bindings = bindings;
+        self.remote_plugins = bindings;
         self
     }
     /// Grant a trusted native Pingora implementation its async request-body hook
@@ -216,7 +216,7 @@ impl NativeProxy {
             control,
             operations: Arc::new(Operations::default()),
             runtime: None,
-            remote_bindings: Arc::default(),
+            remote_plugins: Arc::default(),
             body_dump_limit: 0,
             capture_budget: diagnostic_output::runtime::default_capture_budget(),
             message_codecs: Arc::from([]),

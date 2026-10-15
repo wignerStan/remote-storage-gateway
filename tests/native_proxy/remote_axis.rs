@@ -111,14 +111,14 @@ async fn default_remote_axis_projects_grants_and_replaces_client_without_reinsta
         assert!(request(worker.address).await.ends_with(b"first"));
         assert!(
             proxy
-                .remote_bindings()
+                .remote_plugins()
                 .replace("request_policy", "unix:///missing/remote-axis.sock")
                 .await
                 .is_err()
         );
         assert!(request(worker.address).await.ends_with(b"first"));
         proxy
-            .remote_bindings()
+            .remote_plugins()
             .replace("request_policy", &second.endpoint)
             .await
             .unwrap();
@@ -135,7 +135,7 @@ async fn default_remote_axis_projects_grants_and_replaces_client_without_reinsta
         proxy.shutdown().await.unwrap();
         assert!(
             proxy
-                .remote_bindings()
+                .remote_plugins()
                 .replace("request_policy", &first.endpoint)
                 .await
                 .is_err()
@@ -172,6 +172,157 @@ async fn remote_reply_cannot_widen_header_grant_or_contract_version() {
             proxy.shutdown().await.unwrap();
         }
         assert_eq!(reached.load(Ordering::SeqCst), 0);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_ingress_owns_membership_and_never_uses_worker_entry() {
+    timeout(WAIT, async {
+        let origin = listen(|mut socket| async move {
+            let _ = head(&mut socket).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+        })
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let remote = axis(
+            &directory.path().join("provider.sock"),
+            json!({"version":1,"decision":"continue"}),
+            Arc::default(),
+        )
+        .await;
+        let plugin_endpoint = format!("unix://{}", directory.path().join("plugin.sock").display());
+        let host_endpoint = format!("unix://{}", directory.path().join("host.sock").display());
+        let mut config = config(origin.address, &remote.endpoint);
+        config.plugin_ingress = Some(pingora_worker::remote_axis::entry::Config {
+            listen: plugin_endpoint.clone(),
+        });
+        config.management = Some(pingora_worker::config::Management {
+            listen: host_endpoint.clone(),
+        });
+        let proxy = pingora_worker::assembly::assemble(config).await.unwrap();
+        let worker = serve_engine(proxy.clone()).await;
+        let connect = |endpoint: String| async move {
+            network_actions::client::RemoteBindings::connect(
+                network_sockets::LocalEndpoint::parse(&endpoint).unwrap(),
+                network_actions::client::Limits::default(),
+            )
+            .await
+            .unwrap()
+        };
+        let plugin = connect(plugin_endpoint).await;
+        let host = connect(host_endpoint).await;
+        let selection = json!({"axis":"request_policy", "registration":"policy"});
+        let state: Value = serde_json::from_slice(
+            &plugin
+                .call(
+                    "plugin.get".into(),
+                    serde_json::to_vec(&selection).unwrap(),
+                    WAIT,
+                )
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state["available"], true);
+        assert!(
+            host.call(
+                "plugin.get".into(),
+                serde_json::to_vec(&selection).unwrap(),
+                WAIT
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            plugin
+                .call("worker.get".into(), b"{}".to_vec(), WAIT)
+                .await
+                .is_err()
+        );
+        assert!(
+            host.call("worker.get".into(), b"{}".to_vec(), WAIT)
+                .await
+                .is_ok()
+        );
+        let mut withdraw = selection.clone();
+        withdraw["generation"] = state["generation"].clone();
+        withdraw["incarnation"] = state["incarnation"].clone();
+        let mut stale_owner = withdraw.clone();
+        stale_owner["incarnation"] = json!("previous-process");
+        assert!(
+            plugin
+                .call(
+                    "plugin.withdraw".into(),
+                    serde_json::to_vec(&stale_owner).unwrap(),
+                    WAIT
+                )
+                .await
+                .is_err()
+        );
+        assert!(request(worker.address).await.starts_with(b"HTTP/1.1 200"));
+        plugin
+            .call(
+                "plugin.withdraw".into(),
+                serde_json::to_vec(&withdraw).unwrap(),
+                WAIT,
+            )
+            .await
+            .unwrap();
+        assert!(!request(worker.address).await.starts_with(b"HTTP/1.1 200"));
+        let mut activation = selection.clone();
+        activation["incarnation"] = state["incarnation"].clone();
+        let replacement: Value = serde_json::from_slice(
+            &plugin
+                .call(
+                    "plugin.activate".into(),
+                    serde_json::to_vec(&activation).unwrap(),
+                    WAIT,
+                )
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            replacement["generation"].as_u64().unwrap() > state["generation"].as_u64().unwrap()
+        );
+        assert!(
+            plugin
+                .call(
+                    "plugin.withdraw".into(),
+                    serde_json::to_vec(&withdraw).unwrap(),
+                    WAIT
+                )
+                .await
+                .is_err()
+        );
+        assert!(request(worker.address).await.starts_with(b"HTTP/1.1 200"));
+        for invalid in [
+            json!({"axis":"request_policy","registration":"unpublished"}),
+            json!({"axis":"request_policy","registration":"policy","endpoint":"127.0.0.1:1"}),
+            json!({"axis":"request_policy","registration":"policy","headers":["authorization"]}),
+        ] {
+            assert!(
+                plugin
+                    .call(
+                        "plugin.get".into(),
+                        serde_json::to_vec(&invalid).unwrap(),
+                        WAIT
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        plugin.close(WAIT).await.unwrap();
+        host.close(WAIT).await.unwrap();
+        drop(worker);
+        proxy.shutdown().await.unwrap();
+        assert!(!directory.path().join("plugin.sock").exists());
+        assert!(!directory.path().join("host.sock").exists());
     })
     .await
     .unwrap();
