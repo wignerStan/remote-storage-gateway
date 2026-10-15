@@ -1,7 +1,6 @@
 //! Reversible shared management entry owned by the plugin composition.
 mod publications;
-use action_router::{Publication, PublicationRegistry, Router};
-use network_actions::{ActionService, listener::ActionListener};
+use network_actions::{facility::RpcFacility, listener::ActionListener};
 use network_sockets::{LocalEndpoint, SocketPermissions, StaleUnixSocketPolicy};
 use plugin_lifecycle::{Composition, Resource, Reversal};
 use std::{sync::Arc, time::Duration};
@@ -9,8 +8,7 @@ use tokio::sync::oneshot;
 
 pub struct SharedEntry {
     listener: Arc<ActionListener>,
-    router: Router,
-    publications: PublicationRegistry,
+    facility: RpcFacility,
 }
 impl SharedEntry {
     /// Actual TCP address, including a kernel-selected port when configured as zero.
@@ -55,42 +53,27 @@ pub async fn install(
                 StaleUnixSocketPolicy::RemoveIfStale,
             )
             .await?;
-            let router = Router::new();
-            let carrier = ActionService::new(router.clone(), 1024 * 1024, Duration::from_secs(120))
-                .map_err(|e| e.to_string())?;
-            let worker_actions = worker_control
-                .map(|control| {
-                    router
-                        .with_contract_namespace("worker")
-                        .map_err(|e| e.to_string())?
-                        .register(crate::management::actions(
-                            &control,
-                            &operations,
-                            logging_health,
-                        ))
-                        .map_err(|e| e.to_string())
-                })
-                .transpose()?;
-            let publications = PublicationRegistry::new();
-            if let Some(worker_actions) = worker_actions {
-                publications
-                    .install("worker", move || {
-                        Ok(Arc::new(worker_actions) as Arc<dyn Publication>)
-                    })
+            let facility = RpcFacility::new(1024 * 1024, Duration::from_secs(120), 128)
+                .map_err(|error| error.to_string())?;
+            if let Some(control) = worker_control {
+                facility
+                    .publish_actions(
+                        "worker",
+                        crate::management::actions(&control, &operations, logging_health),
+                    )
                     .await
                     .map_err(|error| error.to_string())?;
             }
-            let listener = Arc::new(ActionListener::prepare(bound, socket, carrier)?);
+            let listener = Arc::new(ActionListener::prepare(bound, socket, facility.service())?);
             let activation = Arc::new(SharedEntry {
                 listener: Arc::clone(&listener),
-                router,
-                publications: publications.clone(),
+                facility: facility.clone(),
             });
             let _ = send.send(activation.clone());
             let inverse: Reversal = Box::new(move || {
                 Box::pin(async move {
                     // Mark closed and revoke every owner before waiting on the listener.
-                    let cleanup = publications.close_all();
+                    let cleanup = facility.close();
                     listener.request_stop();
                     let served = listener.shutdown().await;
                     cleanup.await.map_err(|error| error.to_string())?;

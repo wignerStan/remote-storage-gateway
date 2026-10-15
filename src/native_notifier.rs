@@ -268,12 +268,18 @@ enum NotifierBinding {
 
 pub struct NativeNotifier {
     callback: NotifierBinding,
+    memory: Option<plugin_manager::memory::Subscriber>,
     interests: u16,
     timeout: Duration,
     headers: Vec<http::header::HeaderName>,
     patch_headers: Arc<[http::header::HeaderName]>,
 }
 impl NativeNotifier {
+    /// Assembly supplies one bounded coordinator shared by all callback bindings.
+    pub(crate) fn with_subscriber(mut self, memory: plugin_manager::memory::Subscriber) -> Self {
+        self.memory = Some(memory);
+        self
+    }
     pub fn new(callback: Arc<Callback>, config: &NativeCallback) -> Result<Self, String> {
         Self::with_binding(NotifierBinding::Direct(callback), config)
     }
@@ -299,6 +305,7 @@ impl NativeNotifier {
         }
         Ok(Self {
             callback,
+            memory: None,
             interests,
             timeout: Duration::from_millis(config.timeout_ms),
             headers,
@@ -362,13 +369,26 @@ impl NativeNotifier {
                 names: &self.headers,
             },
         };
-        let input = text_processing::json::to_vec_bounded(&metadata, FRAME_LIMIT)
-            .map_err(|_| "could not encode bounded notifier metadata")?;
+        let (input, custody) = if let Some(memory) = &self.memory {
+            let mut output = memory.allocate(FRAME_LIMIT)?;
+            serde_json::to_writer(&mut output, &metadata)
+                .map_err(|_| "could not encode bounded notifier metadata")?;
+            let (input, custody) = output.finish().into_parts();
+            (input, Some(custody))
+        } else {
+            // Standalone adapter construction retains its existing per-frame bound.
+            // Process assembly always supplies the aggregate coordinator above.
+            (
+                text_processing::json::to_vec_bounded(&metadata, FRAME_LIMIT)
+                    .map_err(|_| "could not encode bounded notifier metadata")?,
+                None,
+            )
+        };
 
         let patch_headers = Arc::clone(&self.patch_headers);
         let result = match &self.callback {
             NotifierBinding::Direct(callback) => callback
-                .call_with_reply(hook, input, self.timeout, (), move |bytes| {
+                .call_with_reply(hook, input, self.timeout, custody, move |bytes| {
                     serde_json::from_slice::<Reply>(bytes)
                         .map_err(|_| "invalid notifier metadata reply".to_string())
                         .and_then(|reply| reply.check(hook, &patch_headers))
@@ -377,7 +397,7 @@ impl NativeNotifier {
                 .map_err(|_| "native notifier call failed".to_string())?,
             NotifierBinding::Remote(binding) => {
                 let bytes = binding
-                    .call(hook, input, self.timeout)
+                    .call(hook, input, self.timeout, custody)
                     .await
                     .map_err(|error| format!("remote metadata call failed: {error}"))?;
                 serde_json::from_slice::<Reply>(&bytes)

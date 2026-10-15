@@ -76,14 +76,31 @@ async fn cancelled_waiter_keeps_membership_pinned_until_remote_exchange_settles(
             .generation
             .unwrap();
         let binding = manager.binding("request_policy", "policy").unwrap();
+        let memory =
+            plugin_manager::memory::Coordinator::new(plugin_manager::memory::Limits::default())
+                .unwrap();
+        let subscriber = memory
+            .subscribe(RegistrationSpec {
+                name: "policy".into(),
+                contract: "worker.metadata.v1".into(),
+            })
+            .await
+            .unwrap();
+        let mut allocation = subscriber.allocate(4).unwrap();
+        std::io::Write::write_all(&mut allocation, b"null").unwrap();
+        let (input, custody) = allocation.finish().into_parts();
         let waiter = tokio::spawn(async move {
             binding
-                .call("routing", b"null".to_vec(), Duration::from_secs(5))
+                .call("routing", input, Duration::from_secs(5), custody)
                 .await
         });
         entered.notified().await;
         waiter.abort();
         assert!(waiter.await.unwrap_err().is_cancelled());
+        let memory_retirement = memory.request_close();
+        assert!(subscriber.allocate(1).is_err());
+        assert_eq!(memory.stats().allocations, 1);
+        assert_eq!(memory.stats().bytes, 4);
 
         let mut withdrawal = tokio::spawn({
             let manager = Arc::clone(&manager);
@@ -104,6 +121,9 @@ async fn cancelled_waiter_keeps_membership_pinned_until_remote_exchange_settles(
         );
         release.notify_one();
         withdrawal.await.unwrap().unwrap();
+        memory_retirement.wait().await.unwrap();
+        assert_eq!(memory.stats().allocations, 0);
+        assert_eq!(memory.stats().bytes, 0);
         let replacement = manager.activate("request_policy", "policy").await.unwrap();
         assert!(replacement.generation.unwrap() > generation);
 

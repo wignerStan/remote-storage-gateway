@@ -23,6 +23,7 @@ stream-transfer = { path = "../infra/rust/crates/networking/stream/transfer" }
 network-sockets = { path = "../infra/rust/crates/networking/sockets" }
 action-router = { path = "../infra/rust/crates/networking/action-router" }
 network-actions = { path = "../infra/rust/crates/networking/actions" }
+plugin-manager = { path = "../infra/rust/crates/plugins/manager" }
 plugin-lifecycle = { path = "../infra/rust/crates/plugins/lifecycle" }
 plugin-loading = { path = "../infra/rust/crates/plugins/loading", features = ["async"] }
 proxy-protocols = { path = "../infra/rust/crates/networking/proxy/protocols", default-features = false }

@@ -1029,3 +1029,71 @@ async fn native_metadata_preserves_ipv6_socket_peer_without_a_port() {
     assert_eq!(fixture.metadata().await["client_ip"], "2001:db8::7");
     fixture.shutdown().await;
 }
+
+#[tokio::test]
+async fn shared_memory_budget_rejects_before_native_call_and_recovers_after_release() {
+    use plugin_lifecycle::manager::RegistrationSpec;
+    use plugin_manager::memory::{Coordinator, Limits as MemoryLimits};
+    let memory = Coordinator::new(MemoryLimits {
+        max_subscribers: 2,
+        max_bytes: FRAME_LIMIT,
+        max_payload_bytes: FRAME_LIMIT,
+        max_allocations: 1,
+    })
+    .unwrap();
+    let owner = memory
+        .subscribe(RegistrationSpec {
+            name: "policy".into(),
+            contract: "worker.metadata.v1".into(),
+        })
+        .await
+        .unwrap();
+    let other = memory
+        .subscribe(RegistrationSpec {
+            name: "other".into(),
+            contract: "worker.metadata.v1".into(),
+        })
+        .await
+        .unwrap();
+    let mut fixture = Fixture::new(CONTINUE, &["routing"], &[]).await;
+    fixture.notifier = fixture.notifier.with_subscriber(owner);
+    let mut request = request();
+    let mut facts = facts(&request);
+    fixture
+        .notifier
+        .routing(1, &mut request, &mut facts)
+        .await
+        .unwrap();
+    assert_eq!(memory.stats().allocations, 0);
+    let previous = fixture.metadata().await;
+    facts.request_id += 1;
+    let held = other.allocate(FRAME_LIMIT).unwrap();
+    assert!(
+        fixture
+            .notifier
+            .routing(1, &mut request, &mut facts)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fixture.metadata().await,
+        previous,
+        "budget rejection must precede the C ABI call"
+    );
+    drop(held);
+    fixture
+        .notifier
+        .routing(1, &mut request, &mut facts)
+        .await
+        .unwrap();
+    assert_eq!(fixture.metadata().await["request_id"], facts.request_id);
+    memory.close().await.unwrap();
+    assert!(
+        fixture
+            .notifier
+            .routing(1, &mut request, &mut facts)
+            .await
+            .is_err()
+    );
+    fixture.shutdown().await;
+}

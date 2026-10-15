@@ -178,7 +178,16 @@ async fn remote_reply_cannot_widen_header_grant_or_contract_version() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn plugin_ingress_owns_membership_and_never_uses_worker_entry() {
+async fn dedicated_plugin_ingress_retains_independent_routes() {
+    plugin_ingress_membership(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_plugin_ingress_dispatches_both_owners_without_widening_grants() {
+    plugin_ingress_membership(true).await;
+}
+
+async fn plugin_ingress_membership(shared: bool) {
     timeout(WAIT, async {
         let origin = listen(|mut socket| async move {
             let _ = head(&mut socket).await;
@@ -198,8 +207,14 @@ async fn plugin_ingress_owns_membership_and_never_uses_worker_entry() {
         let plugin_endpoint = format!("unix://{}", directory.path().join("plugin.sock").display());
         let host_endpoint = format!("unix://{}", directory.path().join("host.sock").display());
         let mut config = config(origin.address, &remote.endpoint);
-        config.plugin_ingress = Some(pingora_worker::remote_axis::entry::Config {
-            listen: plugin_endpoint.clone(),
+        config.plugin_ingress = Some(if shared {
+            pingora_worker::remote_axis::entry::Config::Shared {
+                mount: pingora_worker::remote_axis::entry::SharedMount::Management,
+            }
+        } else {
+            pingora_worker::remote_axis::entry::Config::Dedicated {
+                listen: plugin_endpoint.clone(),
+            }
         });
         config.management = Some(pingora_worker::config::Management {
             listen: host_endpoint.clone(),
@@ -214,7 +229,12 @@ async fn plugin_ingress_owns_membership_and_never_uses_worker_entry() {
             .await
             .unwrap()
         };
-        let plugin = connect(plugin_endpoint).await;
+        let plugin = connect(if shared {
+            host_endpoint.clone()
+        } else {
+            plugin_endpoint
+        })
+        .await;
         let host = connect(host_endpoint).await;
         let selection = json!({"axis":"request_policy", "registration":"policy"});
         let state: Value = serde_json::from_slice(
@@ -229,20 +249,22 @@ async fn plugin_ingress_owns_membership_and_never_uses_worker_entry() {
         )
         .unwrap();
         assert_eq!(state["available"], true);
-        assert!(
+        assert_eq!(
             host.call(
                 "plugin.get".into(),
                 serde_json::to_vec(&selection).unwrap(),
                 WAIT
             )
             .await
-            .is_err()
+            .is_ok(),
+            shared
         );
-        assert!(
+        assert_eq!(
             plugin
                 .call("worker.get".into(), b"{}".to_vec(), WAIT)
                 .await
-                .is_err()
+                .is_ok(),
+            shared
         );
         assert!(
             host.call("worker.get".into(), b"{}".to_vec(), WAIT)
@@ -274,6 +296,12 @@ async fn plugin_ingress_owns_membership_and_never_uses_worker_entry() {
             .await
             .unwrap();
         assert!(!request(worker.address).await.starts_with(b"HTTP/1.1 200"));
+        // Retiring a plugin participant must not retire the shared host routes.
+        assert!(
+            host.call("worker.get".into(), b"{}".to_vec(), WAIT)
+                .await
+                .is_ok()
+        );
         let mut activation = selection.clone();
         activation["incarnation"] = state["incarnation"].clone();
         let replacement: Value = serde_json::from_slice(

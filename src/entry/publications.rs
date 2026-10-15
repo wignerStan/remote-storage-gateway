@@ -48,17 +48,13 @@ impl SharedEntry {
     where
         F: FnOnce(Router) -> Result<Arc<dyn Publication>, Error> + Send + 'static,
     {
-        let router = self
-            .router
-            .with_contract_namespace(namespace)
-            .map_err(|error| error.to_string())?;
         let namespace = namespace.to_owned();
-        let publications = self.publications.clone();
+        let facility = self.facility.clone();
         composition
             .install(resource, async move {
                 let routes = Arc::new(
-                    publications
-                        .install(&namespace, move || publish(router))
+                    facility
+                        .publish(&namespace, publish)
                         .await
                         .map_err(|error| error.to_string())?,
                 );

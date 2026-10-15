@@ -1,20 +1,31 @@
-//! Plugin-axis ingress. This router never mounts on the worker application entry.
+//! Plugin-axis decoding and dispatch, on a shared or dedicated RPC facility.
 use super::RemotePluginManager;
 use action_router::{
-    Action, AsyncHandler, Binding, Context, Contract, Error, Publication, PublicationRegistry,
-    ResponseMode, Router, Schema,
+    Action, AsyncHandler, Binding, Context, Contract, Error, ResponseMode, Schema,
 };
-use network_actions::{ActionService, listener::ActionListener};
+use network_actions::{facility::RpcFacility, listener::ActionListener};
 use network_sockets::{LocalEndpoint, SocketPermissions, StaleUnixSocketPolicy};
 use plugin_lifecycle::{Composition, Resource, Reversal};
 use serde::Deserialize;
 use std::{sync::Arc, time::Duration};
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Config {
-    /// Dedicated Unix or loopback plugin endpoint, separate from worker management.
-    pub listen: String,
+#[serde(untagged, deny_unknown_fields)]
+pub enum Config {
+    /// Publish plugin controls on the configured management listener.
+    Shared { mount: SharedMount },
+    /// Bind a separate local listener when no shared server is selected.
+    Dedicated { listen: String },
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedMount {
+    Management,
+}
+impl Config {
+    pub(crate) fn shared(&self) -> bool {
+        matches!(self, Self::Shared { .. })
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,7 +44,7 @@ enum Operation {
     Withdraw,
 }
 
-fn actions(manager: Arc<RemotePluginManager>) -> Vec<Action> {
+pub(crate) fn actions(manager: Arc<RemotePluginManager>) -> Vec<Action> {
     [
         ("plugin.get", Operation::Get),
         ("plugin.activate", Operation::Activate),
@@ -117,42 +128,32 @@ impl PluginEntry {
 pub(crate) async fn install(
     composition: &mut Composition,
     resource: Resource,
-    config: Config,
+    listen: String,
     manager: Arc<RemotePluginManager>,
 ) -> Result<Arc<PluginEntry>, String> {
     let (send, receive) = tokio::sync::oneshot::channel();
     composition
         .install(resource, async move {
             let (bound, socket) = network_sockets::bind_local(
-                LocalEndpoint::parse(&config.listen)?,
+                LocalEndpoint::parse(&listen)?,
                 SocketPermissions::default(),
                 StaleUnixSocketPolicy::RemoveIfStale,
             )
             .await?;
-            let router = Router::new()
-                .with_contract_namespace("plugin")
-                .map_err(|e| e.to_string())?;
-            let carrier = ActionService::new(router.clone(), 1024, Duration::from_secs(30))
-                .and_then(|s| s.with_request_limit(32))
-                .map_err(|e| e.to_string())?;
-            let publications = PublicationRegistry::new();
-            let routes = router
-                .register(actions(manager))
-                .map_err(|e| e.to_string())?;
-            publications
-                .install("plugin", move || {
-                    Ok(Arc::new(routes) as Arc<dyn Publication>)
-                })
+            let facility = RpcFacility::new(1024, Duration::from_secs(30), 32)
+                .map_err(|error| error.to_string())?;
+            facility
+                .publish_actions("plugin", actions(manager))
                 .await
-                .map_err(|e| e.to_string())?;
-            let listener = Arc::new(ActionListener::prepare(bound, socket, carrier)?);
+                .map_err(|error| error.to_string())?;
+            let listener = Arc::new(ActionListener::prepare(bound, socket, facility.service())?);
             let entry = Arc::new(PluginEntry {
                 listener: Arc::clone(&listener),
             });
             let _ = send.send(Arc::clone(&entry));
             let inverse: Reversal = Box::new(move || {
                 Box::pin(async move {
-                    let cleanup = publications.close_all();
+                    let cleanup = facility.close();
                     listener.request_stop();
                     let served = listener.shutdown().await;
                     cleanup.await.map_err(|e| e.to_string())?;

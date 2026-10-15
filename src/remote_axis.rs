@@ -335,6 +335,7 @@ impl RemotePluginBinding {
         hook: &str,
         input: Vec<u8>,
         timeout: Duration,
+        custody: impl Send + 'static,
     ) -> Result<Vec<u8>, String> {
         let participant = self
             .axis
@@ -345,6 +346,7 @@ impl RemotePluginBinding {
         // Retain membership until the owned local exchange actually settles, even
         // when the caller stops waiting. A peer timeout still has unknown outcome.
         tokio::spawn(async move {
+            let _custody = custody;
             participant
                 .client
                 .call(method, input, timeout)

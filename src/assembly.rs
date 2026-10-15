@@ -10,6 +10,11 @@ use plugin_loading::{Callback, CallbackOptions};
 use proxy_pingora::worker::{WorkerControl, surface::Callbacks};
 use std::sync::Arc;
 
+const NOTIFIER_MEMORY: Resource = Resource {
+    id: "notifier-memory",
+    provides: &["notifier-memory"],
+    requires: &[],
+};
 const REMOTE_AXES: Resource = Resource {
     id: "remote-axes",
     provides: &["remote-axis-bindings"],
@@ -23,13 +28,33 @@ const PLUGIN_ENTRY: Resource = Resource {
         capability: "remote-axis-bindings",
     }],
 };
+const SHARED_PLUGIN_ENTRY: Resource = Resource {
+    id: "plugin-entry",
+    provides: &["plugin-ingress"],
+    requires: &[
+        plugin_lifecycle::ResourceRequirement {
+            resource: "remote-axes",
+            capability: "remote-axis-bindings",
+        },
+        plugin_lifecycle::ResourceRequirement {
+            resource: "management-entry",
+            capability: "management-entry",
+        },
+    ],
+};
 const NOTIFIERS: Resource = Resource {
     id: "native-notifiers",
     provides: &["worker-notifiers"],
-    requires: &[plugin_lifecycle::ResourceRequirement {
-        resource: "remote-axes",
-        capability: "remote-axis-bindings",
-    }],
+    requires: &[
+        plugin_lifecycle::ResourceRequirement {
+            resource: "remote-axes",
+            capability: "remote-axis-bindings",
+        },
+        plugin_lifecycle::ResourceRequirement {
+            resource: "notifier-memory",
+            capability: "notifier-memory",
+        },
+    ],
 };
 const MANAGEMENT: Resource = Resource {
     id: "management-entry",
@@ -158,17 +183,40 @@ async fn assemble_selected(
     let control = Arc::new(WorkerControl::default());
     let operations = Arc::new(diagnostic_output::operations::Operations::default());
     let mut resources = if config.callbacks.iter().any(|c| !c.actions.is_empty()) {
-        vec![REMOTE_AXES, NOTIFIERS, MANAGEMENT, NATIVE_ACTIONS]
+        vec![
+            NOTIFIER_MEMORY,
+            REMOTE_AXES,
+            NOTIFIERS,
+            MANAGEMENT,
+            NATIVE_ACTIONS,
+        ]
     } else if config.management.is_some() {
-        vec![REMOTE_AXES, NOTIFIERS, MANAGEMENT]
+        vec![NOTIFIER_MEMORY, REMOTE_AXES, NOTIFIERS, MANAGEMENT]
     } else {
-        vec![REMOTE_AXES, NOTIFIERS]
+        vec![NOTIFIER_MEMORY, REMOTE_AXES, NOTIFIERS]
     };
-    if config.plugin_ingress.is_some() {
-        resources.push(PLUGIN_ENTRY);
+    if let Some(ingress) = &config.plugin_ingress {
+        resources.push(if ingress.shared() {
+            SHARED_PLUGIN_ENTRY
+        } else {
+            PLUGIN_ENTRY
+        });
     }
     let surface = crate::remote_axis::publication(&config.callbacks)?;
     let mut composition = Composition::new(ResourceSchema::new(&resources)?);
+    let memory = Arc::new(plugin_manager::memory::Coordinator::new(
+        plugin_manager::memory::Limits::default(),
+    )?);
+    let memory_owner = Arc::clone(&memory);
+    composition
+        .install(NOTIFIER_MEMORY, async move {
+            let closing = Arc::clone(&memory_owner);
+            let inverse: Reversal = Box::new(move || {
+                Box::pin(async move { closing.close().await.map_err(|errors| errors.join("; ")) })
+            });
+            Ok((memory_owner, inverse))
+        })
+        .await?;
     let (remote_send, remote_receive) = tokio::sync::oneshot::channel();
     composition
         .install(REMOTE_AXES, async move {
@@ -205,7 +253,20 @@ async fn assemble_selected(
                 instances: Vec::new(),
                 messages: Vec::new(),
             };
-            for (callback, input) in callbacks {
+            for (index, (callback, input)) in callbacks.into_iter().enumerate() {
+                let subscriber = match memory
+                    .subscribe(plugin_lifecycle::manager::RegistrationSpec {
+                        name: format!("callback-{index}"),
+                        contract: "worker.metadata.v1".into(),
+                    })
+                    .await
+                {
+                    Ok(subscriber) => subscriber,
+                    Err(error) => {
+                        let _ = native.shutdown().await;
+                        return Err(error);
+                    }
+                };
                 if callback.resolved_binding() == CallbackBinding::Remote {
                     let binding = callback_axes.binding(
                         callback.axis.as_deref().ok_or("remote axis is absent")?,
@@ -215,7 +276,9 @@ async fn assemble_selected(
                             .ok_or("remote registration is absent")?,
                     )?;
                     match NativeNotifier::remote(binding, &callback) {
-                        Ok(notifier) => native.callbacks.push(Arc::new(notifier)),
+                        Ok(notifier) => native
+                            .callbacks
+                            .push(Arc::new(notifier.with_subscriber(subscriber))),
                         Err(error) => {
                             let _ = native.shutdown().await;
                             return Err(error);
@@ -366,7 +429,9 @@ async fn assemble_selected(
                     continue;
                 }
                 match NativeNotifier::new(instance, &callback) {
-                    Ok(notifier) => native.callbacks.push(Arc::new(notifier)),
+                    Ok(notifier) => native
+                        .callbacks
+                        .push(Arc::new(notifier.with_subscriber(subscriber))),
                     Err(error) => {
                         let _ = native.shutdown().await;
                         return Err(error);
@@ -426,25 +491,45 @@ async fn assemble_selected(
             "native action publication failed: {error}; cleanup: {cleanup:?}"
         ));
     }
-    let plugin_entry = if let Some(ingress) = config.plugin_ingress {
-        match crate::remote_axis::entry::install(
-            &mut composition,
-            PLUGIN_ENTRY,
-            ingress,
-            Arc::clone(&remote_axes),
-        )
-        .await
-        {
-            Ok(entry) => Some(entry),
-            Err(error) => {
+    let plugin_entry = match config.plugin_ingress {
+        Some(crate::remote_axis::entry::Config::Shared { .. }) => {
+            let installed = entry
+                .as_ref()
+                .ok_or("shared plugin ingress requires management entry")?
+                .install_actions(
+                    &mut composition,
+                    SHARED_PLUGIN_ENTRY,
+                    "plugin",
+                    crate::remote_axis::entry::actions(Arc::clone(&remote_axes)),
+                )
+                .await;
+            if let Err(error) = installed {
                 let cleanup = composition.rollback().await;
                 return Err(format!(
-                    "plugin ingress setup failed: {error}; cleanup: {cleanup:?}"
+                    "plugin publication failed: {error}; cleanup: {cleanup:?}"
                 ));
             }
+            None
         }
-    } else {
-        None
+        Some(crate::remote_axis::entry::Config::Dedicated { listen }) => {
+            match crate::remote_axis::entry::install(
+                &mut composition,
+                PLUGIN_ENTRY,
+                listen,
+                Arc::clone(&remote_axes),
+            )
+            .await
+            {
+                Ok(entry) => Some(entry),
+                Err(error) => {
+                    let cleanup = composition.rollback().await;
+                    return Err(format!(
+                        "plugin ingress setup failed: {error}; cleanup: {cleanup:?}"
+                    ));
+                }
+            }
+        }
+        None => None,
     };
     let runtime = composition.commit().await?;
     let native = runtime.require::<NativeSet>(NOTIFIERS.id)?.enter()?;

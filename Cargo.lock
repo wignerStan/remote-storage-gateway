@@ -2634,6 +2634,7 @@ dependencies = [
  "plugin-abi",
  "plugin-lifecycle",
  "plugin-loading",
+ "plugin-manager",
  "proxy-pingora",
  "proxy-protocols",
  "serde",
@@ -2689,6 +2690,16 @@ dependencies = [
  "tokio",
  "wasm-sandbox",
  "wasmtime",
+]
+
+[[package]]
+name = "plugin-manager"
+version = "0.1.0"
+dependencies = [
+ "admission-gate",
+ "futures",
+ "plugin-lifecycle",
+ "tokio",
 ]
 
 [[package]]

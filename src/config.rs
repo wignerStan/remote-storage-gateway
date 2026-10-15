@@ -47,7 +47,7 @@ pub struct Config {
     pub inspection: Inspection,
     #[serde(default)]
     pub management: Option<Management>,
-    /// Dedicated plugin-axis RPC ingress; never mounted on worker management.
+    /// Plugin controls on a dedicated listener or an explicit shared management mount.
     #[serde(default)]
     pub plugin_ingress: Option<crate::remote_axis::entry::Config>,
 }
@@ -706,8 +706,14 @@ impl Config {
                 | network_sockets::LocalEndpoint::Unix(_) => {}
             }
         }
-        if let Some(ingress) = &self.plugin_ingress {
-            let endpoint = network_sockets::LocalEndpoint::parse(&ingress.listen)?;
+        if let Some(crate::remote_axis::entry::Config::Shared { .. }) = &self.plugin_ingress
+            && self.management.is_none()
+        {
+            return Err("shared plugin ingress requires management entry".into());
+        }
+        if let Some(crate::remote_axis::entry::Config::Dedicated { listen }) = &self.plugin_ingress
+        {
+            let endpoint = network_sockets::LocalEndpoint::parse(listen)?;
             if matches!(&endpoint, network_sockets::LocalEndpoint::Tcp(address) if *address == self.listen)
             {
                 return Err("plugin ingress and data listeners must differ".into());
@@ -726,7 +732,7 @@ impl Config {
                     _ => false,
                 };
                 if same {
-                    return Err("plugin ingress must not use the worker management entry".into());
+                    return Err("duplicate listener; select plugin_ingress mount management to share the entry".into());
                 }
             }
         }
@@ -1238,7 +1244,7 @@ mod plugin_ingress_tests {
     use super::*;
     use serde_json::json;
     #[test]
-    fn plugin_ingress_is_local_and_separate_from_worker_entries() {
+    fn plugin_ingress_requires_local_endpoint_or_explicit_shared_mount() {
         for input in [
             json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"127.0.0.1:9191"}, "plugin_ingress":{"listen":"127.0.0.1:9191"}}),
             json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"unix:///run/worker.sock"}, "plugin_ingress":{"listen":"unix:///run/worker.sock"}}),
@@ -1253,5 +1259,29 @@ mod plugin_ingress_tests {
         }
         let config: Config = serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"unix:///run/worker.sock"}, "plugin_ingress":{"listen":"unix:///run/plugin.sock"}})).unwrap();
         config.validate().unwrap();
+        let shared: Config = serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"unix:///run/worker.sock"}, "plugin_ingress":{"mount":"management"}})).unwrap();
+        shared.validate().unwrap();
+        let missing: Config = serde_json::from_value(
+            json!({"upstream":"http://127.0.0.1:8080", "plugin_ingress":{"mount":"management"}}),
+        )
+        .unwrap();
+        assert!(
+            missing
+                .validate()
+                .unwrap_err()
+                .contains("requires management")
+        );
+        for ingress in [
+            json!({"mount":"management", "listen":"unix:///run/plugin.sock"}),
+            json!({"mount":"unpublished"}),
+            json!({"listen":"unix:///run/plugin.sock", "unknown":true}),
+        ] {
+            assert!(
+                serde_json::from_value::<Config>(
+                    json!({"upstream":"http://127.0.0.1:8080", "plugin_ingress":ingress})
+                )
+                .is_err()
+            );
+        }
     }
 }
