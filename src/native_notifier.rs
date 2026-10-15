@@ -276,7 +276,10 @@ pub struct NativeNotifier {
 }
 impl NativeNotifier {
     /// Assembly supplies one bounded coordinator shared by all callback bindings.
-    pub(crate) fn with_subscriber(mut self, memory: plugin_lifecycle::coordination::memory::Subscriber) -> Self {
+    pub(crate) fn with_subscriber(
+        mut self,
+        memory: plugin_lifecycle::coordination::memory::Subscriber,
+    ) -> Self {
         self.memory = Some(memory);
         self
     }
@@ -388,13 +391,23 @@ impl NativeNotifier {
         let patch_headers = Arc::clone(&self.patch_headers);
         let result = match &self.callback {
             NotifierBinding::Direct(callback) => callback
-                .call_with_reply(hook, input, self.timeout, custody, move |bytes| {
-                    serde_json::from_slice::<Reply>(bytes)
-                        .map_err(|_| "invalid notifier metadata reply".to_string())
-                        .and_then(|reply| reply.check(hook, &patch_headers))
-                })
+                .start_call_with_reply(
+                    &tokio::runtime::Handle::current(),
+                    hook.to_owned(),
+                    input,
+                    self.timeout,
+                    custody,
+                    move |bytes| {
+                        serde_json::from_slice::<Reply>(bytes)
+                            .map_err(|_| "invalid notifier metadata reply".to_string())
+                            .and_then(|reply| reply.check(hook, &patch_headers))
+                    },
+                )
                 .await
-                .map_err(|_| "native notifier call failed".to_string())?,
+                .map_err(|error| {
+                    tracing::trace!(target: "proxy_pingora::worker::notifier", hook, reason = %error, "native notifier call failed");
+                    format!("native notifier call failed: {error}")
+                })?,
             NotifierBinding::Remote(binding) => {
                 let bytes = binding
                     .call(hook, input, self.timeout, custody)
@@ -411,7 +424,10 @@ impl NativeNotifier {
                 Decision::Accept => "accept",
                 Decision::Deny => "deny",
             },
-            Err(_) => "error",
+            Err(error) => {
+                tracing::trace!(target: "proxy_pingora::worker::notifier", hook, reason = %error, "native metadata decision detail");
+                "error"
+            }
         };
         tracing::trace!(target: "proxy_pingora::worker::notifier", hook, outcome, "native metadata decision");
         result

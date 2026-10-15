@@ -51,9 +51,14 @@ impl MessageCallback {
     ) -> Result<super::message_action::Reply> {
         let grant = Arc::clone(&self.grant);
         self.instance
-            .call_with_reply(method, input, self.timeout, reservation, move |reply| {
-                super::message_action::decode(reply, &grant, response, max_bytes)
-            })
+            .start_call_with_reply(
+                &tokio::runtime::Handle::current(),
+                method.to_owned(),
+                input,
+                self.timeout,
+                reservation,
+                move |reply| super::message_action::decode(reply, &grant, response, max_bytes),
+            )
             .await
             .map_err(|_| refusal(502, "message callback failed"))?
     }
@@ -67,7 +72,14 @@ impl MessageCallback {
         reservation: Option<Arc<admission_gate::budget::Reservation>>,
     ) -> Result<()> {
         self.instance
-            .call_with_reply(method, input, self.timeout, reservation, |_| ())
+            .start_call_with_reply(
+                &tokio::runtime::Handle::current(),
+                method.to_owned(),
+                input,
+                self.timeout,
+                reservation,
+                |_| (),
+            )
             .await
             .map_err(|_| refusal(502, "session cleanup callback failed"))
     }
@@ -293,8 +305,9 @@ pub(super) async fn filter_owned(
                 let started = Instant::now();
                 let decision = callback
                     .instance
-                    .call_with_reply(
-                        &method,
+                    .start_call_with_reply(
+                        &tokio::runtime::Handle::current(),
+                        method.clone(),
                         message.payload.clone(),
                         callback.timeout,
                         reservation.clone(),
