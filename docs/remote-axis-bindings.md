@@ -2,7 +2,11 @@
 
 Entry routes requests to one or more axes. It has no shared/dedicated mounting
 mode. A facility owns the listener, transport multiplexing and subscriptions.
-Assembly selects facilities and registers entry handlers with them.
+Assembly selects facilities and registers entry handlers with them. This is a
+composition responsibility, not exclusive permission to access the OS. Assembly
+and effect-tool strata may perform direct OS operations under their role
+constraints. Here the socket primitive wrapper and execution runtime-support
+provide those mechanisms; entry remains a route boundary.
 
 The source dependency direction is:
 
