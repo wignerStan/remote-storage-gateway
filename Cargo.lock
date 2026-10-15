@@ -2704,6 +2704,7 @@ dependencies = [
  "action-execution",
  "action-router",
  "bytes",
+ "file-access",
  "libc",
  "plugin-abi",
  "plugin-schema",

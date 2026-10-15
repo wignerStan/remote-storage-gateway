@@ -3,9 +3,32 @@
 Entry decodes requests and routes them to one or more axes. A facility owns the
 listener, transport multiplexing and subscriptions. Assembly uses the socket
 primitive to create and bind a socket, gives the listener to the facility, and
-registers entry handlers. Assembly and effect-tool code can access the OS under
-their role constraints. Entry does not create the listener or allocate shared
-memory.
+registers entry handlers. The socket primitive owns the OS mechanism. Assembly
+selects that primitive and installs the resulting capability. Assembly may also
+acquire OS resources directly during composition and transfer custody. A handler
+adapter may use OS APIs directly; when an existing primitive supplies the needed
+semantics, it should reuse that primitive. Runtime support and utilities do not
+gain system authority merely from their callers. Entry does not create the
+listener or allocate shared memory.
+
+The worker source separates these responsibilities as follows:
+
+| Source | Observed responsibility | System interaction boundary |
+| --- | --- | --- |
+| `main.rs` | Read process arguments, report startup results, select configuration | Process arguments and terminal output at process entry; file acquisition delegates to `configuration::load_typed` |
+| `assembly.rs` and `assembly/control.rs` | Select logging, native runtimes, socket primitives and listener facilities | Infra owners acquire files, native libraries and sockets; assembly installs their teardown with each resource |
+| `process.rs` | Serve through the installed worker and request runtime shutdown | Uses the installed worker and lifecycle owner; it does not bind or dial sockets |
+| `observability.rs` | Expose counter snapshots and bounded subscriptions | Uses logging/operation capabilities; Tokio task, timer and cancellation operations do not establish a socket or filesystem mechanism |
+| `proxy/carrier.rs` | Apply request policy and drive an admitted Pingora session | `HttpEgress` owns outbound acquisition; Pingora owns session I/O. Calling these capabilities does not transfer their mechanism ownership |
+| `remote_axis.rs` | Select grants and coordinate remote registration and shutdown | `RemoteBindings` owns outbound control exchanges; `event_stamp::SystemSource` owns ambient identity acquisition |
+
+This boundary does not make atomics, in-memory queues or pure protocol parsing
+OS primitives. It also does not prove that an imported capability owner has the
+correct internal boundary. The local-control client reuses `network_sockets`
+for dialing and native socket halves because that primitive already provides
+the required timeout and half-close behavior. The client retains ttrpc framing
+and connection-generation coordination; worker-private grant checks stay in
+the worker.
 
 ## Current source boundaries and remaining debt
 
