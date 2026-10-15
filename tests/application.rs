@@ -261,13 +261,33 @@ async fn executable_callback_roundtrip(language: &str, configured_kind: Option<&
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    let mut management = timeout(
-        WAIT,
-        ActionsClient::connect(format!("http://{management_address}")),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    // Pingora's data listener can be reachable before the independently
+    // assembled management listener. Wait for this listener's own readiness.
+    let mut management = loop {
+        if let Some(status) = process.child.try_wait().unwrap() {
+            panic!(
+                "worker exited before management became ready {status}: {}",
+                process.errors()
+            );
+        }
+        let connected = timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            ActionsClient::connect(format!("http://{management_address}")),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("management connect timed out: {}", process.errors()));
+        match connected {
+            Ok(client) => break client,
+            Err(error) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "management did not start: {error}; {}",
+                    process.errors()
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    };
     let snapshot = timeout(
         WAIT,
         management.call(CallRequest {
