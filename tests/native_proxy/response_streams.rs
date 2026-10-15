@@ -40,7 +40,7 @@ fn artifact(
     path
 }
 fn config(origin: SocketAddr, artifact: &Path, codec: &str, grant: bool) -> serde_json::Value {
-    json!({"upstream":format!("http://{origin}"),"callbacks":[{"path":artifact,"package":"worker.metadata.test","message_codec":codec,"message_responses":grant}]})
+    json!({"upstream":format!("http://{origin}"),"callbacks":[{"binding":"direct", "path":artifact,"package":"worker.metadata.test","message_codec":codec,"message_responses":grant}]})
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

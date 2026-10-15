@@ -46,7 +46,7 @@ impl Fixture {
                 .success()
         );
         let config: NativeCallback = serde_json::from_value(json!({
-            "path":artifact, "package":"worker.metadata.test", "hooks":hooks,
+            "binding":"direct", "path":artifact, "package":"worker.metadata.test", "hooks":hooks,
             "headers":headers, "patch_headers":patch_headers, "timeout_ms":2000, "max_inflight":1,
         }))
         .unwrap();
@@ -433,7 +433,7 @@ async fn callback_input_size_and_textual_header_checks_fail_before_native_entry(
 #[test]
 fn configuration_rejects_invalid_hooks_header_names_bounds_and_body_capture_settings() {
     let base = json!({"upstream":"http://origin.example", "callbacks":[{
-        "path":"/trusted/metadata.so", "package":"worker.metadata.test", "hooks":["routing"]
+        "binding":"direct", "path":"/trusted/metadata.so", "package":"worker.metadata.test", "hooks":["routing"]
     }]});
     let valid: crate::config::Config = serde_json::from_value(base.clone()).unwrap();
     valid.validate().unwrap();

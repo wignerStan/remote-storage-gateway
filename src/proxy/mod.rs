@@ -28,9 +28,7 @@ use proxy_pingora::{
     http_ingress::ProxyLifecycle,
     worker::{
         CarrierExchange, HttpLifecycle, NotifierChain, WorkerControl,
-        surface::{
-            Callbacks, Contract, Exposure, PoolDecision, PoolPhase, Rejection,
-        },
+        surface::{Callbacks, Contract, Exposure, PoolDecision, PoolPhase, Rejection},
     },
 };
 use std::{
@@ -159,12 +157,24 @@ pub struct NativeProxy {
     control: Arc<WorkerControl>,
     operations: Arc<Operations>,
     runtime: Option<Runtime>,
+    remote_bindings: Arc<crate::remote_axis::RemoteAxisBindings>,
     body_dump_limit: usize,
     capture_budget: Arc<admission_gate::budget::ResourceBudget>,
     message_codecs: Arc<[message_codec::CodecRegistration]>,
     inspection: Arc<inspection::InspectionBudget>,
 }
 impl NativeProxy {
+    /// Stable axis manager for host-controlled client replacement.
+    pub fn remote_bindings(&self) -> &Arc<crate::remote_axis::RemoteAxisBindings> {
+        &self.remote_bindings
+    }
+    pub(crate) fn with_remote_bindings(
+        mut self,
+        bindings: Arc<crate::remote_axis::RemoteAxisBindings>,
+    ) -> Self {
+        self.remote_bindings = bindings;
+        self
+    }
     /// Grant a trusted native Pingora implementation its async request-body hook
     /// after an admitted protocol upgrade. All other handler hooks stay inactive;
     /// this worker continues to own routing, admission and metadata boundaries.
@@ -206,6 +216,7 @@ impl NativeProxy {
             control,
             operations: Arc::new(Operations::default()),
             runtime: None,
+            remote_bindings: Arc::default(),
             body_dump_limit: 0,
             capture_budget: diagnostic_output::runtime::default_capture_budget(),
             message_codecs: Arc::from([]),

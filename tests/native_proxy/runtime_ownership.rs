@@ -23,7 +23,7 @@ async fn notifier_initialization_and_dispatch_share_the_worker_process() {
     );
     let origin = origin(Arc::new(AtomicUsize::new(0))).await;
     for scheduling in [None, Some("inline")] {
-        let mut callback = json!({"path":library,"package":"worker.metadata.test","hooks":["pre_routing"],
+        let mut callback = json!({"binding":"direct", "path":library,"package":"worker.metadata.test","hooks":["pre_routing"],
         "config":{"version":1,"decision":"continue"}});
         if let Some(scheduling) = scheduling {
             callback["scheduling"] = json!(scheduling);

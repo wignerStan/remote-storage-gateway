@@ -40,6 +40,9 @@ pub struct Config {
     pub logging: Logging,
     #[serde(default)]
     pub callbacks: Vec<NativeCallback>,
+    /// One shared remote transport owner per host axis.
+    #[serde(default)]
+    pub axis_bindings: std::collections::BTreeMap<String, crate::remote_axis::AxisBinding>,
     #[serde(default)]
     pub inspection: Inspection,
     #[serde(default)]
@@ -169,11 +172,20 @@ impl Default for Inspection {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeCallback {
+    /// RPC is the default. Direct execution requires an explicit selection.
+    #[serde(default)]
+    pub binding: CallbackBinding,
+    #[serde(default)]
+    pub axis: Option<String>,
+    /// Host-assigned participant identity within the axis.
+    #[serde(default)]
+    pub registration: Option<String>,
     #[serde(default)]
     pub backend: CallbackBackend,
     /// Sandbox bounds apply only to the explicitly selected Wasm backend.
     #[serde(default)]
     pub wasm_limits: Option<WasmLimits>,
+    #[serde(default)]
     pub path: PathBuf,
     pub package: String,
     #[serde(default = "variant")]
@@ -228,7 +240,7 @@ pub struct NativeCallback {
     #[serde(default = "callback_instances")]
     pub instances: usize,
     #[serde(default)]
-    pub execution: CallbackExecution,
+    pub execution: Option<CallbackExecution>,
     /// Dispatch blocking callbacks to bounded native workers; inline is a trusted
     /// declaration that calls finish promptly without blocking the caller.
     #[serde(default)]
@@ -275,13 +287,7 @@ impl CallbackGraph {
             .instances
             .iter()
             .map(|node| {
-                let (language, unload) = match node.language {
-                    Language::Rust => (
-                        plugin_abi::Language::Rust,
-                        plugin_abi::UnloadPolicy::Explicit,
-                    ),
-                    Language::Go => (plugin_abi::Language::Go, plugin_abi::UnloadPolicy::Retain),
-                };
+                let (language, unload) = node.language.native()?;
                 Ok(plugin_loading::RuntimeInstance {
                     id: node.id.clone(),
                     path: node.path.clone(),
@@ -315,6 +321,17 @@ impl CallbackGraph {
         plugin_loading::RuntimeGraph::new(instances)
     }
 }
+/// Binding selection is independent of the native artifact backend.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallbackBinding {
+    #[default]
+    Remote,
+    Direct,
+    /// Use only a native bridge implemented and tested by this worker.
+    Auto,
+}
+
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallbackBackend {
@@ -384,6 +401,23 @@ pub enum Language {
     #[default]
     Rust,
     Go,
+    Python,
+    #[serde(rename = "javascript")]
+    JavaScript,
+}
+impl Language {
+    pub(crate) fn native(self) -> Result<(plugin_abi::Language, plugin_abi::UnloadPolicy), String> {
+        match self {
+            Self::Rust => Ok((
+                plugin_abi::Language::Rust,
+                plugin_abi::UnloadPolicy::Explicit,
+            )),
+            Self::Go => Ok((plugin_abi::Language::Go, plugin_abi::UnloadPolicy::Retain)),
+            Self::Python | Self::JavaScript => {
+                Err("this language has no worker native bridge; select remote binding".into())
+            }
+        }
+    }
 }
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -392,6 +426,13 @@ pub enum CallbackKind {
     Object,
 }
 impl NativeCallback {
+    pub fn resolved_binding(&self) -> CallbackBinding {
+        match self.binding {
+            CallbackBinding::Auto if self.language.native().is_ok() => CallbackBinding::Direct,
+            CallbackBinding::Auto => CallbackBinding::Remote,
+            selected => selected,
+        }
+    }
     pub fn plugin_kind(&self) -> plugin_abi::PluginType {
         match self.kind {
             Some(CallbackKind::Function) => plugin_abi::PluginType::Function,
@@ -414,10 +455,10 @@ fn connect_timeout() -> u64 {
 fn io_timeout() -> u64 {
     60_000
 }
-fn callback_timeout() -> u64 {
+pub(crate) fn callback_timeout() -> u64 {
     5_000
 }
-fn callback_capacity() -> usize {
+pub(crate) fn callback_capacity() -> usize {
     32
 }
 fn callback_instances() -> usize {
@@ -462,8 +503,25 @@ impl Config {
         if self.callbacks.len() > 64 {
             return Err("at most 64 callbacks may be installed".into());
         }
+        crate::remote_axis::validate(&self.axis_bindings)?;
+        let mut remote_registrations = std::collections::BTreeSet::new();
         let mut action_bindings = std::collections::BTreeSet::new();
         for callback in &self.callbacks {
+            if callback.resolved_binding() == CallbackBinding::Remote {
+                crate::remote_axis::validate_callback(callback, &self.axis_bindings)?;
+                if !remote_registrations
+                    .insert((callback.axis.as_ref(), callback.registration.as_ref()))
+                {
+                    return Err("remote registration must be unique within its axis".into());
+                }
+            } else {
+                callback.language.native()?;
+                if callback.axis.is_some() || callback.registration.is_some() {
+                    return Err(
+                        "direct callbacks cannot select a remote axis or registration".into(),
+                    );
+                }
+            }
             if callback.message_actions && callback.message_codec.is_none() {
                 return Err("message actions require an explicit codec grant".into());
             }
@@ -488,11 +546,7 @@ impl Config {
                     || selected.path != callback.path
                     || selected.expected.package != callback.package
                     || selected.expected.variant != callback.variant
-                    || selected.expected.language
-                        != match callback.language {
-                            Language::Rust => plugin_abi::Language::Rust,
-                            Language::Go => plugin_abi::Language::Go,
-                        }
+                    || selected.expected.language != callback.language.native()?.0
                     || selected.config
                         != text_processing::json::to_vec_bounded(
                             &callback.config,
@@ -561,7 +615,8 @@ impl Config {
             {
                 return Err("invalid message codec identifier".into());
             }
-            if callback.path.as_os_str().is_empty()
+            if (callback.resolved_binding() == CallbackBinding::Direct
+                && callback.path.as_os_str().is_empty())
                 || callback.path.as_os_str().len() > 4096
                 || callback.package.is_empty()
                 || callback.package.len() > 256
@@ -724,6 +779,86 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn remote_is_default_and_direct_or_language_auto_are_explicit() {
+        let mut callback = json!({"package":"policy", "axis":"request_policy", "registration":"policy", "hooks":["routing"]});
+        let remote = |callback: serde_json::Value| -> Config {
+            serde_json::from_value(json!({"upstream":"http://127.0.0.1:9", "axis_bindings":{"request_policy":{"endpoint":"127.0.0.1:9001"}}, "callbacks":[callback]})).unwrap()
+        };
+        let config = remote(callback.clone());
+        config.validate().unwrap();
+        assert_eq!(
+            config.callbacks[0].resolved_binding(),
+            CallbackBinding::Remote
+        );
+        callback["binding"] = json!("auto");
+        for language in ["python", "javascript"] {
+            callback["language"] = json!(language);
+            let config = remote(callback.clone());
+            config.validate().unwrap();
+            assert_eq!(
+                config.callbacks[0].resolved_binding(),
+                CallbackBinding::Remote
+            );
+        }
+        for language in ["rust", "go"] {
+            let mut direct = selected_callback();
+            direct["binding"] = json!("auto");
+            direct["language"] = json!(language);
+            let config = configured(direct);
+            config.validate().unwrap();
+            assert_eq!(
+                config.callbacks[0].resolved_binding(),
+                CallbackBinding::Direct
+            );
+        }
+        let mut legacy = selected_callback();
+        legacy.as_object_mut().unwrap().remove("binding");
+        assert!(
+            configured(legacy)
+                .validate()
+                .unwrap_err()
+                .contains("requires an axis")
+        );
+    }
+
+    #[test]
+    fn remote_metadata_rejects_bulk_grants_duplicate_registrations_and_local_artifacts() {
+        let input = json!({"upstream":"http://127.0.0.1:9", "axis_bindings":{"request_policy":{"endpoint":"127.0.0.1:9001"}},
+            "callbacks":[{"package":"policy", "axis":"request_policy", "registration":"policy", "hooks":["routing"]}]});
+        for (field, value) in [
+            ("message_codec", json!("websocket.v1")),
+            ("path", json!("policy.so")),
+            (
+                "graph",
+                json!({"callback_instance":"policy","instances":[]}),
+            ),
+            ("execution", json!("in_process")),
+            ("max_inflight", json!(1)),
+            ("scheduling", json!("inline")),
+            ("registration", json!("../escape")),
+            ("axis", json!("unknown")),
+        ] {
+            let mut invalid = input.clone();
+            invalid["callbacks"][0][field] = value;
+            let config: Config = serde_json::from_value(invalid).unwrap();
+            assert!(config.validate().is_err(), "{field} was accepted");
+        }
+        let mut duplicate = input;
+        let callback = duplicate["callbacks"][0].clone();
+        duplicate["callbacks"]
+            .as_array_mut()
+            .unwrap()
+            .push(callback);
+        assert!(
+            serde_json::from_value::<Config>(duplicate)
+                .unwrap()
+                .validate()
+                .unwrap_err()
+                .contains("unique")
+        );
+    }
+
+    #[test]
     fn native_callbacks_default_to_object_independent_of_language() {
         for (language, kind, expected) in [
             (None, None, plugin_abi::PluginType::Object),
@@ -736,8 +871,7 @@ mod tests {
                 plugin_abi::PluginType::Function,
             ),
         ] {
-            let mut input =
-                json!({"path":"callback.so","package":"trusted.metadata","hooks":["pre_routing"]});
+            let mut input = json!({"binding":"direct", "path":"callback.so","package":"trusted.metadata","hooks":["pre_routing"]});
             if let Some(language) = language {
                 input["language"] = json!(language);
             }
@@ -835,16 +969,16 @@ mod tests {
 
     #[test]
     fn message_access_requires_an_explicit_codec_grant() {
-        let input = json!({"path":"callback.so", "package":"trusted.metadata", "hooks":[], "message_codec":"websocket.v1"});
+        let input = json!({"binding":"direct", "path":"callback.so", "package":"trusted.metadata", "hooks":[], "message_codec":"websocket.v1"});
         let callback: NativeCallback = serde_json::from_value(input).unwrap();
         assert_eq!(callback.message_codec.as_deref(), Some("websocket.v1"));
-        let input = json!({"path":"callback.so", "package":"trusted.metadata", "hooks":[], "message_codec":true});
+        let input = json!({"binding":"direct", "path":"callback.so", "package":"trusted.metadata", "hooks":[], "message_codec":true});
         assert!(serde_json::from_value::<NativeCallback>(input).is_err());
     }
 
     #[test]
     fn tool_plugins_are_not_worker_metadata_callbacks() {
-        let input = json!({"path":"callback.so","package":"trusted.metadata", "kind":"tool", "hooks":["pre_routing"]});
+        let input = json!({"binding":"direct", "path":"callback.so","package":"trusted.metadata", "kind":"tool", "hooks":["pre_routing"]});
         assert!(serde_json::from_value::<NativeCallback>(input).is_err());
     }
 
@@ -853,10 +987,10 @@ mod tests {
             .unwrap()
     }
     fn selected_callback() -> serde_json::Value {
-        json!({"path":"callback.so", "package":"trusted.metadata", "hooks":["pre_routing"]})
+        json!({"binding":"direct", "path":"callback.so", "package":"trusted.metadata", "hooks":["pre_routing"]})
     }
     fn action_callback() -> serde_json::Value {
-        json!({"path":"carrier.so", "package":"trusted.carrier", "actions":[{
+        json!({"binding":"direct", "path":"carrier.so", "package":"trusted.carrier", "actions":[{
             "method":"peer.open",
             "contract":{"id":"carrier.peer.open", "version":1, "response":"unary",
                 "input":{"type":"json"}, "output":{"type":"json"}, "max_input":1024,"max_output":1024},
@@ -888,7 +1022,7 @@ mod tests {
         let config = configured(selected_callback());
         config.validate().unwrap();
         let callback = &config.callbacks[0];
-        assert!(matches!(callback.execution, CallbackExecution::InProcess));
+        assert!(callback.execution.is_none());
         assert_eq!(callback.scheduling, CallbackScheduling::Blocking);
         assert_eq!(callback.instances, 1);
         assert_eq!(callback.max_inflight, 32);
@@ -905,7 +1039,7 @@ mod tests {
         config.validate().unwrap();
         assert!(matches!(
             config.callbacks[0].execution,
-            CallbackExecution::InProcess
+            Some(CallbackExecution::InProcess)
         ));
     }
 
@@ -1009,7 +1143,7 @@ mod tests {
         assert!(configured(callback.clone()).validate().is_err());
         callback["message_codec"] = json!("websocket.v1");
         configured(callback).validate().unwrap();
-        let mut callback = json!({"path":"codec.so", "package":"trusted.codec", "message_codec":"custom.chat.v1",
+        let mut callback = json!({"binding":"direct", "path":"codec.so", "package":"trusted.codec", "message_codec":"custom.chat.v1",
             "codec_descriptor":{"id":"custom.chat.v1", "routes":[{"method":"POST","path":"/custom/chat","carrier":"http_json"}], "response_json":true}});
         assert!(configured(callback.clone()).validate().is_err());
         callback["message_responses"] = json!(true);
@@ -1048,7 +1182,7 @@ mod tests {
     }
     #[test]
     fn runtime_graph_checks_selected_object_bindings_cycles_and_bounds() {
-        let callback = json!({"path":"agent.so", "package":"agent", "hooks":["pre_ingress"], "graph": {
+        let callback = json!({"binding":"direct", "path":"agent.so", "package":"agent", "hooks":["pre_ingress"], "graph": {
             "callback_instance":"agent", "instances":[
                 {"id":"agent", "path":"agent.so", "package":"agent", "kind":"object", "provides":["invoke"], "requires":[{"instance":"store", "capability":"read"}]},
                 {"id":"store", "path":"store.so", "package":"store", "kind":"tool", "provides":["read"]}

@@ -37,7 +37,7 @@ async fn assembled_wasm_object_patches_only_explicitly_granted_headers() {
         let config = serde_json::from_value(json!({
             "upstream":format!("http://{}", origin.address),
             "callbacks":[{
-                "backend":"wasm", "path":artifact,
+                "backend":"wasm", "binding":"direct", "path":artifact,
                 "package":"worker.wasm.metadata.test", "variant":"wasm",
                 "language":"go", "hooks":["pre_routing"],
                 "patch_headers":grants,

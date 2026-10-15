@@ -49,9 +49,11 @@ upstream, bridge and credentials; those keys are never logged. Admitted requests
 are attempted once, with no automatic replay.
 
 SIGTERM/SIGINT stop native workers and pools before plugin teardown. Management
-routes are optional and loopback-only. Notifier callbacks execute in the worker
-process through the plugin runtime. Native owners remain pinned through
-cancellation until the synchronous operation actually returns.
+routes are optional and loopback-only. Configured callbacks default to RPC through
+a shared axis client manager. Explicit direct bindings execute in the worker.
+Native owners remain pinned until synchronous calls return. See
+[remote axis bindings](docs/remote-axis-bindings.md) for configuration, replacement,
+contract limits and migration.
 
 ## Graceful version updates with listener handoff
 
@@ -164,11 +166,12 @@ native server setting for scheduling downstream probes.
 
 ## Optional Wasm Object callbacks
 
-Native `.so` loading remains the default. Build with `cargo build --features wasm`
-to enable sandboxed Wasm Objects, then explicitly select `"backend": "wasm"`:
+Build with `cargo build --features wasm` to enable sandboxed Wasm Objects.
+Select `"binding": "direct"` and `"backend": "wasm"`:
 
 ```json
 {
+  "binding": "direct",
   "backend": "wasm",
   "path": "plugins/policy.wasm",
   "package": "example.policy",
@@ -214,10 +217,11 @@ for the required exports and ownership rules.
 
 ## Native metadata callbacks
 
-Each `callbacks` entry explicitly selects a trusted native Function or Object library:
+A `callbacks` entry with `"binding": "direct"` selects a trusted native library:
 
 ```json
 {
+  "binding": "direct",
   "path": "plugins/policy.so",
   "package": "example.policy",
   "variant": "native",
@@ -265,14 +269,12 @@ inline scheduling uses that action's calling execution thread. This does not pin
 an instance to one OS thread across calls; thread-affine VM adapters must own
 their scheduling separately.
 
-`execution` defaults to `"in_process"`, the only supported notifier mode. Remove
-legacy `native_helper` settings and replace `"execution": "isolated"` with
-`"in_process"`; both process-splitting settings are rejected. Worker assembly
-does not spawn callback helpers or marshal notifier messages through IPC. Input
-owners move into blocking runtime jobs without copying their bytes, and reply visitors
-consume the original native allocation before release. Infra's separate process
-adapter remains available to applications that explicitly own a process boundary;
-it is not part of this worker's notifier chain.
+Direct callbacks may retain the legacy `"execution": "in_process"` declaration.
+Remote callbacks reject that declaration. Select `binding` to choose a transport;
+`native_helper` and `execution: "isolated"` remain unsupported. The worker does not
+spawn per-callback helpers. Direct input owners move into blocking runtime jobs
+without copying their bytes, and reply visitors consume the native allocation
+before release. Remote metadata uses the shared axis manager described above.
 
 Both kinds must implement the configured hook methods and the metadata/reply
 contract below. A native Object may additionally select `graph` with an explicit

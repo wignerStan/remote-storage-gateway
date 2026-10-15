@@ -49,7 +49,7 @@ fn artifact_for_codec(dir: &Path, mode: u8, codec: &str) -> PathBuf {
 fn config(upstream: SocketAddr, path: PathBuf) -> pingora_worker::config::Config {
     serde_json::from_value(json!({
         "upstream":format!("http://{upstream}"),
-        "callbacks":[{"path":path,"package":"worker.sessions.test", "message_codec":"openai.responses.v1",
+        "callbacks":[{"binding":"direct", "path":path,"package":"worker.sessions.test", "message_codec":"openai.responses.v1",
             "message_actions":true,"patch_headers":["cookie","x-request-id"]}]
     })).unwrap()
 }
@@ -270,8 +270,8 @@ async fn cleanup_case(mode: u8, exhaust_body_budget: bool) {
             "upstream":format!("http://{}", origin.address),
             "inspection":{"max_message_bytes":max_message_bytes, "max_buffered_bytes":one_reservation},
             "callbacks":[
-                {"path":first,"package":"worker.sessions.test","message_codec":"openai.responses.v1","message_actions":true},
-                {"path":observer,"package":"worker.sessions.test","message_codec":"openai.responses.v1","message_actions":true}
+                {"binding":"direct", "path":first,"package":"worker.sessions.test","message_codec":"openai.responses.v1","message_actions":true},
+                {"binding":"direct", "path":observer,"package":"worker.sessions.test","message_codec":"openai.responses.v1","message_actions":true}
             ]
         })).unwrap();
         let proxy = pingora_worker::assembly::assemble(config).await.unwrap();
@@ -588,8 +588,8 @@ async fn callback_chain_uses_one_message_deadline_before_any_upstream_dial() {
         let mut cfg: pingora_worker::config::Config = serde_json::from_value(json!({
             "upstream":format!("http://{}", origin.address),
             "callbacks":[
-                {"path":session_budget_artifact(first.path(), false),"package":"worker.sessions.test", "message_codec":"openai.responses.v1", "message_actions":true,"patch_headers":["cookie","x-request-id"]},
-                {"path":session_budget_artifact(second.path(), false),"package":"worker.sessions.test", "message_codec":"openai.responses.v1", "message_actions":true,"patch_headers":["cookie","x-request-id"]}
+                {"binding":"direct", "path":session_budget_artifact(first.path(), false),"package":"worker.sessions.test", "message_codec":"openai.responses.v1", "message_actions":true,"patch_headers":["cookie","x-request-id"]},
+                {"binding":"direct", "path":session_budget_artifact(second.path(), false),"package":"worker.sessions.test", "message_codec":"openai.responses.v1", "message_actions":true,"patch_headers":["cookie","x-request-id"]}
             ]
         })).unwrap();
         cfg.inspection.message_timeout_ms = 200;

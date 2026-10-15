@@ -9,4 +9,5 @@ mod native_notifier;
 mod observability;
 mod process;
 pub mod proxy;
+pub mod remote_axis;
 pub use process::Process;

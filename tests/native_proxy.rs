@@ -88,6 +88,9 @@ mod pipeline;
 #[path = "native_proxy/realtime_codecs.rs"]
 mod realtime_codecs;
 #[cfg(unix)]
+#[path = "native_proxy/remote_axis.rs"]
+mod remote_axis;
+#[cfg(unix)]
 #[path = "native_proxy/response_streams.rs"]
 mod response_streams;
 #[cfg(unix)]

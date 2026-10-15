@@ -20,7 +20,7 @@ async fn callback_receives_socket_peer_despite_spoofed_forwarding_headers() {
             .arg("-o").arg(&artifact).status().unwrap().success());
         let config = serde_json::from_value(json!({
             "upstream": format!("http://{}", origin.address),
-            "callbacks": [{"path": artifact, "package": "worker.metadata.test",
+            "callbacks": [{"binding":"direct", "path": artifact, "package": "worker.metadata.test",
                 "hooks": ["before_upstream_send"], "headers": ["forwarded", "x-forwarded-for"],
                 "config": {"version": 1, "decision": "continue"}}]
         })).unwrap();
