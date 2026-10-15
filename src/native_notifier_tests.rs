@@ -46,7 +46,7 @@ impl Fixture {
                 .success()
         );
         let config: NativeCallback = serde_json::from_value(json!({
-            "path":artifact, "package":"worker.metadata.test", "hooks":hooks,
+            "binding":"direct", "path":artifact, "package":"worker.metadata.test", "hooks":hooks,
             "headers":headers, "patch_headers":patch_headers, "timeout_ms":2000, "max_inflight":1,
         }))
         .unwrap();
@@ -433,7 +433,7 @@ async fn callback_input_size_and_textual_header_checks_fail_before_native_entry(
 #[test]
 fn configuration_rejects_invalid_hooks_header_names_bounds_and_body_capture_settings() {
     let base = json!({"upstream":"http://origin.example", "callbacks":[{
-        "path":"/trusted/metadata.so", "package":"worker.metadata.test", "hooks":["routing"]
+        "binding":"direct", "path":"/trusted/metadata.so", "package":"worker.metadata.test", "hooks":["routing"]
     }]});
     let valid: crate::config::Config = serde_json::from_value(base.clone()).unwrap();
     valid.validate().unwrap();
@@ -647,7 +647,7 @@ async fn native_network_controls_reject_patches_errors_and_oversized_or_secret_t
 
 #[tokio::test]
 async fn native_network_chain_defers_stops_at_first_decision_and_propagates_failure() {
-    use proxy_pingora::worker::surface::{Exposure, NotifierChain};
+    use proxy_pingora::worker::{NotifierChain, surface::Exposure};
     let first = Fixture::new(CONTINUE, &["before_dial", "pool", "socket"], &[]).await;
     let second = Fixture::new(
         r#"{"version":1,"decision":"deny"}"#,

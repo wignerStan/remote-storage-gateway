@@ -40,6 +40,7 @@ retirement, so a plugin cannot report a new handshake that was never sent.
 
 ```json
 {
+  "binding": "direct",
   "path": "plugins/policy.so",
   "package": "example.policy",
   "kind": "object",

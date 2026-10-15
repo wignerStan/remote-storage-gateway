@@ -387,7 +387,7 @@ async fn invalid_replacement_plugin_fails_before_handoff_and_old_keeps_serving()
         &socket,
     );
     let mut value: Value = serde_json::from_slice(&fs::read(&invalid_config).unwrap()).unwrap();
-    value["callbacks"] = json!([{"path":directory.path().join("missing.so"),"package":"trusted.metadata","hooks":["pre_routing"]}]);
+    value["callbacks"] = json!([{"binding":"direct", "path":directory.path().join("missing.so"),"package":"trusted.metadata","hooks":["pre_routing"]}]);
     fs::write(&invalid_config, value.to_string()).unwrap();
     drop(reservation);
     let mut old = Process::spawn(directory.path(), "old", &old_config, false);
@@ -458,7 +458,7 @@ impl NativeCall {
         let mut value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         value["shutdown_seconds"] = json!(1);
         value["callbacks"] = json!([{
-            "path":self.library,"package":"worker.handoff.test","kind":"function",
+            "binding":"direct", "path":self.library,"package":"worker.handoff.test","kind":"function",
             "hooks":["pre_routing"],"timeout_ms":timeout_ms,"shutdown_timeout_ms":200,
             "max_inflight":4,"config":{"version":1,"decision":"continue"}
         }]);

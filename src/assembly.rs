@@ -1,19 +1,27 @@
 //! Process assembly selects and installs infra owners before opening the data path.
 use crate::{
-    config::{CallbackBackend, Config, Language},
+    config::{CallbackBackend, CallbackBinding, Config},
     native_notifier::{FRAME_LIMIT, NativeNotifier},
     proxy::{NativeProxy, ProxyContract},
 };
-use plugin_abi::{Expected, Limits, UnloadPolicy};
+use plugin_abi::{Expected, Limits};
 use plugin_lifecycle::{Composition, Resource, ResourceSchema, Reversal};
 use plugin_loading::{Callback, CallbackOptions};
 use proxy_pingora::worker::{WorkerControl, surface::Callbacks};
 use std::sync::Arc;
 
+const REMOTE_AXES: Resource = Resource {
+    id: "remote-axes",
+    provides: &["remote-axis-bindings"],
+    requires: &[],
+};
 const NOTIFIERS: Resource = Resource {
     id: "native-notifiers",
     provides: &["worker-notifiers"],
-    requires: &[],
+    requires: &[plugin_lifecycle::ResourceRequirement {
+        resource: "remote-axes",
+        capability: "remote-axis-bindings",
+    }],
 };
 const MANAGEMENT: Resource = Resource {
     id: "management-entry",
@@ -142,13 +150,30 @@ async fn assemble_selected(
     let control = Arc::new(WorkerControl::default());
     let operations = Arc::new(diagnostic_output::operations::Operations::default());
     let resources = if config.callbacks.iter().any(|c| !c.actions.is_empty()) {
-        vec![NOTIFIERS, MANAGEMENT, NATIVE_ACTIONS]
+        vec![REMOTE_AXES, NOTIFIERS, MANAGEMENT, NATIVE_ACTIONS]
     } else if config.management.is_some() {
-        vec![NOTIFIERS, MANAGEMENT]
+        vec![REMOTE_AXES, NOTIFIERS, MANAGEMENT]
     } else {
-        vec![NOTIFIERS]
+        vec![REMOTE_AXES, NOTIFIERS]
     };
     let mut composition = Composition::new(ResourceSchema::new(&resources)?);
+    let (remote_send, remote_receive) = tokio::sync::oneshot::channel();
+    composition
+        .install(REMOTE_AXES, async move {
+            let axes = Arc::new(
+                crate::remote_axis::RemoteAxisBindings::connect(config.axis_bindings).await?,
+            );
+            let closing = Arc::clone(&axes);
+            let _ = remote_send.send(Arc::clone(&axes));
+            let inverse: Reversal =
+                Box::new(move || Box::pin(async move { closing.close().await }));
+            Ok((axes, inverse))
+        })
+        .await?;
+    let remote_axes = remote_receive
+        .await
+        .map_err(|_| "remote axis setup cancelled")?;
+    let callback_axes = Arc::clone(&remote_axes);
     let callbacks = config
         .callbacks
         .into_iter()
@@ -168,14 +193,19 @@ async fn assemble_selected(
                 messages: Vec::new(),
             };
             for (callback, input) in callbacks {
-                let language = match callback.language {
-                    Language::Rust => plugin_abi::Language::Rust,
-                    Language::Go => plugin_abi::Language::Go,
-                };
-                let unload = match callback.language {
-                    Language::Rust => UnloadPolicy::Explicit,
-                    Language::Go => UnloadPolicy::Retain,
-                };
+                if callback.resolved_binding() == CallbackBinding::Remote {
+                    let client = callback_axes
+                        .client(callback.axis.as_deref().ok_or("remote axis is absent")?)?;
+                    match NativeNotifier::remote(client, &callback) {
+                        Ok(notifier) => native.callbacks.push(Arc::new(notifier)),
+                        Err(error) => {
+                            let _ = native.shutdown().await;
+                            return Err(error);
+                        }
+                    }
+                    continue;
+                }
+                let (language, unload) = callback.language.native()?;
                 let kind = callback.plugin_kind();
                 let expected =
                     Expected::v1(&callback.package, &callback.variant, kind, language, unload);
@@ -397,6 +427,7 @@ async fn assemble_selected(
         return Err(error);
     }
     Ok(proxy
+        .with_remote_bindings(remote_axes)
         .with_operations(operations)
         .with_inspection_limits(inspection)
         .with_message_callbacks(messages, codecs)

@@ -65,7 +65,7 @@ async fn api_routes_share_one_worker_and_only_inspect_complete_http_bodies() {
             socket.write_all(reply).await.unwrap();
         }}).await;
         let dir=tempfile::tempdir().unwrap();
-        let callbacks=ROUTES.iter().map(|(id,_)|json!({"path":artifact(dir.path(),id,"0"),"package":"worker.metadata.test","message_codec":id})).collect::<Vec<_>>();
+        let callbacks=ROUTES.iter().map(|(id,_)|json!({"binding":"direct", "path":artifact(dir.path(),id,"0"),"package":"worker.metadata.test","message_codec":id})).collect::<Vec<_>>();
         let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":callbacks})).unwrap()).await.unwrap();
         let worker=serve_engine(proxy.clone()).await;
         let mut previous_bytes=0;
@@ -97,7 +97,7 @@ async fn http_message_denial_forwards_no_body_bytes() {
             let mut byte=[0];if socket.read(&mut byte).await.unwrap_or(0)>0{observed.fetch_add(1,Ordering::SeqCst);}
         }}).await;
         let dir=tempfile::tempdir().unwrap();let id=ROUTES[0].0;
-        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"path":artifact(dir.path(),id,"1"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
+        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"binding":"direct", "path":artifact(dir.path(),id,"1"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
         let worker=serve_engine(proxy.clone()).await;let mut client=TcpStream::connect(worker.address).await.unwrap();
         client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: local\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",BODY.len()).as_bytes()).await.unwrap();client.write_all(BODY).await.unwrap();
         let mut response=Vec::new();let _=client.read_to_end(&mut response).await;
@@ -115,7 +115,7 @@ async fn early_upstream_success_cannot_bypass_http_message_inspection() {
                 socket.write_all(format!("HTTP/1.1 {status} Early\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
             }).await;
             let dir=tempfile::tempdir().unwrap();let id=ROUTES[0].0;
-            let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"path":artifact(dir.path(),id,"0"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
+            let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"binding":"direct", "path":artifact(dir.path(),id,"0"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
             let worker=serve_engine(proxy.clone()).await;let mut client=TcpStream::connect(worker.address).await.unwrap();
             client.write_all(b"POST /v1/chat/completions HTTP/1.1\r\nHost: local\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{").await.unwrap();
             let response=head(&mut client).await;
@@ -168,7 +168,7 @@ async fn responses_ws_selects_lite_per_message_and_keeps_upstream_delta_opaque()
             }
         }).await;
         let dir=tempfile::tempdir().unwrap();let id="openai.responses.v1";
-        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"path":artifact(dir.path(),id,"responses"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
+        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"binding":"direct", "path":artifact(dir.path(),id,"responses"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
         let worker=serve_engine(proxy.clone()).await;let mut client=TcpStream::connect(worker.address).await.unwrap();
         client.write_all(b"GET /v1/responses HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\r\n").await.unwrap();
         assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
@@ -280,7 +280,7 @@ async fn responses_error_document_is_written_and_the_socket_stays_open() {
         let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({
             "upstream": format!("http://{}", origin.address),
             "callbacks": [{
-                "path": responses_plugin(dir.path(), mode),
+                "binding":"direct", "path": responses_plugin(dir.path(), mode),
                 "package": "worker.metadata.test",
                 "message_codec": "codex.responses.v1"
             }]
@@ -337,7 +337,7 @@ async fn responses_non_error_reply_forwards_nothing() {
         let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({
             "upstream": format!("http://{}", origin.address),
             "callbacks": [{
-                "path": responses_plugin(dir.path(), "bad"),
+                "binding":"direct", "path": responses_plugin(dir.path(), "bad"),
                 "package": "worker.metadata.test",
                 "message_codec": "codex.responses.v1"
             }]
@@ -408,7 +408,7 @@ async fn responses_terminal_frame_can_replace_a_completion_without_gating_deltas
         let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({
             "upstream": format!("http://{}", origin.address),
             "callbacks": [{
-                "path": responses_plugin(dir.path(), "terminal"),
+                "binding":"direct", "path": responses_plugin(dir.path(), "terminal"),
                 "package": "worker.metadata.test",
                 "message_codec": "codex.responses.v1"
             }]
@@ -476,7 +476,7 @@ async fn codex_0162_interrupt_relays_during_response_and_preserves_interrupted_b
             let dir = tempfile::tempdir().unwrap();
             let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({
                 "upstream":format!("http://{}",origin.address),
-                "callbacks":[{"path":responses_plugin(dir.path(),"steering"),"package":"worker.metadata.test",
+                "callbacks":[{"binding":"direct", "path":responses_plugin(dir.path(),"steering"),"package":"worker.metadata.test",
                     "message_codec":"codex.responses.v1","message_actions":actions}]
             })).unwrap()).await.unwrap();
             let worker = serve_engine(proxy.clone()).await;

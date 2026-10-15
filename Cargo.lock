@@ -1381,6 +1381,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "grpc-channel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hyper-util",
+ "tokio",
+ "tonic",
+ "tower",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2003,6 +2014,7 @@ dependencies = [
  "async-stream",
  "axum",
  "bytes",
+ "grpc-channel",
  "http",
  "http-body",
  "http-body-util",

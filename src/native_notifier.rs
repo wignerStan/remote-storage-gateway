@@ -1,4 +1,5 @@
-//! Worker-owned metadata contract; native allocation and call lifetimes stay in infra.
+//! One worker metadata projection and validator for direct and remote bindings.
+//! Infra owns native allocations and remote connection generations.
 use crate::{
     config::NativeCallback,
     proxy::{ProxyContract, RequestFacts},
@@ -260,8 +261,16 @@ impl Reply {
     }
 }
 
+enum NotifierBinding {
+    Direct(Arc<Callback>),
+    Remote {
+        client: Arc<network_actions::client::RemoteBindings>,
+        registration: String,
+    },
+}
+
 pub struct NativeNotifier {
-    callback: Arc<Callback>,
+    callback: NotifierBinding,
     interests: u16,
     timeout: Duration,
     headers: Vec<http::header::HeaderName>,
@@ -269,6 +278,25 @@ pub struct NativeNotifier {
 }
 impl NativeNotifier {
     pub fn new(callback: Arc<Callback>, config: &NativeCallback) -> Result<Self, String> {
+        Self::with_binding(NotifierBinding::Direct(callback), config)
+    }
+    pub(crate) fn remote(
+        client: Arc<network_actions::client::RemoteBindings>,
+        config: &NativeCallback,
+    ) -> Result<Self, String> {
+        let registration = config
+            .registration
+            .clone()
+            .ok_or("remote registration is absent")?;
+        Self::with_binding(
+            NotifierBinding::Remote {
+                client,
+                registration,
+            },
+            config,
+        )
+    }
+    fn with_binding(callback: NotifierBinding, config: &NativeCallback) -> Result<Self, String> {
         validate_hooks(&config.hooks)?;
         let patch_headers = validate_patch_headers(&config.patch_headers)?.into();
         let interests = config.hooks.iter().fold(0, |bits, hook| {
@@ -351,15 +379,32 @@ impl NativeNotifier {
             .map_err(|_| "could not encode bounded notifier metadata")?;
 
         let patch_headers = Arc::clone(&self.patch_headers);
-        let result = self
-            .callback
-            .call_with_reply(hook, input, self.timeout, (), move |bytes| {
-                serde_json::from_slice::<Reply>(bytes)
+        let result = match &self.callback {
+            NotifierBinding::Direct(callback) => callback
+                .call_with_reply(hook, input, self.timeout, (), move |bytes| {
+                    serde_json::from_slice::<Reply>(bytes)
+                        .map_err(|_| "invalid notifier metadata reply".to_string())
+                        .and_then(|reply| reply.check(hook, &patch_headers))
+                })
+                .await
+                .map_err(|_| "native notifier call failed".to_string())?,
+            NotifierBinding::Remote {
+                client,
+                registration,
+            } => {
+                let bytes = client
+                    .call(
+                        crate::remote_axis::method(registration, hook),
+                        input,
+                        self.timeout,
+                    )
+                    .await
+                    .map_err(|error| format!("remote metadata call failed: {error}"))?;
+                serde_json::from_slice::<Reply>(&bytes)
                     .map_err(|_| "invalid notifier metadata reply".to_string())
                     .and_then(|reply| reply.check(hook, &patch_headers))
-            })
-            .await
-            .map_err(|_| "native notifier call failed".to_string())?;
+            }
+        };
         let outcome = match &result {
             Ok(reply) => match reply.decision {
                 Decision::Continue => "continue",

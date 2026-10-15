@@ -84,7 +84,7 @@ fn cli_help_and_check_validate_without_loading_plugins_or_opening_listeners() {
     fs::write(&config, json!({
         "upstream":"http://127.0.0.1:1", "listen":data.local_addr().unwrap(),
         "management":{"listen":management.local_addr().unwrap()},
-        "callbacks":[{"path":directory.path().join("missing.so"),"package":"trusted.metadata", "hooks":["pre_routing"]}],
+        "callbacks":[{"binding":"direct", "path":directory.path().join("missing.so"),"package":"trusted.metadata", "hooks":["pre_routing"]}],
         "logging":{"access_file":{"directory":access,"keep_files":30},
             "body_file":{"directory":body,"keep_files":2},"body_max_bytes":1024}
     }).to_string()).unwrap();
@@ -226,7 +226,7 @@ async fn executable_callback_roundtrip(language: &str, configured_kind: Option<&
     let body_dir = directory.path().join("body");
     let config = directory.path().join("config.json");
     let resolved_kind = configured_kind.unwrap_or("object");
-    let mut callback = json!({"path":callback_artifact_with_identity(directory.path(), resolved_kind, language),
+    let mut callback = json!({"binding":"direct", "path":callback_artifact_with_identity(directory.path(), resolved_kind, language),
         "package":"worker.metadata.test", "language":language,
         "hooks":["pre_routing"], "patch_headers":["x-native"], "config":{"version":1,"decision":"continue","set_headers":[["x-native","installed"]]}});
     if let Some(kind) = configured_kind {
@@ -382,7 +382,7 @@ fn executable_rejects_artifact_headers_with_the_wrong_callback_kind() {
         fs::write(&config, json!({
             "upstream":"http://127.0.0.1:1", "listen":listener.local_addr().unwrap(),
             "logging":{"filter":"off"},
-            "callbacks":[{"path":artifact, "package":"worker.metadata.test", "language":language,
+            "callbacks":[{"binding":"direct", "path":artifact, "package":"worker.metadata.test", "language":language,
                 "kind":"object", "hooks":["pre_routing"]}]
         }).to_string()).unwrap();
         drop(listener);
