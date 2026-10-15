@@ -4,7 +4,7 @@ use diagnostic_output::operations::Operations;
 use network_actions::proto::{CallRequest, actions_client::ActionsClient};
 use network_sockets::{LocalEndpoint, SocketPermissions};
 use pingora_worker::{
-    entry,
+    assembly::control as entry,
     proxy::{ProxyContract, RequestFacts},
 };
 use plugin_lifecycle::{Composition, Resource, ResourceSchema};
@@ -71,6 +71,7 @@ async fn stream_delivery_completion_and_reconnect_have_independent_observers() {
         let worker = serve_engine(native).await;
         let mut composition = Composition::new(ResourceSchema::new(&[ENTRY]).unwrap());
         let entry = entry::install(&mut composition, ENTRY, entry::Registration {
+            protocol: pingora_worker::config::ControlProtocol::Http,
             worker_control: Some(Arc::clone(&control)),
             logging_health: None,
             endpoint: LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),

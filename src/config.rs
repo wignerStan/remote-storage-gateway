@@ -47,9 +47,9 @@ pub struct Config {
     pub inspection: Inspection,
     #[serde(default)]
     pub management: Option<Management>,
-    /// Plugin controls on a dedicated listener or an explicit shared management mount.
+    /// Select the local control facility used to deliver plugin entry requests.
     #[serde(default)]
-    pub plugin_ingress: Option<crate::remote_axis::entry::Config>,
+    pub plugin_ingress: Option<PluginControl>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -137,8 +137,35 @@ pub struct LogFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Management {
-    /// Loopback `host:port` or `unix:///absolute/path`.
+    /// Local endpoint for the selected facility; local_control requires UDS.
     pub listen: String,
+    #[serde(default)]
+    pub protocol: ControlProtocol,
+}
+#[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlProtocol {
+    /// Existing HTTP actions, SSE and optional gRPC management clients.
+    #[default]
+    Http,
+    /// ttrpc control messages on a same-host Unix socket, without HTTP/2.
+    LocalControl,
+}
+#[derive(Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum PluginControl {
+    Shared { facility: SharedControl },
+    Dedicated { listen: String },
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedControl {
+    Management,
+}
+impl PluginControl {
+    pub(crate) fn shared(&self) -> bool {
+        matches!(self, Self::Shared { .. })
+    }
 }
 
 /// A host-selected transport and schema grant; plugins cannot publish routes themselves.
@@ -146,8 +173,8 @@ pub struct Management {
 #[serde(deny_unknown_fields)]
 pub struct NativeAction {
     pub method: String,
-    pub contract: action_router::Contract,
-    pub bindings: Vec<action_router::Binding>,
+    pub contract: action_execution::Contract,
+    pub bindings: Vec<action_execution::Binding>,
 }
 
 /// Host-wide bounds on concurrent semantic inspection and retained message data.
@@ -648,7 +675,7 @@ impl Config {
                 action.contract.check().map_err(|e| e.to_string())?;
                 if action.method.is_empty()
                     || action.method.len() > 256
-                    || action.contract.response != action_router::ResponseMode::Unary
+                    || action.contract.response != action_execution::ResponseMode::Unary
                     || action.contract.max_input > 1024 * 1024
                     || action.contract.max_output > 1024 * 1024
                     || action.bindings.is_empty()
@@ -664,6 +691,24 @@ impl Config {
                     if !action_bindings.insert(binding.clone()) {
                         return Err("native action transport bindings must be unique".into());
                     }
+                }
+                let reachable = self.management.as_ref().is_some_and(|management| {
+                    action.bindings.iter().any(|binding| {
+                        matches!(
+                            (management.protocol, binding),
+                            (
+                                ControlProtocol::Http,
+                                action_execution::Binding::Http { .. }
+                                    | action_execution::Binding::Grpc { .. }
+                            ) | (
+                                ControlProtocol::LocalControl,
+                                action_execution::Binding::LocalControl { .. }
+                            )
+                        )
+                    })
+                });
+                if !reachable {
+                    return Err("native action has no binding reachable through the selected management protocol".into());
                 }
             }
             if !callback.hooks.is_empty()
@@ -698,6 +743,9 @@ impl Config {
             );
         }
         if let Some(management) = &self.management {
+            if management.protocol == ControlProtocol::LocalControl {
+                crate::remote_axis::control_path(&management.listen)?;
+            }
             match network_sockets::LocalEndpoint::parse(&management.listen)? {
                 network_sockets::LocalEndpoint::Tcp(address) if address == self.listen => {
                     return Err("data and management listeners must differ".into());
@@ -706,13 +754,17 @@ impl Config {
                 | network_sockets::LocalEndpoint::Unix(_) => {}
             }
         }
-        if let Some(crate::remote_axis::entry::Config::Shared { .. }) = &self.plugin_ingress
-            && self.management.is_none()
-        {
-            return Err("shared plugin ingress requires management entry".into());
+        if let Some(PluginControl::Shared { .. }) = &self.plugin_ingress {
+            let management = self
+                .management
+                .as_ref()
+                .ok_or("shared plugin control requires management facility")?;
+            if management.protocol != ControlProtocol::LocalControl {
+                return Err("plugin control requires management protocol local_control".into());
+            }
         }
-        if let Some(crate::remote_axis::entry::Config::Dedicated { listen }) = &self.plugin_ingress
-        {
+        if let Some(PluginControl::Dedicated { listen }) = &self.plugin_ingress {
+            crate::remote_axis::control_path(listen)?;
             let endpoint = network_sockets::LocalEndpoint::parse(listen)?;
             if matches!(&endpoint, network_sockets::LocalEndpoint::Tcp(address) if *address == self.listen)
             {
@@ -732,7 +784,7 @@ impl Config {
                     _ => false,
                 };
                 if same {
-                    return Err("duplicate listener; select plugin_ingress mount management to share the entry".into());
+                    return Err("duplicate listener; select plugin_ingress facility management to reuse the local control facility".into());
                 }
             }
         }
@@ -815,7 +867,7 @@ mod tests {
     fn remote_is_default_and_direct_or_language_auto_are_explicit() {
         let mut callback = json!({"package":"policy", "axis":"request_policy", "registration":"policy", "hooks":["routing"]});
         let remote = |callback: serde_json::Value| -> Config {
-            serde_json::from_value(json!({"upstream":"http://127.0.0.1:9", "axis_bindings":{"request_policy":{"endpoint":"127.0.0.1:9001"}}, "callbacks":[callback]})).unwrap()
+            serde_json::from_value(json!({"upstream":"http://127.0.0.1:9", "axis_bindings":{"request_policy":{"endpoint":"unix:///run/policy.sock"}}, "callbacks":[callback]})).unwrap()
         };
         let config = remote(callback.clone());
         config.validate().unwrap();
@@ -856,7 +908,7 @@ mod tests {
 
     #[test]
     fn remote_metadata_rejects_bulk_grants_duplicate_registrations_and_local_artifacts() {
-        let input = json!({"upstream":"http://127.0.0.1:9", "axis_bindings":{"request_policy":{"endpoint":"127.0.0.1:9001"}},
+        let input = json!({"upstream":"http://127.0.0.1:9", "axis_bindings":{"request_policy":{"endpoint":"unix:///run/policy.sock"}},
             "callbacks":[{"package":"policy", "axis":"request_policy", "registration":"policy", "hooks":["routing"]}]});
         for (field, value) in [
             ("message_codec", json!("websocket.v1")),
@@ -1198,9 +1250,9 @@ mod tests {
         assert!(config.validate().is_err());
         config.callbacks[0].instances = 1;
         config.callbacks[0].actions[0].contract.response =
-            action_router::ResponseMode::ServerStream;
+            action_execution::ResponseMode::ServerStream;
         assert!(config.validate().is_err());
-        config.callbacks[0].actions[0].contract.response = action_router::ResponseMode::Unary;
+        config.callbacks[0].actions[0].contract.response = action_execution::ResponseMode::Unary;
         config.callbacks[0].actions[0].contract.max_output = 1024 * 1024 + 1;
         assert!(config.validate().is_err());
         let duplicate: Config = serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"127.0.0.1:6199"}, "callbacks":[callback.clone(),callback]})).unwrap();
@@ -1213,6 +1265,88 @@ mod tests {
         .unwrap();
         assert!(external.validate().unwrap_err().contains("loopback"));
     }
+    #[test]
+    fn native_actions_require_a_binding_reachable_through_selected_management_protocol() {
+        for (protocol, bindings, accepted) in [
+            (
+                "http",
+                json!([{"transport":"http", "method":"POST", "path":"/native"}]),
+                true,
+            ),
+            (
+                "http",
+                json!([{"transport":"grpc", "action":"native"}]),
+                true,
+            ),
+            (
+                "http",
+                json!([{"transport":"local_control", "action":"native"}]),
+                false,
+            ),
+            (
+                "local_control",
+                json!([{"transport":"http", "method":"POST", "path":"/native"}]),
+                false,
+            ),
+            (
+                "local_control",
+                json!([{"transport":"grpc", "action":"native"}]),
+                false,
+            ),
+            (
+                "local_control",
+                json!([{"transport":"local_control", "action":"native"}]),
+                true,
+            ),
+            (
+                "local_control",
+                json!([{"transport":"grpc", "action":"native"}, {"transport":"local_control", "action":"native"}]),
+                true,
+            ),
+            (
+                "http",
+                json!([{"transport":"grpc", "action":"native"}, {"transport":"local_control", "action":"native"}]),
+                true,
+            ),
+        ] {
+            let mut callback = action_callback();
+            callback["actions"][0]["bindings"] = bindings;
+            let config: Config = serde_json::from_value(json!({
+                "upstream":"http://127.0.0.1:8080",
+                "management":{"listen":"unix:///run/worker.sock", "protocol":protocol},
+                "callbacks":[callback],
+            }))
+            .unwrap();
+            let result = config.validate();
+            assert_eq!(result.is_ok(), accepted, "{protocol}: {result:?}");
+            if !accepted {
+                assert!(result.unwrap_err().contains("no binding reachable"));
+            }
+        }
+    }
+
+    #[test]
+    fn each_native_action_needs_its_own_reachable_binding() {
+        let mut callback = action_callback();
+        let mut second = callback["actions"][0].clone();
+        second["method"] = json!("second");
+        second["contract"]["id"] = json!("second");
+        second["bindings"] = json!([{"transport":"local_control", "action":"second"}]);
+        callback["actions"].as_array_mut().unwrap().push(second);
+        let config: Config = serde_json::from_value(json!({
+            "upstream":"http://127.0.0.1:8080",
+            "management":{"listen":"unix:///run/worker.sock"},
+            "callbacks":[callback],
+        }))
+        .unwrap();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .contains("no binding reachable")
+        );
+    }
+
     #[test]
     fn runtime_graph_checks_selected_object_bindings_cycles_and_bounds() {
         let callback = json!({"binding":"direct", "path":"agent.so", "package":"agent", "hooks":["pre_ingress"], "graph": {
@@ -1244,7 +1378,7 @@ mod plugin_ingress_tests {
     use super::*;
     use serde_json::json;
     #[test]
-    fn plugin_ingress_requires_local_endpoint_or_explicit_shared_mount() {
+    fn plugin_control_selects_only_an_explicit_same_host_facility() {
         for input in [
             json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"127.0.0.1:9191"}, "plugin_ingress":{"listen":"127.0.0.1:9191"}}),
             json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"unix:///run/worker.sock"}, "plugin_ingress":{"listen":"unix:///run/worker.sock"}}),
@@ -1257,12 +1391,24 @@ mod plugin_ingress_tests {
                     .is_err()
             );
         }
+        for input in [
+            json!({"upstream":"http://127.0.0.1:8080", "axis_bindings":{"policy":{"endpoint":"127.0.0.1:9191"}}}),
+            json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"unix:///run/worker.sock"}, "plugin_ingress":{"facility":"management"}}),
+            json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"127.0.0.1:9191", "protocol":"local_control"}}),
+        ] {
+            assert!(
+                serde_json::from_value::<Config>(input)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
         let config: Config = serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"unix:///run/worker.sock"}, "plugin_ingress":{"listen":"unix:///run/plugin.sock"}})).unwrap();
         config.validate().unwrap();
-        let shared: Config = serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"unix:///run/worker.sock"}, "plugin_ingress":{"mount":"management"}})).unwrap();
+        let shared: Config = serde_json::from_value(json!({"upstream":"http://127.0.0.1:8080", "management":{"listen":"unix:///run/worker.sock", "protocol":"local_control"}, "plugin_ingress":{"facility":"management"}})).unwrap();
         shared.validate().unwrap();
         let missing: Config = serde_json::from_value(
-            json!({"upstream":"http://127.0.0.1:8080", "plugin_ingress":{"mount":"management"}}),
+            json!({"upstream":"http://127.0.0.1:8080", "plugin_ingress":{"facility":"management"}}),
         )
         .unwrap();
         assert!(
@@ -1272,8 +1418,8 @@ mod plugin_ingress_tests {
                 .contains("requires management")
         );
         for ingress in [
-            json!({"mount":"management", "listen":"unix:///run/plugin.sock"}),
-            json!({"mount":"unpublished"}),
+            json!({"facility":"management", "listen":"unix:///run/plugin.sock"}),
+            json!({"facility":"unpublished"}),
             json!({"listen":"unix:///run/plugin.sock", "unknown":true}),
         ] {
             assert!(

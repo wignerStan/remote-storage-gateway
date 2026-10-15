@@ -1,11 +1,11 @@
 //! Independent axis listeners use the same entry implementation, not chained routers.
 #![cfg(unix)]
-use action_router::{Action, Binding, Context, Contract, ResponseMode, Schema};
+use action_execution::{Action, Binding, Context, Contract, ResponseMode, Schema};
 use network_actions::proto::{self, actions_client::ActionsClient};
 use network_sockets::{LocalEndpoint, SocketPermissions};
 use pingora_worker::{
+    assembly::control::{self as entry, ControlServer},
     composition::mount_axis,
-    entry::{self, SharedEntry},
 };
 use plugin_lifecycle::{Composition, Resource, ResourceSchema, Runtime};
 use std::{path::Path, sync::Arc, time::Duration};
@@ -27,12 +27,13 @@ const A: Resource = Resource {
     requires: &[],
 };
 const B: Resource = Resource { id: "b", ..A };
-async fn axis(path: &Path, value: u8) -> (Runtime, Arc<SharedEntry>) {
+async fn axis(path: &Path, value: u8) -> (Runtime, Arc<ControlServer>) {
     let mut composition = Composition::new(ResourceSchema::new(&[ENTRY, ACTIONS]).unwrap());
     let entry = entry::install(
         &mut composition,
         ENTRY,
         entry::Registration {
+            protocol: pingora_worker::config::ControlProtocol::Http,
             worker_control: None,
             logging_health: None,
             endpoint: LocalEndpoint::Unix(path.to_owned()),
@@ -134,6 +135,7 @@ async fn independent_axis_uds_and_identical_action_names_do_not_conflict() {
             &mut duplicate,
             ENTRY,
             entry::Registration {
+                protocol: pingora_worker::config::ControlProtocol::Http,
                 worker_control: None,
                 logging_health: None,
                 endpoint: LocalEndpoint::Unix(a_path.clone()),

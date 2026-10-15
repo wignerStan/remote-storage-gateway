@@ -1,19 +1,15 @@
 //! Real worker hooks use the shared axis control contract over a Unix socket.
 use super::*;
-use action_router::{Action, Binding, Context, Contract, ResponseMode, Router, Schema};
+use action_execution::{Action, Binding, Context, Contract, ResponseMode, Schema};
+use action_router::Router;
 use proxy_pingora::http_ingress::ProxyLifecycle;
 use serde_json::{Value, json};
 use std::sync::Mutex;
 
 struct Axis {
     endpoint: String,
-    task: JoinHandle<()>,
+    _listener: network_local_control::listener::ControlListener,
     _registration: action_router::Registration,
-}
-impl Drop for Axis {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
 }
 async fn axis(path: &std::path::Path, reply: Value, seen: Arc<Mutex<Vec<Value>>>) -> Axis {
     let listener = tokio::net::UnixListener::bind(path).unwrap();
@@ -29,7 +25,7 @@ async fn axis(path: &std::path::Path, reply: Value, seen: Arc<Mutex<Vec<Value>>>
                 max_input: 65536,
                 max_output: 65536,
             },
-            bindings: vec![Binding::Grpc {
+            bindings: vec![Binding::LocalControl {
                 action: "worker.metadata.v1.policy.before_upstream_send".into(),
             }],
             handler: Arc::new(move |input: &[u8], _: &Context| {
@@ -40,15 +36,14 @@ async fn axis(path: &std::path::Path, reply: Value, seen: Arc<Mutex<Vec<Value>>>
             }),
         }])
         .unwrap();
-    let service = network_actions::ActionService::new(router, 65536, WAIT).unwrap();
-    let task = tokio::spawn(async move {
-        network_actions::serve_unix(listener, service, std::future::pending())
-            .await
-            .unwrap();
-    });
+    let service =
+        network_local_control::ControlService::new(Arc::new(router), 65536, WAIT, 32).unwrap();
+    let carrier =
+        network_local_control::listener::ControlListener::prepare(listener, None, service).unwrap();
+    carrier.activate().unwrap();
     Axis {
         endpoint: format!("unix://{}", path.display()),
-        task,
+        _listener: carrier,
         _registration: registration,
     }
 }
@@ -208,23 +203,24 @@ async fn plugin_ingress_membership(shared: bool) {
         let host_endpoint = format!("unix://{}", directory.path().join("host.sock").display());
         let mut config = config(origin.address, &remote.endpoint);
         config.plugin_ingress = Some(if shared {
-            pingora_worker::remote_axis::entry::Config::Shared {
-                mount: pingora_worker::remote_axis::entry::SharedMount::Management,
+            pingora_worker::config::PluginControl::Shared {
+                facility: pingora_worker::config::SharedControl::Management,
             }
         } else {
-            pingora_worker::remote_axis::entry::Config::Dedicated {
+            pingora_worker::config::PluginControl::Dedicated {
                 listen: plugin_endpoint.clone(),
             }
         });
         config.management = Some(pingora_worker::config::Management {
+            protocol: pingora_worker::config::ControlProtocol::LocalControl,
             listen: host_endpoint.clone(),
         });
         let proxy = pingora_worker::assembly::assemble(config).await.unwrap();
         let worker = serve_engine(proxy.clone()).await;
         let connect = |endpoint: String| async move {
-            network_actions::client::RemoteBindings::connect(
-                network_sockets::LocalEndpoint::parse(&endpoint).unwrap(),
-                network_actions::client::Limits::default(),
+            network_local_control::client::RemoteBindings::connect(
+                std::path::PathBuf::from(endpoint.strip_prefix("unix://").unwrap()),
+                network_local_control::client::Limits::default(),
             )
             .await
             .unwrap()

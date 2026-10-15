@@ -15,11 +15,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "action-router"
+name = "action-execution"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "action-router"
+version = "0.1.0"
+dependencies = [
+ "action-execution",
  "tokio",
 ]
 
@@ -2053,7 +2061,7 @@ dependencies = [
 name = "network-actions"
 version = "0.1.0"
 dependencies = [
- "action-router",
+ "action-execution",
  "admission-gate",
  "async-stream",
  "axum",
@@ -2073,6 +2081,18 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "network-local-control"
+version = "0.1.0"
+dependencies = [
+ "action-execution",
+ "admission-gate",
+ "network-sockets",
+ "prost",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2615,6 +2635,7 @@ dependencies = [
 name = "pingora-worker"
 version = "0.1.0"
 dependencies = [
+ "action-execution",
  "action-router",
  "admission-gate",
  "async-trait",
@@ -2626,6 +2647,7 @@ dependencies = [
  "hyper-util",
  "llm-protocols",
  "network-actions",
+ "network-local-control",
  "network-sockets",
  "pingora-core",
  "pingora-error",
@@ -2634,7 +2656,6 @@ dependencies = [
  "plugin-abi",
  "plugin-lifecycle",
  "plugin-loading",
- "plugin-manager",
  "proxy-pingora",
  "proxy-protocols",
  "serde",
@@ -2671,6 +2692,8 @@ dependencies = [
 name = "plugin-lifecycle"
 version = "0.1.0"
 dependencies = [
+ "admission-gate",
+ "futures",
  "tokio",
 ]
 
@@ -2678,6 +2701,7 @@ dependencies = [
 name = "plugin-loading"
 version = "0.1.0"
 dependencies = [
+ "action-execution",
  "action-router",
  "bytes",
  "libc",
@@ -2690,16 +2714,6 @@ dependencies = [
  "tokio",
  "wasm-sandbox",
  "wasmtime",
-]
-
-[[package]]
-name = "plugin-manager"
-version = "0.1.0"
-dependencies = [
- "admission-gate",
- "futures",
- "plugin-lifecycle",
- "tokio",
 ]
 
 [[package]]

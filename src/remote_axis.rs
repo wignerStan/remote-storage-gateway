@@ -1,12 +1,11 @@
 //! Remote plugin membership and its outbound RPC binding.
 //! Plugin ingress calls this use-flow, which selects the pure axis surface.
-pub mod entry;
 pub(crate) mod surface;
 #[cfg(test)]
 mod tests;
 use crate::config::{CallbackBackend, CallbackBinding, NativeCallback};
 use event_stamp::StampSource;
-use network_actions::client::{Limits, RemoteBindings};
+use network_local_control::client::{Limits, RemoteBindings};
 use network_sockets::LocalEndpoint;
 use plugin_lifecycle::Reversal;
 use plugin_lifecycle::manager::{PluginManager, RegistrationSpec};
@@ -32,6 +31,12 @@ fn capacity() -> usize {
 fn timeout() -> u64 {
     5000
 }
+pub(crate) fn control_path(endpoint: &str) -> Result<std::path::PathBuf, String> {
+    match LocalEndpoint::parse(endpoint)? {
+        LocalEndpoint::Unix(path) => Ok(path),
+        LocalEndpoint::Tcp(_) => Err("plugin control requires a same-host Unix socket".into()),
+    }
+}
 fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -51,7 +56,7 @@ pub(crate) fn validate(bindings: &BTreeMap<String, AxisBinding>) -> Result<(), S
         {
             return Err("invalid remote axis identity, capacity or timeout".into());
         }
-        LocalEndpoint::parse(&binding.endpoint)?;
+        control_path(&binding.endpoint)?;
     }
     Ok(())
 }
@@ -163,7 +168,7 @@ impl RemotePluginManager {
         };
         for (axis, binding) in config {
             let connected = RemoteBindings::connect(
-                LocalEndpoint::parse(&binding.endpoint)?,
+                control_path(&binding.endpoint)?,
                 Limits {
                     max_input: crate::native_notifier::FRAME_LIMIT,
                     max_output: crate::native_notifier::FRAME_LIMIT,
@@ -286,7 +291,7 @@ impl RemotePluginManager {
     pub async fn replace(&self, axis: &str, endpoint: &str) -> Result<(), String> {
         self.axis(axis)?
             .client
-            .replace(LocalEndpoint::parse(endpoint)?)
+            .replace(control_path(endpoint)?)
             .await
             .map_err(|e| e.to_string())
     }

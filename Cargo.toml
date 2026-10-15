@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98.1"
 license = "MIT"
-description = "Plugin-composed Pingora worker process and shared management entry"
+description = "Plugin-composed Pingora worker with axis entry routing and local control"
 
 [workspace]
 resolver = "3"
@@ -22,8 +22,9 @@ text-processing = { path = "../infra/rust/crates/text/processing", features = ["
 stream-transfer = { path = "../infra/rust/crates/networking/stream/transfer" }
 network-sockets = { path = "../infra/rust/crates/networking/sockets" }
 action-router = { path = "../infra/rust/crates/networking/action-router" }
+action-execution = { path = "../infra/rust/crates/networking/action-execution" }
+network-local-control = { path = "../infra/rust/crates/networking/local-control" }
 network-actions = { path = "../infra/rust/crates/networking/actions" }
-plugin-manager = { path = "../infra/rust/crates/plugins/manager" }
 plugin-lifecycle = { path = "../infra/rust/crates/plugins/lifecycle" }
 plugin-loading = { path = "../infra/rust/crates/plugins/loading", features = ["async"] }
 proxy-protocols = { path = "../infra/rust/crates/networking/proxy/protocols", default-features = false }

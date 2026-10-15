@@ -1,11 +1,12 @@
 //! Composition-selected actions use the infra publication owner and its inverse.
-use super::SharedEntry;
-use action_router::{Action, Error, Publication, PublishedRoutes, Router};
+use super::ControlServer;
+use action_execution::{Action, Error};
+use action_router::{Publication, PublishedRoutes, Router};
 use plugin_lifecycle::{Composition, Provider, Resource, Reversal};
 use plugin_loading::{Graph, InstanceActions};
 use std::sync::Arc;
 
-impl SharedEntry {
+impl ControlServer {
     /// Install compiled/script actions as an independently closed publication.
     pub async fn install_actions(
         &self,

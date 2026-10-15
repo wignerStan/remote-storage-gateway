@@ -1,5 +1,5 @@
 //! Read-only operational event exposure, independent of request policy callbacks.
-use action_router::{
+use action_execution::{
     Action, Binding, Context, Contract, Error, Field, JsonHandler, ResponseMode, Schema, Source,
     StreamHandler,
 };

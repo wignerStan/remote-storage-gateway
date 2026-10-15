@@ -1,4 +1,6 @@
 //! Process assembly selects and installs infra owners before opening the data path.
+pub mod control;
+
 use crate::{
     config::{CallbackBackend, CallbackBinding, Config},
     native_notifier::{FRAME_LIMIT, NativeNotifier},
@@ -20,25 +22,25 @@ const REMOTE_AXES: Resource = Resource {
     provides: &["remote-axis-bindings"],
     requires: &[],
 };
-const PLUGIN_ENTRY: Resource = Resource {
-    id: "plugin-entry",
-    provides: &["plugin-ingress"],
+const PLUGIN_CONTROL: Resource = Resource {
+    id: "plugin-control",
+    provides: &["plugin-control-routes"],
     requires: &[plugin_lifecycle::ResourceRequirement {
         resource: "remote-axes",
         capability: "remote-axis-bindings",
     }],
 };
-const SHARED_PLUGIN_ENTRY: Resource = Resource {
-    id: "plugin-entry",
-    provides: &["plugin-ingress"],
+const SHARED_PLUGIN_ROUTES: Resource = Resource {
+    id: "plugin-control",
+    provides: &["plugin-control-routes"],
     requires: &[
         plugin_lifecycle::ResourceRequirement {
             resource: "remote-axes",
             capability: "remote-axis-bindings",
         },
         plugin_lifecycle::ResourceRequirement {
-            resource: "management-entry",
-            capability: "management-entry",
+            resource: "management-control",
+            capability: "management-control",
         },
     ],
 };
@@ -57,8 +59,8 @@ const NOTIFIERS: Resource = Resource {
     ],
 };
 const MANAGEMENT: Resource = Resource {
-    id: "management-entry",
-    provides: &["management-entry"],
+    id: "management-control",
+    provides: &["management-control"],
     requires: &[],
 };
 const NATIVE_ACTIONS: Resource = Resource {
@@ -70,8 +72,8 @@ const NATIVE_ACTIONS: Resource = Resource {
             capability: "worker-notifiers",
         },
         plugin_lifecycle::ResourceRequirement {
-            resource: "management-entry",
-            capability: "management-entry",
+            resource: "management-control",
+            capability: "management-control",
         },
     ],
 };
@@ -197,15 +199,15 @@ async fn assemble_selected(
     };
     if let Some(ingress) = &config.plugin_ingress {
         resources.push(if ingress.shared() {
-            SHARED_PLUGIN_ENTRY
+            SHARED_PLUGIN_ROUTES
         } else {
-            PLUGIN_ENTRY
+            PLUGIN_CONTROL
         });
     }
     let surface = crate::remote_axis::publication(&config.callbacks)?;
     let mut composition = Composition::new(ResourceSchema::new(&resources)?);
-    let memory = Arc::new(plugin_manager::memory::Coordinator::new(
-        plugin_manager::memory::Limits::default(),
+    let memory = Arc::new(plugin_lifecycle::coordination::memory::Coordinator::new(
+        plugin_lifecycle::coordination::memory::Limits::default(),
     )?);
     let memory_owner = Arc::clone(&memory);
     composition
@@ -390,7 +392,7 @@ async fn assemble_selected(
                 };
                 native.instances.push(Arc::clone(&instance));
                 for action in &callback.actions {
-                    actions.push(action_router::Action {
+                    actions.push(action_execution::Action {
                         contract: action.contract.clone(),
                         bindings: action.bindings.clone(),
                         handler: Arc::new(
@@ -455,11 +457,12 @@ async fn assemble_selected(
             ));
         }
     };
-    let entry = if let Some(management) = config.management {
-        let installed = crate::entry::install(
+    let server = if let Some(management) = config.management {
+        let installed = control::install(
             &mut composition,
             MANAGEMENT,
-            crate::entry::Registration {
+            control::Registration {
+                protocol: management.protocol,
                 worker_control: Some(Arc::clone(&control)),
                 logging_health,
                 endpoint: network_sockets::LocalEndpoint::parse(&management.listen)?,
@@ -469,7 +472,7 @@ async fn assemble_selected(
         )
         .await;
         match installed {
-            Ok(entry) => Some(entry),
+            Ok(server) => Some(server),
             Err(error) => {
                 let cleanup = composition.rollback().await;
                 return Err(format!(
@@ -480,9 +483,9 @@ async fn assemble_selected(
     } else {
         None
     };
-    if let Some(entry) = &entry
+    if let Some(server) = &server
         && !actions.is_empty()
-        && let Err(error) = entry
+        && let Err(error) = server
             .install_actions(&mut composition, NATIVE_ACTIONS, "native", actions)
             .await
     {
@@ -491,16 +494,16 @@ async fn assemble_selected(
             "native action publication failed: {error}; cleanup: {cleanup:?}"
         ));
     }
-    let plugin_entry = match config.plugin_ingress {
-        Some(crate::remote_axis::entry::Config::Shared { .. }) => {
-            let installed = entry
+    let plugin_server = match config.plugin_ingress {
+        Some(crate::config::PluginControl::Shared { .. }) => {
+            let installed = server
                 .as_ref()
-                .ok_or("shared plugin ingress requires management entry")?
+                .ok_or("shared plugin control requires management facility")?
                 .install_actions(
                     &mut composition,
-                    SHARED_PLUGIN_ENTRY,
+                    SHARED_PLUGIN_ROUTES,
                     "plugin",
-                    crate::remote_axis::entry::actions(Arc::clone(&remote_axes)),
+                    crate::entry::plugins::actions(Arc::clone(&remote_axes)),
                 )
                 .await;
             if let Err(error) = installed {
@@ -511,24 +514,22 @@ async fn assemble_selected(
             }
             None
         }
-        Some(crate::remote_axis::entry::Config::Dedicated { listen }) => {
-            match crate::remote_axis::entry::install(
-                &mut composition,
-                PLUGIN_ENTRY,
-                listen,
-                Arc::clone(&remote_axes),
-            )
-            .await
-            {
-                Ok(entry) => Some(entry),
-                Err(error) => {
-                    let cleanup = composition.rollback().await;
-                    return Err(format!(
-                        "plugin ingress setup failed: {error}; cleanup: {cleanup:?}"
-                    ));
-                }
+        Some(crate::config::PluginControl::Dedicated { listen }) => match control::install_plugins(
+            &mut composition,
+            PLUGIN_CONTROL,
+            listen,
+            Arc::clone(&remote_axes),
+        )
+        .await
+        {
+            Ok(server) => Some(server),
+            Err(error) => {
+                let cleanup = composition.rollback().await;
+                return Err(format!(
+                    "plugin ingress setup failed: {error}; cleanup: {cleanup:?}"
+                ));
             }
-        }
+        },
         None => None,
     };
     let runtime = composition.commit().await?;
@@ -543,14 +544,14 @@ async fn assemble_selected(
             return Err(error);
         }
     };
-    if let Some(entry) = entry
-        && let Err(error) = entry.activate()
+    if let Some(server) = server
+        && let Err(error) = server.activate()
     {
         let _ = runtime.shutdown().await;
         return Err(error);
     }
-    if let Some(entry) = plugin_entry
-        && let Err(error) = entry.activate()
+    if let Some(server) = plugin_server
+        && let Err(error) = server.activate()
     {
         let _ = runtime.shutdown().await;
         return Err(error);

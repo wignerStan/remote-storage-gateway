@@ -1,9 +1,7 @@
 use super::*;
-use action_router::{
-    Action, AsyncHandler, Binding, Context, Contract, ResponseMode, Router, Schema,
-};
-use network_actions::{ActionService, listener::ActionListener};
-use network_sockets::BoundListener;
+use action_execution::{Action, AsyncHandler, Binding, Context, Contract, ResponseMode, Schema};
+use action_router::Router;
+use network_local_control::{ControlService, listener::ControlListener};
 use tokio::sync::Notify;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -23,7 +21,7 @@ async fn cancelled_waiter_keeps_membership_pinned_until_remote_exchange_settles(
                     max_input: 4,
                     max_output: 4,
                 },
-                bindings: vec![Binding::Grpc {
+                bindings: vec![Binding::LocalControl {
                     action: "worker.metadata.v1.policy.routing".into(),
                 }],
                 handler: Arc::new(AsyncHandler({
@@ -41,12 +39,14 @@ async fn cancelled_waiter_keeps_membership_pinned_until_remote_exchange_settles(
                 })),
             }])
             .unwrap();
-        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = socket.local_addr().unwrap().to_string();
-        let listener = ActionListener::prepare(
-            BoundListener::Tcp(socket),
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let socket = tokio::net::UnixListener::bind(&path).unwrap();
+        let endpoint = format!("unix://{}", path.display());
+        let listener = ControlListener::prepare(
+            socket,
             None,
-            ActionService::new(router, 1024, Duration::from_secs(5)).unwrap(),
+            ControlService::new(Arc::new(router), 1024, Duration::from_secs(5), 32).unwrap(),
         )
         .unwrap();
         listener.activate().unwrap();
@@ -76,9 +76,10 @@ async fn cancelled_waiter_keeps_membership_pinned_until_remote_exchange_settles(
             .generation
             .unwrap();
         let binding = manager.binding("request_policy", "policy").unwrap();
-        let memory =
-            plugin_manager::memory::Coordinator::new(plugin_manager::memory::Limits::default())
-                .unwrap();
+        let memory = plugin_lifecycle::coordination::memory::Coordinator::new(
+            plugin_lifecycle::coordination::memory::Limits::default(),
+        )
+        .unwrap();
         let subscriber = memory
             .subscribe(RegistrationSpec {
                 name: "policy".into(),

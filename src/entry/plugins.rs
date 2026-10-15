@@ -1,32 +1,11 @@
-//! Plugin-axis decoding and dispatch, on a shared or dedicated RPC facility.
-use super::RemotePluginManager;
-use action_router::{
+//! Plugin control entry: decode a selection and dispatch to its owning manager.
+use crate::remote_axis::RemotePluginManager;
+use action_execution::{
     Action, AsyncHandler, Binding, Context, Contract, Error, ResponseMode, Schema,
 };
-use network_actions::{facility::RpcFacility, listener::ActionListener};
-use network_sockets::{LocalEndpoint, SocketPermissions, StaleUnixSocketPolicy};
-use plugin_lifecycle::{Composition, Resource, Reversal};
 use serde::Deserialize;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-#[derive(Deserialize)]
-#[serde(untagged, deny_unknown_fields)]
-pub enum Config {
-    /// Publish plugin controls on the configured management listener.
-    Shared { mount: SharedMount },
-    /// Bind a separate local listener when no shared server is selected.
-    Dedicated { listen: String },
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SharedMount {
-    Management,
-}
-impl Config {
-    pub(crate) fn shared(&self) -> bool {
-        matches!(self, Self::Shared { .. })
-    }
-}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Selection {
@@ -63,7 +42,7 @@ pub(crate) fn actions(manager: Arc<RemotePluginManager>) -> Vec<Action> {
                 max_input: 1024,
                 max_output: 1024,
             },
-            bindings: vec![Binding::Grpc {
+            bindings: vec![Binding::LocalControl {
                 action: method.into(),
             }],
             handler: Arc::new(AsyncHandler(move |input: Vec<u8>, context: Context| {
@@ -112,58 +91,4 @@ pub(crate) fn actions(manager: Arc<RemotePluginManager>) -> Vec<Action> {
         }
     })
     .collect()
-}
-
-pub struct PluginEntry {
-    listener: Arc<ActionListener>,
-}
-impl PluginEntry {
-    pub(crate) fn activate(&self) -> Result<(), String> {
-        self.listener.activate()
-    }
-}
-
-/// Bind a plugin-owned carrier and install only its manager operations.
-/// The lifecycle resource depends on the manager, so ingress retires first.
-pub(crate) async fn install(
-    composition: &mut Composition,
-    resource: Resource,
-    listen: String,
-    manager: Arc<RemotePluginManager>,
-) -> Result<Arc<PluginEntry>, String> {
-    let (send, receive) = tokio::sync::oneshot::channel();
-    composition
-        .install(resource, async move {
-            let (bound, socket) = network_sockets::bind_local(
-                LocalEndpoint::parse(&listen)?,
-                SocketPermissions::default(),
-                StaleUnixSocketPolicy::RemoveIfStale,
-            )
-            .await?;
-            let facility = RpcFacility::new(1024, Duration::from_secs(30), 32)
-                .map_err(|error| error.to_string())?;
-            facility
-                .publish_actions("plugin", actions(manager))
-                .await
-                .map_err(|error| error.to_string())?;
-            let listener = Arc::new(ActionListener::prepare(bound, socket, facility.service())?);
-            let entry = Arc::new(PluginEntry {
-                listener: Arc::clone(&listener),
-            });
-            let _ = send.send(Arc::clone(&entry));
-            let inverse: Reversal = Box::new(move || {
-                Box::pin(async move {
-                    let cleanup = facility.close();
-                    listener.request_stop();
-                    let served = listener.shutdown().await;
-                    cleanup.await.map_err(|e| e.to_string())?;
-                    served
-                })
-            });
-            Ok((entry, inverse))
-        })
-        .await?;
-    receive
-        .await
-        .map_err(|_| "plugin ingress setup cancelled".into())
 }

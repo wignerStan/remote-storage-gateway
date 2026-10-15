@@ -268,7 +268,7 @@ enum NotifierBinding {
 
 pub struct NativeNotifier {
     callback: NotifierBinding,
-    memory: Option<plugin_manager::memory::Subscriber>,
+    memory: Option<plugin_lifecycle::coordination::memory::Subscriber>,
     interests: u16,
     timeout: Duration,
     headers: Vec<http::header::HeaderName>,
@@ -276,7 +276,7 @@ pub struct NativeNotifier {
 }
 impl NativeNotifier {
     /// Assembly supplies one bounded coordinator shared by all callback bindings.
-    pub(crate) fn with_subscriber(mut self, memory: plugin_manager::memory::Subscriber) -> Self {
+    pub(crate) fn with_subscriber(mut self, memory: plugin_lifecycle::coordination::memory::Subscriber) -> Self {
         self.memory = Some(memory);
         self
     }

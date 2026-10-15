@@ -1,4 +1,4 @@
-//! Runtime-installed transport adapters for worker-axis management operations.
+//! Worker control entry: decode, validate and dispatch to the worker use-flow.
 use diagnostic_output::operations::Operations;
 use proxy_pingora::worker::{Snapshot, Update, UpdateError, WorkerControl};
 use serde::Deserialize;
@@ -11,7 +11,7 @@ struct UpdateInput {
 fn snapshot(value: Snapshot) -> serde_json::Value {
     serde_json::json!({"revision": value.revision, "accepting": value.accepting})
 }
-use action_router::{
+use action_execution::{
     Action, Binding, Context, Contract, Error, Field, JsonHandler, ResponseMode, Schema,
 };
 use std::sync::Arc;
@@ -79,6 +79,21 @@ pub fn actions(
             )),
         },
     ]);
+    // Entry can dispatch the same axes through independently selected carriers.
+    // Wire routing and listener ownership remain in each facility.
+    for action in &mut actions {
+        let local = action
+            .bindings
+            .iter()
+            .filter_map(|binding| match binding {
+                Binding::Grpc { action } => Some(Binding::LocalControl {
+                    action: action.clone(),
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        action.bindings.extend(local);
+    }
     actions
 }
 

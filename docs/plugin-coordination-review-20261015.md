@@ -1,5 +1,9 @@
 # Shared entry and plugin coordination review — 2026-10-15
 
+Historical validation of the prior implementation. The current
+[local control design](remote-axis-bindings.md) supersedes its entry mounting
+terminology, gRPC plugin transport and separate plugin-manager package.
+
 This review supersedes the entry-separation rule in the earlier
 [remote plugin review](remote-plugin-review-20261015.md). Entry can be shared.
 Transport delivery invokes an injected handler; it does not create a source

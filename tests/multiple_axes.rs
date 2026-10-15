@@ -1,10 +1,10 @@
-use action_router::{
+use action_execution::{
     Action, Binding, Context, Contract, ResponseMode, Schema, Source, StreamHandler,
 };
 use network_actions::proto;
 use pingora_worker::{
+    assembly::control::{self as entry, ControlServer},
     composition::mount_axis,
-    entry::{self, SharedEntry},
 };
 use plugin_lifecycle::{
     Composition, Invocation, Resource, ResourceRequirement, ResourceSchema, Reversal,
@@ -64,12 +64,13 @@ fn contract(output: Schema) -> Contract {
 fn child() -> Composition {
     Composition::new(ResourceSchema::new(&[TOOL, ACTIONS]).unwrap())
 }
-async fn host(schema: &[Resource]) -> (Composition, Arc<SharedEntry>) {
+async fn host(schema: &[Resource]) -> (Composition, Arc<ControlServer>) {
     let mut composition = Composition::new(ResourceSchema::new(schema).unwrap());
     let entry = entry::install(
         &mut composition,
         ENTRY,
         entry::Registration {
+            protocol: pingora_worker::config::ControlProtocol::Http,
             worker_control: Some(Arc::default()),
             logging_health: None,
             endpoint: network_sockets::LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
@@ -85,12 +86,12 @@ struct Logs {
     _lease: Invocation<AtomicUsize>,
 }
 impl Source for Logs {
-    fn next(&mut self, _: &Context) -> Result<Option<Vec<u8>>, action_router::Error> {
+    fn next(&mut self, _: &Context) -> Result<Option<Vec<u8>>, action_execution::Error> {
         Ok(Some(br#""line""#.to_vec()))
     }
 }
 async fn axis(
-    entry: &SharedEntry,
+    entry: &ControlServer,
     name: &str,
     output: Schema,
     bytes: &[u8],
@@ -117,7 +118,7 @@ async fn axis(
         contract: contract(output),
         bindings: vec![binding(&format!("{name}.status"))],
         handler: Arc::new(move |_: &[u8], _: &Context| {
-            let _lease = reader.enter().map_err(action_router::Error::Failed)?;
+            let _lease = reader.enter().map_err(action_execution::Error::Failed)?;
             Ok(value.clone())
         }),
     }];
@@ -130,7 +131,7 @@ async fn axis(
             bindings: vec![binding(&format!("{name}.logs"))],
             handler: Arc::new(StreamHandler(move |_: &[u8], _: &Context| {
                 Ok(Box::new(Logs {
-                    _lease: port.enter().map_err(action_router::Error::Failed)?,
+                    _lease: port.enter().map_err(action_execution::Error::Failed)?,
                 }) as Box<dyn Source>)
             })),
         });
