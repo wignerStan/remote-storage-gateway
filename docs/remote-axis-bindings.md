@@ -1,19 +1,26 @@
 # Remote plugins and axis ingress
 
-The plugin axis owns its ingress. Its runtime path is:
+The entry dispatches plugin operations to their manager and axis surface. The
+entry can also serve worker controls and explicit host Tool routes. These routes
+keep their own use-flows and grants.
+
+Source dependencies are:
 
 ```mermaid
 flowchart LR
-    F[Plugin RPC or other carrier facility] --> E[Plugin entry]
-    E --> M[Remote plugin manager use-flow]
-    M --> S[Pure axis surface: select an issued publication]
-    M --> L[Infra plugin membership and lifecycle]
-    L --> P[Installed participant generation]
+    E[Entry and assembly] --> F[General RPC registration API]
+    E --> M[Remote plugin manager]
+    M --> S[Pure axis surface]
+    M --> L[Infra membership and lifecycle]
+    C[Plugin coordinator] --> B[Memory budget and lifetime primitives]
 ```
 
-Worker application ingress and worker management are separate. Remote plugin
-operations never mount through `SharedEntry` or its `install_actions` method.
-Reusing an RPC carrier does not mean reusing the host application's entry or router.
+At runtime the RPC facility delivers calls to registered entry handlers. That
+callback does not create a source dependency from the facility to entry.
+`network_actions::facility::RpcFacility` supports unary calls and multiple streaming
+subscribers. It has no shared-memory, allocation or plugin coordination logic.
+An API server can mount its bounded `grpc_service()`. The existing Axum mount
+serves HTTP actions; it does not serve the generated gRPC API.
 
 The previous implementation had only a map of outbound connections. That was not
 a plugin manager. `RemotePluginManager` now owns installed participant identities,
@@ -66,10 +73,21 @@ both direct and remote bindings. The remote caller cannot widen either grant.
 
 `axis_bindings.endpoint` is the outbound provider endpoint. `plugin_ingress.listen`
 is the optional incoming plugin control endpoint. They are different responsibilities.
-Omitting `plugin_ingress` opens no plugin listener. Its dedicated router does not
-expose `worker.get`, `worker.apply`, metrics, configuration or native Tool actions.
-Worker management does not expose the plugin routes. Configuration rejects using
-the same address for plugin ingress and worker management or data ingress.
+Omitting `plugin_ingress` publishes no plugin controls. To share the existing
+management listener, configure:
+
+```json
+{
+  "management": {"listen": "unix:///run/pingora-worker/control.sock"},
+  "plugin_ingress": {"mount": "management"}
+}
+```
+
+The shared entry dispatches `worker.*` and `plugin.*` independently. With `listen`,
+the plugin entry instead binds a dedicated local listener. A dedicated plugin
+listener does not expose worker controls. Two listeners cannot bind the same
+address; select `mount` when sharing. Data ingress remains separate. Unknown or
+mixed mount/listen fields are rejected.
 
 Both directions accept Unix sockets or loopback TCP. Deployment controls local
 endpoint access and peer identity. Loopback alone does not authenticate a peer.
@@ -90,7 +108,7 @@ working direct bridge inside this worker.
 
 ## Plugin operations
 
-The dedicated entry reuses `infra.actions.v1.Actions/Call` with these bindings:
+Both entry configurations reuse `infra.actions.v1.Actions/Call` with these bindings:
 
 | Binding | Input | Effect |
 | --- | --- | --- |
@@ -100,7 +118,10 @@ The dedicated entry reuses `infra.actions.v1.Actions/Call` with these bindings:
 
 All fields are JSON. Unknown fields are rejected. Controls cannot supply an
 endpoint, artifact, hook list, header list or new registration. Input/output is
-limited to 1 KiB, at most 32 concurrent control calls, and a 30-second local deadline.
+limited to 1 KiB. A dedicated plugin listener allows 32 concurrent calls and a
+30-second local deadline. A shared mount uses the management carrier's aggregate
+128-call capacity and 120-second deadline. The client's shorter deadline still
+applies. Neither setting proves remote execution has ended.
 Use `plugin.get` before a mutation. The random manager incarnation rejects controls
 from a prior worker instance. The registration generation rejects withdrawal of a
 replacement. These values are concurrency coordinates, not authentication secrets.
@@ -145,6 +166,27 @@ membership before releasing transports. Failed inverses remain retained and cons
 capacity. Remote execution can outlive a local deadline; this implementation does
 not claim remote cancellation, process join or shared-memory reclamation.
 
+## Shared notifier memory coordination
+
+Process assembly creates one `plugin_manager::memory::Coordinator` for direct and
+RPC metadata callbacks. It admits at most 64 subscribers, 128 retained allocations,
+and 8 MiB of reserved capacity. Each metadata frame reserves at most 64 KiB before
+serialization. The writer grows only as needed and writes directly into its owned
+buffer. There is no intermediate JSON value or buffer-to-buffer copy here.
+
+The direct native callback holds its payload lease through actual native completion.
+The remote adapter holds the lease in its owned exchange task. Cancelling the
+waiting request does not release the reservation early. Shutdown retires notifiers
+before the coordinator. These are process-local control buffers; the RPC transport
+still encodes and transmits metadata. This does not implement bulk shared memory
+or prove that a remote peer stopped using other resources after a deadline.
+
+Full plugin managers and Tool-provider managers have different jobs. The reusable
+infra manager can compose Tool providers with a full plugin, while a host can use
+the Tool manager alone. The worker's existing native action publication remains an
+explicit host binding. Full Tool implementations and policy/decoder/encoder adapters
+use governed ports; choosing direct native or RPC delivery does not widen those ports.
+
 ## Source ownership and validation limits
 
 The plugin entry decodes wire values. The worker manager owns plugin operations and
@@ -155,11 +197,11 @@ native synchronous actions retain their blocking execution path.
 
 This corrects the previous host-entry guidance using the supplied export 7 design
 discussions. These documents are design inputs, not execution evidence. The current
-integration tests exercise separate real Unix sockets, withdrawal/reactivation,
+integration tests exercise shared and separate real Unix sockets, withdrawal/reactivation,
 stale incarnation and generation rejection, fixed grants, dynamic connection
 replacement and rollback. They do not establish throughput or remote authorization.
 
-Remaining limits include no provider capability negotiation, no authenticated
+Remaining limits include no worker bulk shared-memory binding, no provider capability negotiation, no authenticated
 cross-host transport, no bulk RPC/shared-memory binding, no full lifecycle state
 API, and no measured production throughput or tail latency. Native libraries remain
 trusted host code. Checker ownership declarations cannot prove these runtime

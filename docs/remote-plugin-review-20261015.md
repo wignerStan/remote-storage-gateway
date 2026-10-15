@@ -1,5 +1,10 @@
 # Remote plugin integration review — 2026-10-15
 
+Historical review of the earlier dedicated-entry implementation. The later
+[shared-entry and coordination review](plugin-coordination-review-20261015.md)
+supersedes its entry-separation rule and exact-call evidence conclusion. Runtime
+callback arrows below are not source dependency arrows.
+
 The remote plugin path is now carrier facility → plugin entry → remote plugin
 manager → axis surface. Worker data ingress and worker management remain separate.
 The earlier connection map was only a transport primitive and did not implement
