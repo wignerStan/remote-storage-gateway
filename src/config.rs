@@ -358,7 +358,8 @@ pub enum CallbackBinding {
     #[default]
     Remote,
     Direct,
-    /// Use only a native bridge implemented and tested by this worker.
+    /// Prefer direct for the integrated Rust bridge; other runtimes use RPC.
+    /// An explicit direct binding can still select an admitted native Go object.
     Auto,
 }
 
@@ -458,7 +459,9 @@ pub enum CallbackKind {
 impl NativeCallback {
     pub fn resolved_binding(&self) -> CallbackBinding {
         match self.binding {
-            CallbackBinding::Auto if self.language.native().is_ok() => CallbackBinding::Direct,
+            CallbackBinding::Auto if matches!(self.language, Language::Rust) => {
+                CallbackBinding::Direct
+            }
             CallbackBinding::Auto => CallbackBinding::Remote,
             selected => selected,
         }
@@ -876,7 +879,7 @@ mod tests {
             CallbackBinding::Remote
         );
         callback["binding"] = json!("auto");
-        for language in ["python", "javascript"] {
+        for language in ["python", "go", "javascript"] {
             callback["language"] = json!(language);
             let config = remote(callback.clone());
             config.validate().unwrap();
@@ -885,17 +888,31 @@ mod tests {
                 CallbackBinding::Remote
             );
         }
-        for language in ["rust", "go"] {
-            let mut direct = selected_callback();
-            direct["binding"] = json!("auto");
-            direct["language"] = json!(language);
-            let config = configured(direct);
-            config.validate().unwrap();
-            assert_eq!(
-                config.callbacks[0].resolved_binding(),
-                CallbackBinding::Direct
-            );
-        }
+        let mut rust = selected_callback();
+        rust["binding"] = json!("auto");
+        let config = configured(rust);
+        config.validate().unwrap();
+        assert_eq!(
+            config.callbacks[0].resolved_binding(),
+            CallbackBinding::Direct
+        );
+
+        let mut go = selected_callback();
+        go["language"] = json!("go");
+        go["binding"] = json!("auto");
+        assert!(
+            configured(go.clone())
+                .validate()
+                .unwrap_err()
+                .contains("requires an axis")
+        );
+        go["binding"] = json!("direct");
+        let config = configured(go);
+        config.validate().unwrap();
+        assert_eq!(
+            config.callbacks[0].resolved_binding(),
+            CallbackBinding::Direct
+        );
         let mut legacy = selected_callback();
         legacy.as_object_mut().unwrap().remove("binding");
         assert!(

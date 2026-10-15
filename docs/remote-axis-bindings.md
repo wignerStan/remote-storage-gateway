@@ -1,12 +1,11 @@
 # Plugin control over local UDS
 
-Entry routes requests to one or more axes. It has no shared/dedicated mounting
-mode. A facility owns the listener, transport multiplexing and subscriptions.
-Assembly selects facilities and registers entry handlers with them. This is a
-composition responsibility, not exclusive permission to access the OS. Assembly
-and effect-tool strata may perform direct OS operations under their role
-constraints. Here the socket primitive wrapper and execution runtime-support
-provide those mechanisms; entry remains a route boundary.
+Entry decodes requests and routes them to one or more axes. A facility owns the
+listener, transport multiplexing and subscriptions. Assembly uses the socket
+primitive to create and bind a socket, gives the listener to the facility, and
+registers entry handlers. Assembly and effect-tool code can access the OS under
+their role constraints. Entry does not create the listener or allocate shared
+memory.
 
 The source dependency direction is:
 
@@ -121,8 +120,15 @@ pathname or package name alone is not authentication.
 | --- | --- |
 | Omitted or `remote` | Local ttrpc; requires an axis and registration |
 | `direct` | Existing native or optional Wasm artifact path |
-| `auto`, Rust or Go | Direct using the integrated native ABI bridge |
-| `auto`, Python or JavaScript | Local ttrpc; interpreter owns its scheduler |
+| `auto`, Rust | Direct using the integrated native ABI bridge |
+| `auto`, Go, Python or JavaScript | Local ttrpc; the other runtime owns its scheduler |
+
+C++/Rust and Node/libuv have suitable native loop models, but a working C ABI or
+FD/byte adapter does not prove that the worker has integrated the runtime's
+callback protocol. This worker currently integrates native Rust and explicit Go
+Object loading. Go `auto` now selects RPC; direct Go requires an explicit choice.
+The independent Node adapter runs on Node-API/libuv, not Bun FFI. Node/C++ worker
+embedding and physical shared-memory bindings remain separate integration work.
 
 ## Operations and custody
 
