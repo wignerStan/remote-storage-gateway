@@ -27,10 +27,10 @@ async fn sse_item(socket: &mut TcpStream) -> Value {
         loop {
             wire.push(socket.read_u8().await.unwrap());
             assert!(wire.len() < 8192);
-            if let Some(start) = wire.windows(6).position(|part| part == b"data: ") {
-                if let Some(end) = wire[start + 6..].iter().position(|byte| *byte == b'\n') {
-                    return serde_json::from_slice(&wire[start + 6..start + 6 + end]).unwrap();
-                }
+            if let Some(start) = wire.windows(6).position(|part| part == b"data: ")
+                && let Some(end) = wire[start + 6..].iter().position(|byte| *byte == b'\n')
+            {
+                return serde_json::from_slice(&wire[start + 6..start + 6 + end]).unwrap();
             }
         }
     })
