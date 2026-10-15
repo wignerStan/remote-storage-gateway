@@ -49,6 +49,27 @@ NotFound/PermissionDenied status and server streams. This external probe is not
 yet a required cross-language CI job. The transcript and reproduction harness
 are retained with this task's validation reports.
 
+## Checker result
+
+The final registration-free scan covers this worker plus infra lifecycle, action
+execution, route publication and both carriers. It reports zero blockers,
+46 advisories, one suppressed finding and no infrastructure failures. There are
+no remaining forbidden dependency edges or foreign public re-exports in this
+scan. Parsing completed without failures, timeouts or a file-limit cutoff.
+
+The result remains `inconclusive`: selected local dependencies and external
+owners are outside the acquired evidence, generated tonic imports are unresolved,
+and three C fixtures lack preprocessing/build/linker evidence. Cross-axis
+ownership is unassessed because the scan declares no semantic axes. Zero blockers
+is not proof that all architecture constraints have been assessed.
+
+Checker corrections keep owner-name hints out of role evidence and do not infer
+a facility from an arbitrary pair of shutdown operations. `close + drain` alone
+no longer counts as activation plus teardown. Existing typed transactional
+activation/reversal evidence still identifies real lifecycle facilities. This
+correction makes action-execution an effect-tool candidate with medium confidence;
+it does not certify its role from its name or a compatibility label.
+
 ## Remaining limits
 
 The Rust worker does not yet adapt the existing C arena/resource profile. That
