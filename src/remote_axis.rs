@@ -1,5 +1,5 @@
 //! Remote plugin membership and its outbound RPC binding.
-//! Plugin ingress calls this use-flow, which selects the pure axis surface.
+//! Plugin ingress selects configured grants; the notifier interprets hook decisions.
 pub(crate) mod surface;
 #[cfg(test)]
 mod tests;
@@ -140,7 +140,7 @@ struct Axis {
 }
 
 /// Remote plugin membership, independent of the worker management entry.
-/// Infra owns registration generations and draining; this use-flow applies the surface.
+/// Infra owns registration generations and draining; this owner selects configured grants.
 #[derive(Default)]
 pub struct RemotePluginManager {
     axes: BTreeMap<String, Arc<Axis>>,

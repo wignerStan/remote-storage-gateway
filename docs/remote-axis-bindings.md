@@ -9,8 +9,9 @@ memory.
 
 ## Current source boundaries and remaining debt
 
-The graph below describes the current source dependencies. The marked edge is
-an unresolved FCIS boundary problem, not an approved dependency direction.
+The graph below records current imports. The remote manager's source role
+requires assessment of its actual coordination and application decisions;
+the graph does not assign that role from a grant lookup or a lifetime shape.
 
 ```mermaid
 flowchart LR
@@ -20,10 +21,10 @@ flowchart LR
     F --> X[Action execution and dispatch contract]
     R --> X
     E --> X
-    E --> M[Remote plugin manager: host grant use-flow]
+    E --> M[Remote plugin manager: source role under review]
     M --> G[Local grant lookup helper]
     M --> C[Concrete outbound control client]
-    M -. "unresolved use-flow to facility dependency" .-> L[Concrete plugin registration lifecycle]
+    M --> L[Concrete plugin registration lifecycle]
 ```
 
 At runtime the listener invokes an injected handler. That call does not imply a
@@ -39,23 +40,28 @@ plus the injected `Dispatch` contract. Carriers consume that contract and do not
 import the concrete route registry. `action-router` owns route publication and
 implements dispatch. Native Pingora retains proxy data-path and notifier order.
 
-`src/remote_axis.rs` currently combines two responsibilities. It applies
-host-issued grants to activation and withdrawal, which is axis-specific
-use-flow work. It also constructs and calls the concrete
-`plugin_lifecycle::manager::PluginManager`, connects outbound clients, replaces
-connections and joins shutdown. The direct use-flow dependency on the lifecycle
-facility remains unresolved. `RemoteBindings` is currently registered as an
-effect-tool handler adapter; its connection acquisition still needs review
-separately from the host's semantic choices. Calling this whole manager an
-axisless facility would hide those choices rather than separate them.
+`src/remote_axis.rs` checks configured grants, manages registration generations,
+constructs outbound clients, replaces connections and joins shutdown. The
+concrete `plugin_lifecycle::manager::PluginManager` dependency is observed. The
+earlier claim that this was necessarily a `use_flow -> effect_facility` violation
+was too strong: selection and rejection also occur in general capability
+coordination. They do not alone establish business workflow ownership.
 
-The intended boundary keeps grant selection and semantic decisions in host
-use-flow. An independently governed effect-internal service contract should expose
-the required lifecycle operations, with exact generation and completion rules.
-The existing lifecycle owner would implement that contract; assembly would select
-and inject the service. Resource acquisition and ongoing connection ownership stay
-with their actual effect owners. This Rust service boundary has not been
-implemented. A forwarding trait or a changed role label would not establish it.
+Role classification must distinguish application-neutral general workflow from
+business workflow. `NativeNotifier` and worker use-flow interpret hook decisions
+and apply them to requests and responses; remote bindings carry opaque metadata.
+The remote module also adapts worker-private configuration and constructs owners.
+Those responsibilities need source-level assessment before assigning the whole
+module a role. Long-lived state, a one-call task or a shutdown `JoinSet` does not
+decide the classification. `RemoteBindings` is currently registered as an
+effect-tool handler adapter, separately from registration coordination.
+
+If independently governed workflow and coordination owners need to cooperate,
+their contract must express real operations, generations and completion duties.
+Assembly selects and injects the implementations. Do not create a forwarding
+trait merely to repair an assumed role edge, or relabel the whole module without
+checking the meaning of its public operations. This review changes neither the
+binding implementation nor the current dependency policy.
 
 ### Grant helper and semantic surface
 
@@ -225,10 +231,8 @@ The Go harness ran externally; it is not yet a required cross-language CI test.
 
 The reviewed concrete carrier-to-`Router` dependency was removed by extracting
 actual execution ownership and injecting its dispatch contract. That repair does
-not resolve the separate use-flow-to-lifecycle dependency in `remote_axis.rs`
-or the mixed connection-acquisition responsibility. It also does not establish
-the grant helper as an independently governed typed meaning surface. Passing
-runtime tests does not validate those source boundaries. The checker may retain uncertainty where semantic ownership,
-selected dependencies or C/FFI build evidence is missing; that uncertainty does
-not erase the concrete dependencies described above. This documentation review
-adds no implementation or new test result.
+not establish the role of the separate remote registration owner, or turn the
+grant helper into a typed meaning surface. Runtime tests do not determine source
+roles. The checker may retain uncertainty where semantic ownership, selected
+dependencies or C/FFI build evidence is missing. This documentation correction
+adds no implementation or new runtime test result.
