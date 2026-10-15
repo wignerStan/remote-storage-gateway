@@ -577,7 +577,7 @@ impl NativeProxy {
 }
 
 fn release_hold<T>(held: &mut Vec<T>) -> Vec<T> {
-    held.drain(..).collect()
+    std::mem::take(held)
 }
 
 fn response_decoder(
