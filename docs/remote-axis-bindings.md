@@ -7,7 +7,10 @@ registers entry handlers. Assembly and effect-tool code can access the OS under
 their role constraints. Entry does not create the listener or allocate shared
 memory.
 
-The source dependency direction is:
+## Current source boundaries and remaining debt
+
+The graph below describes the current source dependencies. The marked edge is
+an unresolved FCIS boundary problem, not an approved dependency direction.
 
 ```mermaid
 flowchart LR
@@ -17,23 +20,63 @@ flowchart LR
     F --> X[Action execution and dispatch contract]
     R --> X
     E --> X
-    E --> M[Remote plugin manager]
-    M --> S[Pure axis surface]
-    M --> L[Canonical plugin lifecycle owner]
+    E --> M[Remote plugin manager: host grant use-flow]
+    M --> G[Local grant lookup helper]
+    M --> C[Concrete outbound control client]
+    M -. "unresolved use-flow to facility dependency" .-> L[Concrete plugin registration lifecycle]
 ```
 
-At runtime the facility invokes an injected handler. That call does not imply a
-source dependency from the facility to the concrete entry. Worker controls and
-plugin controls can use the same entry boundary. Each route selects its owning
-use-flow and grant. Transport sharing does not merge those grants.
+At runtime the listener invokes an injected handler. That call does not imply a
+source dependency from the listener to the concrete entry. Worker controls and
+plugin controls can share an entry boundary. Entry decodes and routes requests;
+assembly selects and injects handlers. Listener and route owners retain their
+transport and publication responsibilities.
 
 `src/entry/worker.rs` and `src/entry/plugins.rs` contain decoding and dispatch.
 `src/assembly/control.rs` selects and connects the listener, route owner and
-carrier. `action-execution` owns the actual invocation, cancellation and completion
-pins, plus the injected `Dispatch` contract. Carriers receive that contract and do
-not import the concrete route registry. `action-router` owns publication and
-implements dispatch. Native Pingora still owns the proxy data path and notifier
-order.
+carrier. `action-execution` owns invocation, cancellation and completion pins,
+plus the injected `Dispatch` contract. Carriers consume that contract and do not
+import the concrete route registry. `action-router` owns route publication and
+implements dispatch. Native Pingora retains proxy data-path and notifier order.
+
+`src/remote_axis.rs` currently combines two responsibilities. It applies
+host-issued grants to activation and withdrawal, which is axis-specific
+use-flow work. It also constructs and calls the concrete
+`plugin_lifecycle::manager::PluginManager`, connects outbound clients, replaces
+connections and joins shutdown. The direct use-flow dependency on the lifecycle
+facility remains unresolved. `RemoteBindings` is currently registered as an
+effect-tool handler adapter; its connection acquisition still needs review
+separately from the host's semantic choices. Calling this whole manager an
+axisless facility would hide those choices rather than separate them.
+
+The intended boundary keeps grant selection and semantic decisions in host
+use-flow. An independently governed effect-internal service contract should expose
+the required lifecycle operations, with exact generation and completion rules.
+The existing lifecycle owner would implement that contract; assembly would select
+and inject the service. Resource acquisition and ongoing connection ownership stay
+with their actual effect owners. This Rust service boundary has not been
+implemented. A forwarding trait or a changed role label would not establish it.
+
+### Grant helper and semantic surface
+
+`src/remote_axis/surface.rs` stores configured grants, checks registration/hook
+selection and builds RPC method names. It is a pure host-owned grant helper.
+It does not currently reference an exact typed meaning port, so its `Surface`
+name does not establish the full `axis_meaning_surface` contract.
+
+The existing registered host publication is
+`proxy_pingora::worker::surface`, backed by `worker/contract.rs`, for the
+`proxy_worker` host axis and `proxy_plugins` plugin axis. Host use-flow owns
+callback invocation and result interpretation. The native notifier adapter
+projects permitted metadata and checks replies for both direct and RPC bindings.
+These responsibilities are distinct from the remote registration lookup helper.
+
+An `axis_bindings` key groups an outbound endpoint and its registrations. Every
+current remote callback uses the `worker.metadata.v1` contract. A different key,
+process or transport does not by itself prove a new semantic axis. A plugin may
+have its own use-flow, but that ownership requires its actual contract and source
+evidence. The generic Tool and Full lifecycle managers remain separate from
+such semantic integration; their resource coordination does not derive grants.
 
 ## Protocol choice
 
@@ -113,8 +156,15 @@ optional gRPC management clients. That independent facility is not the plugin
 control path. Existing API-server mounts remain available for those carriers.
 The local control service can mount on an already bound UDS listener; it cannot
 be inserted into an HTTP router without an explicit protocol multiplexer.
-Local socket permissions and deployment admission establish peer access. A
-pathname or package name alone is not authentication.
+The current ingress assumes one trusted control domain. Local socket permissions
+and deployment admission restrict who can connect. The entry does not bind a
+connection to a per-plugin principal or authorize each selection against such a
+principal. Any admitted control client can select any host-configured registration
+and use the published get/activate/withdraw operations with their required
+incarnation and generation values. Those values fence stale requests; they are
+not authorization credentials. Sharing the management listener also shares its
+published control routes. A pathname, package name or `axis` string is not peer
+authentication. Separate listeners alone do not add per-plugin authorization.
 
 | Binding selection | Result |
 | --- | --- |
@@ -173,7 +223,12 @@ fixed grants, replacement and cancelled requests with retained custody. Official
 Go ttrpc v1.2.10 interoperability covers both directions, errors and server streams.
 The Go harness ran externally; it is not yet a required cross-language CI test.
 
-The checker retains uncertainty where semantic ownership, selected dependencies
-or C/FFI build evidence is missing. The reviewed concrete carrier-to-`Router` dependency was removed by extracting
-actual execution ownership and injecting its dispatch contract. This is a source
-boundary change; runtime callback direction alone would not resolve the finding.
+The reviewed concrete carrier-to-`Router` dependency was removed by extracting
+actual execution ownership and injecting its dispatch contract. That repair does
+not resolve the separate use-flow-to-lifecycle dependency in `remote_axis.rs`
+or the mixed connection-acquisition responsibility. It also does not establish
+the grant helper as an independently governed typed meaning surface. Passing
+runtime tests does not validate those source boundaries. The checker may retain uncertainty where semantic ownership,
+selected dependencies or C/FFI build evidence is missing; that uncertainty does
+not erase the concrete dependencies described above. This documentation review
+adds no implementation or new test result.
