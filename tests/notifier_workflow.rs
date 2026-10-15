@@ -2,10 +2,8 @@
 use diagnostic_output::CredentialPolicy;
 use network_sockets::{DialRequest, DialTarget};
 use proxy_pingora::worker::{
-    RequestFlow,
-    surface::{
-        CallbackHook, Callbacks, Contract, DialDecision, Egress, Exposure, NotifierChain, Rejection,
-    },
+    Egress, NotifierChain, RequestFlow,
+    surface::{CallbackHook, Callbacks, Contract, DialDecision, Exposure, Rejection},
 };
 use serde_json::json;
 use std::sync::{

@@ -10,8 +10,8 @@ use pingora_core::{
 use pingora_http::ResponseHeader;
 use proxy_pingora::http_ingress::{Application, Handler, Ingress, Worker};
 use proxy_pingora::worker::{
-    RequestFlow,
-    surface::{CallbackHook, Callbacks, Contract, Egress, Exposure, NotifierChain, Rejection},
+    Egress, NotifierChain, RequestFlow,
+    surface::{CallbackHook, Callbacks, Contract, Exposure, Rejection},
 };
 use std::{
     num::NonZeroUsize,

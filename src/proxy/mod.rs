@@ -27,9 +27,9 @@ use proxy_pingora::{
     http_egress::HttpEgress,
     http_ingress::ProxyLifecycle,
     worker::{
-        CarrierExchange, HttpLifecycle, WorkerControl,
+        CarrierExchange, HttpLifecycle, NotifierChain, WorkerControl,
         surface::{
-            Callbacks, Contract, Exposure, NotifierChain, PoolDecision, PoolPhase, Rejection,
+            Callbacks, Contract, Exposure, PoolDecision, PoolPhase, Rejection,
         },
     },
 };

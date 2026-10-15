@@ -647,7 +647,7 @@ async fn native_network_controls_reject_patches_errors_and_oversized_or_secret_t
 
 #[tokio::test]
 async fn native_network_chain_defers_stops_at_first_decision_and_propagates_failure() {
-    use proxy_pingora::worker::surface::{Exposure, NotifierChain};
+    use proxy_pingora::worker::{NotifierChain, surface::Exposure};
     let first = Fixture::new(CONTINUE, &["before_dial", "pool", "socket"], &[]).await;
     let second = Fixture::new(
         r#"{"version":1,"decision":"deny"}"#,
