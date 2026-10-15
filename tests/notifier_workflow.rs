@@ -161,7 +161,7 @@ async fn scenario() {
             "one prepared request is shared by the installed callbacks",
             json!({
                 "authorization": "Bearer fixture-api-key",
-                "cookie": "route=blue; __oailb=affinity-node-7; theme=dark; session=fixture-session-secret; custom_auth=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmaXh0dXJlIn0.signature",
+                "cookie": "route=blue; __oailb=eyJhbGciOiJub25lIn0.eyJub2RlIjo3fQ.affinity; theme=dark; access_token=fixture-session-secret; jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmaXh0dXJlIn0.signature",
                 "request_id": "workflow-1",
             }),
         )
@@ -252,7 +252,7 @@ async fn scenario() {
     eprintln!("{rendered}");
     assert!(rendered.contains("route=blue"));
     assert!(rendered.contains("theme=dark"));
-    assert!(rendered.contains("__oailb=affinity-node-7"));
+    assert!(rendered.contains("__oailb=eyJhbGciOiJub25lIn0.eyJub2RlIjo3fQ.affinity"));
     assert!(rendered.contains("sha256:"));
     assert!(!rendered.contains("fixture-api-key"));
     assert!(!rendered.contains("fixture-session-secret"));

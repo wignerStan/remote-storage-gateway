@@ -100,7 +100,7 @@ async fn capture_response(
 
 #[tokio::test]
 async fn sse_response_dump_emits_once_after_streaming_and_hashes_only_credentials() {
-    let first = br#"data: {"type":"response.output_text.delta","delta":"streamed","api_key":"response-api-secret","jwt":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature","cookie":"session=session-secret; route=node-2; theme=light"}
+    let first = br#"data: {"type":"response.output_text.delta","delta":"streamed","api_key":"response-api-secret","jwt":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature","cookie":"access_token=session-secret; route=node-2; theme=light"}
 
 "#.to_vec();
     let last =
