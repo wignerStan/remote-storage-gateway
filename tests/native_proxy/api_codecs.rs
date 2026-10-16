@@ -147,7 +147,8 @@ async fn responses_ws_selects_lite_per_message_and_keeps_upstream_delta_opaque()
     }
     timeout(WAIT, async {
         let frames = Arc::new(vec![
-            frame(br#"{"type":"response.create","input":[],"generate":false}"#),
+            // This case selects normal creation, independently of prewarm classification.
+            frame(br#"{"type":"response.create","input":[],"generate":true}"#),
             frame(br#"{"type":"response.create","previous_response_id":"r1","input":[],"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"}}"#),
             frame(br#"{"type":"response.create","input":[]}"#),
             frame(br#"{"type":"response.append","input":[{"type":"function_call_output","output":"ok"}]}"#),

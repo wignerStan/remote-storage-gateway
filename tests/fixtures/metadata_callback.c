@@ -101,7 +101,7 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
 #ifdef TEST_RESPONSES_REPLY
     {
         static size_t sequence;
-        const char *kind = sequence == 0 ? "response.prewarm/" : sequence == 1 ? "responses_lite.delta/" : sequence == 3 ? "response.append/" : "response.create/";
+        const char *kind = sequence == 1 ? "responses_lite.delta/" : sequence == 3 ? "response.append/" : "response.create/";
         const char *prefix = TEST_API_PREFIX;
         size_t n = strlen(prefix), k = strlen(kind);
         if (sequence > 3 || method.len != n + k + 33 || memcmp(method.ptr, prefix, n)
