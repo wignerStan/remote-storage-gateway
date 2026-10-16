@@ -452,10 +452,11 @@ be supplied through `assembly::assemble_with_codecs(config, codecs)`; each imple
 `proxy_pingora::http_ingress::message_codec::CodecPlugin` supplies its identifier, upgrade selection,
 handshake validation and per-connection decoder. Registration resolves an explicit
 identifier before native plugins are loaded. Several configured codecs may serve distinct routes; overlapping selections for
-a request are rejected. A native `.so` may also register an explicit
-`codec_descriptor` selecting bounded built-in HTTP JSON or WebSocket framing and
-routes; its semantic decoder stays inside the native plugin. The descriptor ID
-must match the explicit codec grant. Arbitrary Rust vtables never cross C ABI.
+a request are rejected. Host configuration may also supply a `codec_descriptor`
+selecting bounded built-in HTTP JSON or WebSocket framing and routes. The native
+callback receives the resulting complete messages for semantic inspection. The
+descriptor ID must match the explicit codec grant. A `.so` does not install an
+incremental Rust decoder through this ABI. Arbitrary Rust vtables never cross C ABI.
 A codec must bound pending input,
 message output and frame bookkeeping and fail closed on malformed/incomplete input.
 
@@ -634,27 +635,25 @@ commit `444da310e108da16aaeb18fd790b0ac464f08aca`; they remain opt-in.
 
 ## Ownership and calls
 
-- **Worker axis:** infra's Pingora carrier, concurrency/drain mechanics, worker
-  management state, semantic notifier contracts, and native egress provider port.
-  A contract/trait belongs to the worker surface; its installed implementation
-  and resource lifetime belong to plugin composition.
-- **Plugin axis:** the runtime dynamically composes Object/Function/Tool instances,
-  installs notifier implementations, retains tool/client resources, and owns
-  HTTP/gRPC entry handles and reversible action registration. Each Object plugin
-  orchestrates its own useflow through explicitly injected Tools.
-- **Function callbacks:** compiled functions or optional V8/Lua functions return
-  decisions from worker notification facts. They are not substitutes for the
-  Object plugin's independently initiated workflow. No VM enters the proxy data
-  path by default.
+- **Worker axis:** Pingora ingress, concurrency and drain mechanics, worker
+  management, payload framing, callback grants, and the selected native transport.
+- **Worker plugin scope:** general payload decoders and full client replacements.
+  Decoder implementations reuse Rust protocol primitives. A full client owns
+  complete request execution, response streams, pools, cancellation, and cleanup.
+  Function/Object/Tool names in the generic plugin runtime describe component
+  roles; they do not require business providers in the worker.
+- **Business application:** remote bindings keep policy, storage, caches, and
+  application workflows with their application owner. Worker metadata/message
+  calls use the granted contract and retain custody through actual completion.
 
-    Pingora ingress -> runtime-installed callback chain -> native egress provider
-    Plugin Object useflow -> declared Tool binding -> effect
-    Internal gRPC -> shared router -> worker action OR explicit plugin action
+    Pingora ingress -> host decoder -> granted callback -> selected client
+    Worker remote binding -> application-owned workflow and dependencies
+    Internal control entry -> worker action OR explicitly registered axis action
 
-Tool calls do not traverse the notifier chain. Worker callback exposure is not an
-HTTP/gRPC route allowlist. Action contracts are distinct from transport bindings;
-entry registration belongs to plugin composition. PG/cache Tool dependencies are
-injected directly in the plugin axis. There is no universal RequestPlan layer.
+Worker callback exposure is separate from HTTP/gRPC action publication. Action
+contracts and transport bindings remain distinct; composition owns registration.
+A remote RPC reconnect replaces that connection only. A peer connector hook also
+retains Pingora's HTTP execution. Neither is a full client replacement.
 
 `entry::install` binds one selected internal endpoint. `Registration::worker_control`
 explicitly chooses whether that listener installs worker management under the
@@ -852,57 +851,44 @@ from successful request delivery. Shutdown drain is bounded and best effort.
 
 ## Native boundary
 
-The synchronous C ABI is the required effect boundary for Go Object plugins.
-Arguments and replies use scoped byte views/opaque handles; no Go/Rust runtime object
-or Future crosses it. Runtime binding dispatch verifies the calling instance owns
-the binding ID. Method validation remains the Tool's contract. Caller-local
+The existing native callback ABI uses synchronous C calls with scoped byte views
+and opaque handles. No Go/Rust runtime object or Future crosses that ABI. Runtime
+binding dispatch verifies the calling instance owns the binding ID. Method
+validation remains the selected provider's contract. Caller-local
 async/await retains leases until the native operation actually returns; cancelling
 an await does not authorize freeing an in-flight handle. Logical closure,
 resource draining, and physical library unloading are separate operations.
 
-Native libraries are **trusted code, not an OS sandbox**. Business Object code
-uses explicitly bound Tool capabilities for side effects. Infra media carriers
-own their protocol sockets as explicitly installed infrastructure.
-The `tools/plugin-contract` build guard rejects direct net/rpc/fs entry references
-(including aliases and function capture) and unauditable dot imports. It checks
-selected first-party entry sources, not transitive dependencies, dynamically
-constructed behavior, arbitrary C code, or malicious syscalls. Bootstrap config
-and existing business dependencies still require review; this guard is not proof
-that every transitive side effect has been migrated. Runtime admission, ownership
-checks and quarantine do not contain native process crashes or restrict syscalls.
-Notifier plugins and synchronous codecs/chunk transforms remain trusted code;
-bounded host waits cannot forcibly interrupt arbitrary native CPU or allocator use.
+Native libraries are **trusted code, not an OS sandbox**. Native decoder and
+client implementations reuse installed infra primitives and retain their owners
+through actual completion. Runtime admission and quarantine do not contain
+process crashes or restrict syscalls. Bounded host waits cannot forcibly stop
+arbitrary native CPU or allocator use.
 
-The Rust native egress stream remains Rust-local through the provider trait.
-For a client implemented in another language, reuse infra's framed stdio primitive
-and provider adapter; do not add a front proxy or tunnel ordinary Tool calls
-through the notification chain.
+## Decoder and client integration
 
-## Curated optional Tool plugins
+The worker distributes no PostgreSQL, cache, or browser Tool artifacts. Business
+applications select their own dependencies. Reusable implementations remain in
+infra; their presence there does not make them worker requirements.
 
-`plugins/packages.json` catalogs PostgreSQL, Redis + memory cache and the browser
-client. These are optional builtin distributions, each a separate loadable `.so`;
-the generic worker does not statically link, automatically load or require them.
-Their implementations stay in the single infra checkout.
+Current decoder integration accepts trusted Rust-local `CodecPlugin` values
+through `assemble_with_codecs`, plus host-configured framing descriptors. Native
+callbacks inspect bounded complete messages. This is distinct from loading an
+incremental decoder implementation from a `.so`.
 
-Choose `just build-postgres`, `just build-cache` or `just build-browser` to build
-only that Tool into `plugins/`. `just build-plugins` is an explicit convenience
-selection of all three. Listing a package does not grant a capability: deployments
-select artifacts, and loaded instances independently declare their provider bindings.
+Current `NativeProxy` constructs a concrete native `HttpEgress`. The generic infra
+`worker::Egress` port and provider adapters do not by themselves wire a full client
+replacement into this executable. That boundary must include request execution,
+stream ownership, admission, replacement, and drain before a deployment can claim
+full client replacement. A different peer connector or remote RPC endpoint does
+not establish it. Native response bytes must stay in the native carrier; the
+notification contract is not a substitute transport for the response stream.
 
-Sub2API's base business bundle contains only its Go Object. Its OAuth business
-bundle contains two Go Objects. The application deployment separately selects
-the needed curated Tools and injects their capabilities. Missing required bindings
-fail before loading; there is no implicit backend fallback.
-
-The worker and its release application must resolve the same infra checkout;
-use the existing sibling `infra` workspace rather than a second clone. The host
-provides its own executable; other release binaries may select their application at build time.
-The selected build controls hook scope; environment variables only supply runtime
-settings and credentials. Run `cargo test` for host checks and
-`go test tools/plugin-contract/main.go tools/plugin-contract/main_test.go` for the
-source boundary checker. Both axes retain independent useflows and meaning cores.
-
+Build the worker against its selected sibling `infra` checkout. Remote
+applications own their executables, dependencies, and resource composition.
+Select contracts and hook scope explicitly; environment variables supply runtime
+settings and credentials. Run `cargo test` for host checks. Worker and business
+application owners retain independent workflows and lifecycle state.
 
 See [the bridge and codec review](docs/bridge-codec-review-20261009.md) for actual
 native carrier call sites, SDK reference versions, and Codex 0.162 interruption.

@@ -33,10 +33,10 @@ Release curation should select reviewed versions and verified artifact hashes.
 `path`, `package`, `variant`, `kind` and `language` are selection/ABI consistency
 inputs, not implemented cryptographic artifact admission. The worker has no
 signature/hash allowlist setting. Protect the selected path and release process;
-self-reported identity and `plugins/packages.json` membership do not prove origin.
-PostgreSQL, Redis/memory and browser Tools are optional curated `.so` distributions,
-not automatically loaded or granted. Compiled/static host Tools, when an embedding
-application selects them, retain trusted process authority.
+self-reported identity does not prove origin. The worker distributes no storage,
+cache, or browser Tool artifacts. Business dependencies belong to the remote
+application. Trusted native decoder and client implementations retain process
+authority; a remote RPC reconnect does not replace the upstream client.
 
 ## All notifier stages cross the same boundary
 
