@@ -101,8 +101,9 @@ projects permitted metadata and checks replies for both direct and RPC bindings.
 These responsibilities are distinct from the remote registration lookup helper.
 
 An `axis_bindings` key groups an outbound endpoint and its registrations. Every
-current remote callback uses the `worker.metadata.v1` contract. A different key,
-process or transport does not by itself prove a new semantic axis. A plugin may
+remote metadata hook uses the `worker.metadata.v1` contract. A selected host
+codec can also issue bounded `worker.message.v1` callbacks under the same
+registration. A different key, process or transport does not by itself prove a new semantic axis. A plugin may
 have its own use-flow, but that ownership requires its actual contract and source
 evidence. The generic Tool and Full lifecycle managers remain separate from
 such semantic integration; their resource coordination does not derive grants.
@@ -117,10 +118,15 @@ queues are bounded. There is no automatic retry or invented cancellation frame.
 
 The fixed service is `infra.control.v1.Actions`; the method is the registered
 binding, such as `plugin.get` or `worker.metadata.v1.policy.routing`. The payload
-retains the existing versioned, schema-checked JSON contract. It is opaque to the
-carrier. The envelope is Protobuf; the JSON payload is not presented as a generated
+retains the existing versioned, schema-checked JSON contract for metadata. It is
+opaque to the carrier. Bounded message callbacks use the fixed binding
+`worker.message.v1.<registration>`. Their payload starts with a two-byte big-endian
+method length, then the UTF-8 `codec/kind/request-id/sequence` method (at most 256
+bytes), then the raw message bytes. Replies use the same raw action format and
+host grant checks as native callbacks. This adds no JSON/base64 body conversion.
+The envelope is Protobuf; the JSON payload is not presented as a generated
 Protobuf message. Contract bytes can also be consumed without RPC. This change
-adds no payload conversion for each callback.
+adds no metadata conversion for each callback.
 
 This selects the same-host framing described by the
 [ttrpc protocol](https://github.com/containerd/ttrpc/blob/v1.2.10/PROTOCOL.md) and
@@ -259,3 +265,27 @@ grant helper into a typed meaning surface. Runtime tests do not determine source
 roles. The checker may retain uncertainty where semantic ownership, selected
 dependencies or C/FFI build evidence is missing. This documentation correction
 adds no implementation or new runtime test result.
+
+## Bounded remote messages
+
+The host resolves `message_codec` from its registered codecs. A remote plugin
+cannot install executable codecs or publish arbitrary native `actions`. The same
+`message_actions`, `message_proxy`, `message_responses`, and header grants apply to
+both bindings. Upstream delta events bypass both bindings.
+
+An axis that carries messages must set `max_message_bytes` to at least
+`inspection.max_message_bytes`. The axis limit defaults to 65536 bytes and accepts
+1 through 33554432 bytes. The RPC input limit adds 258 bytes for the method
+prefix. The output limit adds 65541 bytes for action metadata and its prefix.
+Metadata hook inputs and replies remain limited to 65536 bytes.
+
+The carrier retains the registration lease and inspection reservation until a
+reply arrives or the connection closes. A timeout or cancelled waiter does not
+release that custody. A connection close does not prove remote work has ended.
+
+Transport replacement connects first and then selects the new connection for new
+calls. Pending exchanges retain their original connection. The worker never
+retries a failed callback. Connection-local peer request state cannot migrate to
+the replacement. A stateful participant must reject later messages when their
+admission state is absent. An active session can therefore fail closed during
+replacement; callers must start a new request rather than replay old messages.

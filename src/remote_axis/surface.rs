@@ -8,6 +8,7 @@ pub(crate) struct Grant {
     pub axis: String,
     pub registration: String,
     methods: BTreeMap<String, String>,
+    codec: Option<String>,
 }
 impl Grant {
     pub fn new(axis: String, registration: String, hooks: &[String]) -> Self {
@@ -19,7 +20,27 @@ impl Grant {
             axis,
             registration,
             methods,
+            codec: None,
         }
+    }
+    pub fn with_codec(mut self, codec: Option<String>) -> Self {
+        self.codec = codec;
+        self
+    }
+    pub fn message_method(&self, method: &str) -> Result<String, String> {
+        let fields: Vec<_> = method.split('/').collect();
+        if fields.len() != 4
+            || self.codec.as_deref() != Some(fields[0])
+            || !crate::proxy::message_codec::valid_id(fields[1])
+            || fields[1].len() > 64
+            || fields[2..]
+                .iter()
+                .any(|id| id.len() != 16 || !id.bytes().all(|b| b.is_ascii_hexdigit()))
+            || method.len() > 256
+        {
+            return Err("message method is outside the issued plugin grant".into());
+        }
+        Ok(format!("worker.message.v1.{}", self.registration))
     }
     pub fn method(&self, hook: &str) -> Result<&str, String> {
         self.methods

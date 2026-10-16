@@ -351,3 +351,53 @@ async fn plugin_ingress_membership(shared: bool) {
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn denied_remote_metadata_prevents_message_callback_and_upstream_dispatch() {
+    timeout(WAIT, async {
+        let reached = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&reached);
+        let origin = listen(move |_socket| { count.fetch_add(1, Ordering::SeqCst); async {} }).await;
+        let messages = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&messages);
+        let router = Router::new();
+        let registration = router.register(vec![
+            Action {
+                contract: Contract { id: "worker.metadata".into(), version: 1, response: ResponseMode::Unary, input: Schema::Json, output: Schema::Json, max_input: 65536, max_output: 65536 },
+                bindings: vec![Binding::LocalControl { action: "worker.metadata.v1.policy.pre_routing".into() }],
+                handler: Arc::new(|_: &[u8], _: &Context| Ok(br#"{"version":1,"decision":"deny"}"#.to_vec())),
+            },
+            Action {
+                contract: Contract { id: "worker.message".into(), version: 1, response: ResponseMode::Unary, input: Schema::Bytes, output: Schema::Bytes, max_input: 1048834, max_output: 1114117 },
+                bindings: vec![Binding::LocalControl { action: "worker.message.v1.policy".into() }],
+                handler: Arc::new(move |_: &[u8], _: &Context| { observed.fetch_add(1, Ordering::SeqCst); Ok(b"null".to_vec()) }),
+            },
+        ]).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policy.sock");
+        let listener = network_local_control::listener::ControlListener::prepare(tokio::net::UnixListener::bind(&path).unwrap(), None,
+            network_local_control::ControlService::new(Arc::new(router), 1114117, WAIT, 4).unwrap()).unwrap();
+        listener.activate().unwrap();
+        let mut cfg = config(origin.address, &format!("unix://{}", path.display()));
+        cfg.axis_bindings.get_mut("request_policy").unwrap().max_message_bytes = 1048576;
+        cfg.callbacks[0].hooks = vec!["pre_routing".into()];
+        cfg.callbacks[0].message_codec = Some("openai.chat_completions.v1".into());
+        let proxy = pingora_worker::assembly::assemble(cfg).await.unwrap();
+        let worker = serve_engine(proxy.clone()).await;
+        let mut client = TcpStream::connect(worker.address).await.unwrap();
+        let body = br#"{"messages":[],"model":"test"}"#;
+        client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: downstream\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await.unwrap();
+        client.write_all(body).await.unwrap();
+        let mut response = Vec::new();
+        if let Err(error) = client.read_to_end(&mut response).await {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        }
+        assert!(response.starts_with(b"HTTP/1.1 403"));
+        assert_eq!(messages.load(Ordering::SeqCst), 0);
+        assert_eq!(reached.load(Ordering::SeqCst), 0);
+        drop(worker);
+        proxy.shutdown().await.unwrap();
+        registration.revoke();
+        listener.shutdown().await.unwrap();
+    }).await.unwrap();
+}

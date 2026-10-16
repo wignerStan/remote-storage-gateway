@@ -61,6 +61,7 @@ async fn cancelled_waiter_keeps_membership_pinned_until_remote_exchange_settles(
             AxisBinding {
                 endpoint,
                 max_inflight: 2,
+                max_message_bytes: 65536,
                 connect_timeout_ms: 5000,
                 shutdown_timeout_ms: 5000,
             },
@@ -134,4 +135,120 @@ async fn cancelled_waiter_keeps_membership_pinned_until_remote_exchange_settles(
     })
     .await
     .expect("remote membership cancellation test timed out");
+}
+
+#[test]
+fn message_grants_bind_codec_and_method_shape() {
+    let grant = Grant::new("sub2api".into(), "openai-oauth".into(), &[])
+        .with_codec(Some("codex.responses.v1".into()));
+    assert_eq!(
+        grant
+            .message_method("codex.responses.v1/response.create/0000000000000001/0000000000000002")
+            .unwrap(),
+        "worker.message.v1.openai-oauth"
+    );
+    for method in [
+        "other.v1/response.create/0000000000000001/0000000000000002",
+        "codex.responses.v1/native.action/1/2",
+        "codex.responses.v1/response/create/0000000000000001/0000000000000002",
+    ] {
+        assert!(grant.message_method(method).is_err());
+    }
+    assert!(
+        Grant::new("a".into(), "b".into(), &[])
+            .message_method("codex.responses.v1/response.create/0000000000000001/0000000000000002")
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn remote_message_carries_large_raw_payload_and_keeps_metadata_bounded() {
+    use bytes::Bytes;
+    let max = 6 * 1024 * 1024;
+    let method = "codex.responses.v1/response.create/0000000000000001/0000000000000002";
+    let router = Router::new();
+    let registration = router
+        .register(vec![Action {
+            contract: Contract {
+                id: "worker.message".into(),
+                version: 1,
+                response: ResponseMode::Unary,
+                input: Schema::Bytes,
+                output: Schema::Bytes,
+                max_input: max + 258,
+                max_output: max + 65541,
+            },
+            bindings: vec![Binding::LocalControl {
+                action: "worker.message.v1.openai-oauth".into(),
+            }],
+            handler: Arc::new(AsyncHandler(move |input: Vec<u8>, _: Context| async move {
+                let n = u16::from_be_bytes(input[..2].try_into().unwrap()) as usize;
+                assert_eq!(&input[2..2 + n], method.as_bytes());
+                assert_eq!(input.len() - 2 - n, max);
+                assert!(input[2 + n..].iter().all(|b| *b == 0xa5));
+                Ok(vec![0])
+            })),
+        }])
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("messages.sock");
+    let listener = ControlListener::prepare(
+        tokio::net::UnixListener::bind(&path).unwrap(),
+        None,
+        ControlService::new(Arc::new(router), max + 65541, Duration::from_secs(5), 4).unwrap(),
+    )
+    .unwrap();
+    listener.activate().unwrap();
+    let manager = RemotePluginManager::connect(
+        BTreeMap::from([(
+            "sub2api".into(),
+            AxisBinding {
+                endpoint: format!("unix://{}", path.display()),
+                max_inflight: 2,
+                max_message_bytes: max,
+                connect_timeout_ms: 5000,
+                shutdown_timeout_ms: 5000,
+            },
+        )]),
+        Surface::new(vec![
+            Grant::new("sub2api".into(), "openai-oauth".into(), &["routing".into()])
+                .with_codec(Some("codex.responses.v1".into())),
+        ])
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let binding = manager.binding("sub2api", "openai-oauth").unwrap();
+    assert_eq!(
+        binding
+            .message(
+                method,
+                Bytes::from(vec![0xa5; max]),
+                Duration::from_secs(5),
+                ()
+            )
+            .await
+            .unwrap(),
+        vec![0]
+    );
+    assert!(
+        binding
+            .message(
+                method,
+                Bytes::from(vec![0; max + 1]),
+                Duration::from_secs(5),
+                ()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        binding
+            .call("routing", vec![0; 65537], Duration::from_secs(5), ())
+            .await
+            .is_err()
+    );
+    manager.close().await.unwrap();
+    listener.shutdown().await.unwrap();
+    drop(registration);
 }

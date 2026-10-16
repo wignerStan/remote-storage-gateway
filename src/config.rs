@@ -542,6 +542,14 @@ impl Config {
         for callback in &self.callbacks {
             if callback.resolved_binding() == CallbackBinding::Remote {
                 crate::remote_axis::validate_callback(callback, &self.axis_bindings)?;
+                if callback.message_codec.is_some()
+                    && self.axis_bindings[callback.axis.as_ref().unwrap()].max_message_bytes
+                        < self.inspection.max_message_bytes
+                {
+                    return Err(
+                        "remote axis message limit must cover inspection max_message_bytes".into(),
+                    );
+                }
                 if !remote_registrations
                     .insert((callback.axis.as_ref(), callback.registration.as_ref()))
                 {
@@ -928,7 +936,6 @@ mod tests {
         let input = json!({"upstream":"http://127.0.0.1:9", "axis_bindings":{"request_policy":{"endpoint":"unix:///run/policy.sock"}},
             "callbacks":[{"package":"policy", "axis":"request_policy", "registration":"policy", "hooks":["routing"]}]});
         for (field, value) in [
-            ("message_codec", json!("websocket.v1")),
             ("path", json!("policy.so")),
             (
                 "graph",
@@ -957,6 +964,61 @@ mod tests {
                 .validate()
                 .unwrap_err()
                 .contains("unique")
+        );
+    }
+
+    #[test]
+    fn remote_messages_require_explicit_axis_capacity_and_reject_native_actions() {
+        let input = json!({"upstream":"http://127.0.0.1:9", "axis_bindings":{"sub2api":{"endpoint":"unix:///run/sub2api.sock", "max_message_bytes":6291456}},
+            "callbacks":[{"binding":"remote", "package":"policy", "axis":"sub2api", "registration":"openai-oauth", "hooks":[], "message_codec":"codex.responses.v1", "message_actions":true,"message_proxy":true}]});
+        let config: Config = serde_json::from_value(input.clone()).unwrap();
+        config.validate().unwrap();
+        let surface = crate::remote_axis::publication(&config.callbacks).unwrap();
+        assert!(
+            surface
+                .select("sub2api", "openai-oauth")
+                .unwrap()
+                .message_method(
+                    "codex.responses.v1/response.create/0000000000000001/0000000000000002"
+                )
+                .is_ok()
+        );
+        let mut small = input.clone();
+        small["axis_bindings"]["sub2api"]["max_message_bytes"] = json!(65536);
+        assert!(
+            serde_json::from_value::<Config>(small)
+                .unwrap()
+                .validate()
+                .unwrap_err()
+                .contains("inspection")
+        );
+        let mut native_action: Config = serde_json::from_value(input.clone()).unwrap();
+        native_action.callbacks[0].actions.push(NativeAction {
+            method: "arbitrary".into(),
+            contract: action_execution::Contract {
+                id: "test".into(),
+                version: 1,
+                response: action_execution::ResponseMode::Unary,
+                input: action_execution::Schema::Null,
+                output: action_execution::Schema::Null,
+                max_input: 16,
+                max_output: 16,
+            },
+            bindings: vec![],
+        });
+        assert!(
+            native_action
+                .validate()
+                .unwrap_err()
+                .contains("arbitrary native actions")
+        );
+        let mut no_grant = input;
+        no_grant["callbacks"][0]["message_codec"] = serde_json::Value::Null;
+        assert!(
+            serde_json::from_value::<Config>(no_grant)
+                .unwrap()
+                .validate()
+                .is_err()
         );
     }
 

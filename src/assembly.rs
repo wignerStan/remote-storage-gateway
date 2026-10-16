@@ -277,6 +277,26 @@ async fn assemble_selected(
                             .as_deref()
                             .ok_or("remote registration is absent")?,
                     )?;
+                    if let Some(codec) = &callback.message_codec {
+                        native.messages.push((
+                            codec.clone(),
+                            crate::proxy::message_codec::MessageCallback::remote(
+                                binding.clone(),
+                                std::time::Duration::from_millis(callback.timeout_ms),
+                                callback.message_responses,
+                            )
+                            .with_actions(
+                                callback.message_actions,
+                                callback.message_proxy,
+                                crate::native_notifier::validate_patch_headers(
+                                    &callback.patch_headers,
+                                )?,
+                            ),
+                        ));
+                    }
+                    if callback.hooks.is_empty() {
+                        continue;
+                    }
                     match NativeNotifier::remote(binding, &callback) {
                         Ok(notifier) => native
                             .callbacks

@@ -1,4 +1,4 @@
-//! Registered host protocol codecs and bounded native message callbacks.
+//! Registered host protocol codecs and bounded message callbacks.
 use super::*;
 use bytes::{Bytes, BytesMut};
 use plugin_loading::Callback;
@@ -8,21 +8,64 @@ use proxy_protocols::websocket::Limits;
 #[cfg(test)]
 pub(crate) const MESSAGE_LIMIT: usize = 1024 * 1024;
 
-/// Shares the metadata callback's exact native instance and admission owner.
+/// Shares the metadata callback's native instance or remote registration owner.
 #[derive(Clone)]
 pub(crate) struct MessageCallback {
-    instance: Arc<Callback>,
+    transport: CallbackTransport,
     timeout: Duration,
     response_enabled: bool,
     grant: Arc<super::message_action::Grant>,
 }
+#[derive(Clone)]
+enum CallbackTransport {
+    Native(Arc<Callback>),
+    Remote(crate::remote_axis::RemotePluginBinding),
+}
 impl MessageCallback {
     pub(crate) fn new(instance: Arc<Callback>, timeout: Duration, response_enabled: bool) -> Self {
         Self {
-            instance,
+            transport: CallbackTransport::Native(instance),
             timeout,
             response_enabled,
             grant: Arc::new(super::message_action::Grant::default()),
+        }
+    }
+    pub(crate) fn remote(
+        binding: crate::remote_axis::RemotePluginBinding,
+        timeout: Duration,
+        response_enabled: bool,
+    ) -> Self {
+        Self {
+            transport: CallbackTransport::Remote(binding),
+            timeout,
+            response_enabled,
+            grant: Arc::new(super::message_action::Grant::default()),
+        }
+    }
+    async fn exchange<T: Send + 'static>(
+        &self,
+        method: &str,
+        input: Bytes,
+        reservation: Option<Arc<admission_gate::budget::Reservation>>,
+        decode: impl FnOnce(&[u8]) -> T + Send + 'static,
+    ) -> std::result::Result<T, ()> {
+        match &self.transport {
+            CallbackTransport::Native(instance) => instance
+                .start_call_with_reply(
+                    &tokio::runtime::Handle::current(),
+                    method.to_owned(),
+                    input,
+                    self.timeout,
+                    reservation,
+                    decode,
+                )
+                .await
+                .map_err(|_| ()),
+            CallbackTransport::Remote(binding) => binding
+                .message(method, input, self.timeout, reservation)
+                .await
+                .map(|reply| decode(&reply))
+                .map_err(|_| ()),
         }
     }
     pub(crate) fn with_actions(
@@ -50,17 +93,11 @@ impl MessageCallback {
         reservation: Option<Arc<admission_gate::budget::Reservation>>,
     ) -> Result<super::message_action::Reply> {
         let grant = Arc::clone(&self.grant);
-        self.instance
-            .start_call_with_reply(
-                &tokio::runtime::Handle::current(),
-                method.to_owned(),
-                input,
-                self.timeout,
-                reservation,
-                move |reply| super::message_action::decode(reply, &grant, response, max_bytes),
-            )
-            .await
-            .map_err(|_| refusal(502, "message callback failed"))?
+        self.exchange(method, input, reservation, move |reply| {
+            super::message_action::decode(reply, &grant, response, max_bytes)
+        })
+        .await
+        .map_err(|_| refusal(502, "message callback failed"))?
     }
 
     /// Teardown output cannot affect an already closed connection. Visit and
@@ -71,15 +108,7 @@ impl MessageCallback {
         input: Bytes,
         reservation: Option<Arc<admission_gate::budget::Reservation>>,
     ) -> Result<()> {
-        self.instance
-            .start_call_with_reply(
-                &tokio::runtime::Handle::current(),
-                method.to_owned(),
-                input,
-                self.timeout,
-                reservation,
-                |_| (),
-            )
+        self.exchange(method, input, reservation, |_| ())
             .await
             .map_err(|_| refusal(502, "session cleanup callback failed"))
     }
@@ -304,12 +333,9 @@ pub(super) async fn filter_owned(
                 }
                 let started = Instant::now();
                 let decision = callback
-                    .instance
-                    .start_call_with_reply(
-                        &tokio::runtime::Handle::current(),
-                        method.clone(),
+                    .exchange(
+                        &method,
                         message.payload.clone(),
-                        callback.timeout,
                         reservation.clone(),
                         |reply| match reply {
                             [0] => NativeReply::Allow,
@@ -391,6 +417,109 @@ enum NativeReply {
 mod tests {
     use super::*;
     use proxy_pingora::http_ingress::message_codec::{WebSocketCodec, resolve};
+
+    #[tokio::test]
+    async fn remote_callback_uses_native_action_grants_and_response_decoder() {
+        use crate::remote_axis::{
+            AxisBinding, RemotePluginManager,
+            surface::{Grant, Surface},
+        };
+        use action_execution::{
+            Action, AsyncHandler, Binding, Context, Contract, ResponseMode, Schema,
+        };
+        use network_local_control::{ControlService, listener::ControlListener};
+        let router = action_router::Router::new();
+        let registration = router
+            .register(vec![Action {
+                contract: Contract {
+                    id: "worker.message".into(),
+                    version: 1,
+                    response: ResponseMode::Unary,
+                    input: Schema::Bytes,
+                    output: Schema::Bytes,
+                    max_input: 1024,
+                    max_output: 1024,
+                },
+                bindings: vec![Binding::LocalControl {
+                    action: "worker.message.v1.policy".into(),
+                }],
+                handler: Arc::new(AsyncHandler(|_: Vec<u8>, _: Context| async {
+                    let metadata =
+                        br#"{"version":1,"decision":"forward","proxy":"http://127.0.0.1:8080"}"#;
+                    let mut reply = vec![2];
+                    reply.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+                    reply.extend_from_slice(metadata);
+                    Ok(reply)
+                })),
+            }])
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("callback.sock");
+        let listener = ControlListener::prepare(
+            tokio::net::UnixListener::bind(&path).unwrap(),
+            None,
+            ControlService::new(Arc::new(router), 65541 + 65536, Duration::from_secs(5), 4)
+                .unwrap(),
+        )
+        .unwrap();
+        listener.activate().unwrap();
+        let manager = RemotePluginManager::connect(
+            std::collections::BTreeMap::from([(
+                "axis".into(),
+                AxisBinding {
+                    endpoint: format!("unix://{}", path.display()),
+                    max_inflight: 2,
+                    max_message_bytes: 65536,
+                    connect_timeout_ms: 5000,
+                    shutdown_timeout_ms: 5000,
+                },
+            )]),
+            Surface::new(vec![
+                Grant::new("axis".into(), "policy".into(), &[])
+                    .with_codec(Some("codex.responses.v1".into())),
+            ])
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let callback = MessageCallback::remote(
+            manager.binding("axis", "policy").unwrap(),
+            Duration::from_secs(5),
+            false,
+        );
+        let method = "codex.responses.v1/response.create/0000000000000001/0000000000000002";
+        assert!(
+            callback
+                .decide(method, Bytes::new(), false, 65536, None)
+                .await
+                .is_err()
+        );
+        let callback = callback.with_actions(true, false, vec![]);
+        assert!(
+            callback
+                .decide(method, Bytes::new(), false, 65536, None)
+                .await
+                .is_err()
+        );
+        let callback = callback.with_actions(true, true, vec![]);
+        assert!(matches!(
+            callback
+                .decide(method, Bytes::new(), false, 65536, None)
+                .await
+                .unwrap(),
+            super::super::message_action::Reply::Action(_)
+        ));
+        assert!(
+            callback
+                .decide(method, Bytes::new(), true, 65536, None)
+                .await
+                .is_err()
+        );
+        assert!(!callback.interested(true, "response.event"));
+        manager.close().await.unwrap();
+        registration.revoke();
+        listener.shutdown().await.unwrap();
+    }
 
     #[test]
     fn deltas_bypass_notifier_regardless_of_response_or_action_grants() {

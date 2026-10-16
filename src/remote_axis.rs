@@ -13,17 +13,22 @@ use serde::Deserialize;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use surface::{Grant, Surface};
 
-/// A control-only RPC profile. Bodies and message payloads are not admitted.
+/// An explicitly bounded local RPC profile for metadata and selected codec messages.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AxisBinding {
     pub endpoint: String,
     #[serde(default = "capacity")]
     pub max_inflight: usize,
+    #[serde(default = "message_limit")]
+    pub max_message_bytes: usize,
     #[serde(default = "timeout")]
     pub connect_timeout_ms: u64,
     #[serde(default = "timeout")]
     pub shutdown_timeout_ms: u64,
+}
+fn message_limit() -> usize {
+    64 * 1024
 }
 fn capacity() -> usize {
     32
@@ -51,6 +56,7 @@ pub(crate) fn validate(bindings: &BTreeMap<String, AxisBinding>) -> Result<(), S
     for (axis, binding) in bindings {
         if !identifier(axis)
             || !(1..=1024).contains(&binding.max_inflight)
+            || !(1..=32 * 1024 * 1024).contains(&binding.max_message_bytes)
             || !(1..=300_000).contains(&binding.connect_timeout_ms)
             || !(1..=300_000).contains(&binding.shutdown_timeout_ms)
         {
@@ -83,7 +89,7 @@ pub(crate) fn validate_callback(
         || !callback.config.is_null()
         || callback.instances != 1
     {
-        return Err("remote metadata callbacks cannot configure a local artifact, graph, instance pool or initialization".into());
+        return Err("remote callbacks cannot configure a local artifact, graph, instance pool or initialization".into());
     }
     if callback.max_inflight != crate::config::callback_capacity()
         || callback.max_waiting != crate::config::callback_capacity()
@@ -93,17 +99,8 @@ pub(crate) fn validate_callback(
     {
         return Err("remote admission and connection limits belong to axis_bindings; native scheduling is not supported".into());
     }
-    if callback.message_codec.is_some()
-        || callback.codec_descriptor.is_some()
-        || callback.message_responses
-        || callback.message_actions
-        || callback.message_proxy
-        || !callback.actions.is_empty()
-    {
-        return Err(
-            "remote metadata profile does not admit body codecs or native action publication"
-                .into(),
-        );
+    if !callback.actions.is_empty() {
+        return Err("remote callbacks cannot publish arbitrary native actions".into());
     }
     Ok(())
 }
@@ -122,21 +119,22 @@ pub(crate) fn publication(callbacks: &[NativeCallback]) -> Result<Surface, Strin
                         .clone()
                         .ok_or("remote registration is absent")?,
                     &callback.hooks,
-                ))
+                )
+                .with_codec(callback.message_codec.clone()))
             })
             .collect::<Result<Vec<_>, String>>()?,
     )
 }
 
-/// One installed participant retains its immutable host-issued hook grant.
+/// One installed participant pins the shared outbound connection owner.
 struct Participant {
     client: Arc<RemoteBindings>,
-    grant: Arc<Grant>,
 }
 struct Axis {
     client: Arc<RemoteBindings>,
     members: PluginManager<Participant>,
     shutdown_timeout: Duration,
+    max_message_bytes: usize,
 }
 
 /// Remote plugin membership, independent of the worker management entry.
@@ -170,8 +168,14 @@ impl RemotePluginManager {
             let connected = RemoteBindings::connect(
                 control_path(&binding.endpoint)?,
                 Limits {
-                    max_input: crate::native_notifier::FRAME_LIMIT,
-                    max_output: crate::native_notifier::FRAME_LIMIT,
+                    max_input: binding
+                        .max_message_bytes
+                        .max(crate::native_notifier::FRAME_LIMIT)
+                        + 258,
+                    max_output: binding
+                        .max_message_bytes
+                        .max(crate::native_notifier::FRAME_LIMIT)
+                        + 65541,
                     max_inflight: binding.max_inflight,
                     connect_timeout: Duration::from_millis(binding.connect_timeout_ms),
                 },
@@ -185,6 +189,7 @@ impl RemotePluginManager {
                             client: Arc::new(client),
                             members: PluginManager::new(64)?,
                             shutdown_timeout: Duration::from_millis(binding.shutdown_timeout_ms),
+                            max_message_bytes: binding.max_message_bytes,
                         }),
                     );
                 }
@@ -228,11 +233,10 @@ impl RemotePluginManager {
     }
     /// Activate only the existing host publication. No remote grant or endpoint is accepted.
     pub async fn activate(&self, axis: &str, registration: &str) -> Result<PluginState, String> {
-        let grant = self.surface.select(axis, registration)?;
+        self.surface.select(axis, registration)?;
         let axis_owner = self.axis(axis)?;
         let participant = Arc::new(Participant {
             client: Arc::clone(&axis_owner.client),
-            grant,
         });
         let installed = axis_owner
             .members
@@ -287,6 +291,9 @@ impl RemotePluginManager {
             .map_err(|errors| errors.join("; "))
     }
     /// Connect first; transport replacement changes no grant or participant incarnation.
+    /// Pending exchanges stay on their old connection; new calls use the replacement.
+    /// Connection-local peer request state does not migrate or replay. Stateful
+    /// participants must reject later calls whose request state is absent.
     /// This method is host-controlled and is not published by the plugin ingress.
     pub async fn replace(&self, axis: &str, endpoint: &str) -> Result<(), String> {
         self.axis(axis)?
@@ -330,6 +337,7 @@ impl RemotePluginManager {
 }
 
 /// A stable slot handle. Each call pins the currently admitted incarnation.
+#[derive(Clone)]
 pub(crate) struct RemotePluginBinding {
     axis: Arc<Axis>,
     grant: Arc<Grant>,
@@ -342,19 +350,52 @@ impl RemotePluginBinding {
         timeout: Duration,
         custody: impl Send + 'static,
     ) -> Result<Vec<u8>, String> {
+        if input.len() > crate::native_notifier::FRAME_LIMIT {
+            return Err("remote metadata exceeds frame limit".into());
+        }
+        let method = self.grant.method(hook)?.to_owned();
+        let reply = self.exchange(method, input, timeout, custody).await?;
+        if reply.len() > crate::native_notifier::FRAME_LIMIT {
+            return Err("remote metadata reply exceeds frame limit".into());
+        }
+        Ok(reply)
+    }
+    pub async fn message(
+        &self,
+        method: &str,
+        input: bytes::Bytes,
+        timeout: Duration,
+        custody: impl Send + 'static,
+    ) -> Result<Vec<u8>, String> {
+        if input.len() > self.axis.max_message_bytes {
+            return Err("remote message exceeds axis payload limit".into());
+        }
+        let binding = self.grant.message_method(method)?;
+        let mut envelope = Vec::with_capacity(2 + method.len() + input.len());
+        envelope.extend_from_slice(&(method.len() as u16).to_be_bytes());
+        envelope.extend_from_slice(method.as_bytes());
+        envelope.extend_from_slice(&input);
+        self.exchange(binding, envelope, timeout, custody).await
+    }
+    async fn exchange(
+        &self,
+        method: String,
+        input: Vec<u8>,
+        timeout: Duration,
+        custody: impl Send + 'static,
+    ) -> Result<Vec<u8>, String> {
         let participant = self
             .axis
             .members
             .resolve(&self.grant.registration)?
             .enter()?;
-        let method = participant.grant.method(hook)?.to_owned();
+
         // Retain membership until the owned local exchange actually settles, even
         // when the caller stops waiting. A peer timeout still has unknown outcome.
         tokio::spawn(async move {
-            let _custody = custody;
-            participant
-                .client
-                .call(method, input, timeout)
+            let client = Arc::clone(&participant.client);
+            client
+                .call_with_custody(method, input, timeout, (participant, custody))
                 .await
                 .map_err(|e| e.to_string())
         })
