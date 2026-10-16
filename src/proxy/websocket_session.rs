@@ -445,8 +445,10 @@ impl NativeProxy {
                                     };
                                     transport.forward_client(generation, &saved.message).await?;
                                 }
-                                Side::Upstream(_) => {
-                                    let _ = transport.forward_upstream(&saved.message).await;
+                                Side::Upstream(generation) => {
+                                    if transport.generation() == Some(generation) {
+                                        transport.forward_upstream(&saved.message).await?;
+                                    }
                                 }
                             }
                         }
@@ -462,9 +464,10 @@ impl NativeProxy {
                         Decision::Forward => {
                             let selected = plan.replacement.as_ref().unwrap_or(&message);
                             if response {
-                                let sent = transport.forward_upstream(selected).await;
-                                if plan.hold != "release" {
-                                    sent?;
+                                let current = matches!(selected.side, Side::Upstream(generation)
+                                    if transport.generation() == Some(generation));
+                                if plan.hold != "release" || current {
+                                    transport.forward_upstream(selected).await?;
                                 }
                             } else {
                                 let generation = match transport.generation() {

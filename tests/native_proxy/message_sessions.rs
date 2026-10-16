@@ -946,3 +946,162 @@ async fn buffered_request_release_cannot_dial_after_explicit_upstream_retirement
         .unwrap();
     }
 }
+
+struct FailingDownstream {
+    socket: TcpStream,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+    attempted: Arc<tokio::sync::Notify>,
+}
+impl tokio::io::AsyncRead for FailingDownstream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().socket).poll_read(cx, buffer)
+    }
+}
+impl tokio::io::AsyncWrite for FailingDownstream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if self.fail.load(Ordering::SeqCst) {
+            self.attempted.notify_one();
+            return std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+        }
+        std::pin::Pin::new(&mut self.get_mut().socket).poll_write(cx, bytes)
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().socket).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().socket).poll_shutdown(cx)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn response_release_stops_on_current_generation_downstream_write_failure() {
+    for hold in ["buffer", "release"] {
+        timeout(WAIT, async {
+            let origin = listen(|mut socket| async move {
+                let request = head(&mut socket).await;
+                upgrade(&mut socket, &request).await;
+                frame(&mut socket, true).await;
+                for _ in 0..2 {
+                    socket
+                        .write_all(&websocket::encode_server(1, COMPLETED).unwrap())
+                        .await
+                        .unwrap();
+                }
+                let mut tail = Vec::new();
+                let _ = socket.read_to_end(&mut tail).await;
+            })
+            .await;
+            let directory = tempfile::tempdir().unwrap();
+            let metadata = json!({"version":1,"decision":"forward","hold":hold}).to_string();
+            let action = format!(
+                "return action({}, \"\", out);",
+                serde_json::to_string(&metadata).unwrap()
+            );
+            let proxy = pingora_worker::assembly::assemble(config(
+                origin.address,
+                buffer_decision_artifact(directory.path(), &action),
+            ))
+            .await
+            .unwrap();
+            let mut engine = HttpProxy::new(proxy.clone(), Arc::new(ServerConf::default()));
+            engine.handle_init_modules();
+            let engine = Arc::new(engine);
+            let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let attempted = Arc::new(tokio::sync::Notify::new());
+            let finished = Arc::new(tokio::sync::Notify::new());
+            let worker = listen({
+                let fail = fail.clone();
+                let attempted = attempted.clone();
+                let finished = finished.clone();
+                move |socket| {
+                    let native =
+                        proxy_pingora::connect_upstream::ProtocolL4Connect::box_stream_to_pingora(
+                            Box::new(FailingDownstream {
+                                socket,
+                                fail: fail.clone(),
+                                attempted: attempted.clone(),
+                            }),
+                        );
+                    let engine = engine.clone();
+                    let finished = finished.clone();
+                    async move {
+                        let session = ServerSession::new_http1(Box::new(native));
+                        let (_stop, shutdown) = tokio::sync::watch::channel(false);
+                        let _ = engine.process_new_http(session, &shutdown).await;
+                        finished.notify_one();
+                    }
+                }
+            })
+            .await;
+            let mut client = TcpStream::connect(worker.address).await.unwrap();
+            client.write_all(REQUEST).await.unwrap();
+            assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
+            fail.store(true, Ordering::SeqCst);
+            client
+                .write_all(&websocket::encode_client(1, CREATE).unwrap())
+                .await
+                .unwrap();
+            attempted.notified().await;
+            finished.notified().await;
+            drop(client);
+            drop(worker);
+            proxy.shutdown().await.unwrap();
+        })
+        .await
+        .expect("a failed release write must end the session without waiting for another message");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn response_release_skips_held_frames_from_a_retired_upstream() {
+    timeout(WAIT, async {
+        let origin = listen(|mut socket| async move {
+            let request = head(&mut socket).await;
+            upgrade(&mut socket, &request).await;
+            frame(&mut socket, true).await;
+            for _ in 0..2 {
+                socket.write_all(&websocket::encode_server(1, COMPLETED).unwrap()).await.unwrap();
+            }
+            let mut tail = Vec::new();
+            let _ = socket.read_to_end(&mut tail).await;
+        }).await;
+        let directory = tempfile::tempdir().unwrap();
+        buffer_decision_artifact(directory.path(),
+            r#"return action("{\"version\":1,\"decision\":\"forward\",\"hold\":\"buffer\"}", "", out);"#);
+        let source = std::fs::read_to_string(directory.path().join("holding.c")).unwrap();
+        let replacement = r#"return action("{\"version\":1,\"decision\":\"reply\",\"hold\":\"release\",\"upstream\":\"disconnect\"}", "{\"type\":\"error\",\"error\":{\"message\":\"retired\"}}", out);"#;
+        let source = source.replace(
+            r#"return action("{\"version\":1,\"decision\":\"forward\",\"hold\":\"release\"}", "", out);"#,
+            replacement);
+        let proxy = pingora_worker::assembly::assemble(config(origin.address,
+            compile_session_source(directory.path(), &source))).await.unwrap();
+        let worker = serve_engine(proxy.clone()).await;
+        let mut client = TcpStream::connect(worker.address).await.unwrap();
+        client.write_all(REQUEST).await.unwrap();
+        assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
+        client.write_all(&websocket::encode_client(1, CREATE).unwrap()).await.unwrap();
+        let (opcode, payload) = frame(&mut client, false).await;
+        assert_eq!(opcode, 1);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({"type":"error","error":{"message":"retired"}}));
+        client.write_all(&websocket::encode_client(9, b"still-open").unwrap()).await.unwrap();
+        assert_eq!(frame(&mut client, false).await, (10, b"still-open".to_vec()));
+        client.write_all(&websocket::encode_client(8, &1000_u16.to_be_bytes()).unwrap()).await.unwrap();
+        assert_eq!(frame(&mut client, false).await.0, 8);
+        drop(client); drop(worker); proxy.shutdown().await.unwrap();
+    }).await.unwrap();
+}
