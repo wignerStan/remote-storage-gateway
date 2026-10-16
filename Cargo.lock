@@ -2800,6 +2800,7 @@ name = "plugin-abi"
 version = "0.1.0"
 dependencies = [
  "c-abi",
+ "cc",
  "libloading",
 ]
 

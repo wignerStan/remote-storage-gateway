@@ -3,8 +3,9 @@
 See the [security model](SECURITY.md) for trust boundaries, implemented controls and deployment responsibilities.
 
 A runnable Pingora application with explicit configuration, assembly, plugin
-runtime and process entry. `main` loads configuration; `assembly` installs native
-notifier Function/Object instances and optional management entry in `plugin-lifecycle`; the
+runtime and process entry. `main` loads configuration; `assembly` installs RPC
+callback bindings by default, explicit direct callbacks, and optional management
+entry in `plugin-lifecycle`; the
 native `pingora-proxy::ProxyHttp` engine owns forwarding, streaming, upgrades and
 connection pooling. The library also exposes composition APIs for other selected
 applications. Business policy belongs to separately installed plugins.
