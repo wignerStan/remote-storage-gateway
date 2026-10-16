@@ -2,7 +2,8 @@
 use super::*;
 
 const PING: Duration = Duration::from_millis(40);
-const BRIDGE_IDLE: Duration = Duration::from_millis(400);
+// Allow scheduler headroom while keeping the idle period well above one probe.
+const BRIDGE_IDLE: Duration = Duration::from_secs(1);
 
 async fn read_frame(socket: &mut TcpStream) -> std::io::Result<(u8, u8, u32, Vec<u8>)> {
     let mut header = [0; 9];
@@ -70,10 +71,12 @@ async fn bridge(
     origin: SocketAddr,
     connections: Arc<AtomicUsize>,
     closed: tokio::sync::mpsc::UnboundedSender<()>,
+    idle_enabled: tokio::sync::watch::Receiver<bool>,
 ) -> Listening {
     listen(move |mut client| {
         let connections = Arc::clone(&connections);
         let closed = closed.clone();
+        let mut idle_enabled = idle_enabled.clone();
         async move {
             assert!(head(&mut client).await.starts_with(b"CONNECT "));
             let mut upstream = TcpStream::connect(origin).await.unwrap();
@@ -85,23 +88,31 @@ async fn bridge(
             let mut from_client = [0; 8192];
             let mut from_origin = [0; 8192];
             loop {
-                let forward = async {
-                    tokio::select! {
-                        read = client.read(&mut from_client) => {
-                            let length = read.ok()?;
-                            if length == 0 { return None; }
-                            upstream.write_all(&from_client[..length]).await.ok()?;
-                        }
-                        read = upstream.read(&mut from_origin) => {
-                            let length = read.ok()?;
-                            if length == 0 { return None; }
-                            client.write_all(&from_origin[..length]).await.ok()?;
-                        }
+                let armed = *idle_enabled.borrow_and_update();
+                let (from_downstream, read) = tokio::select! {
+                    read = client.read(&mut from_client) => (true, read),
+                    read = upstream.read(&mut from_origin) => (false, read),
+                    changed = idle_enabled.changed() => {
+                        if changed.is_err() { break; }
+                        continue;
                     }
-                    Some(())
+                    () = tokio::time::sleep(BRIDGE_IDLE), if armed => {
+                        let _ = closed.send(());
+                        break;
+                    }
                 };
-                if !matches!(timeout(BRIDGE_IDLE, forward).await, Ok(Some(()))) {
+                let Ok(length) = read else { break };
+                if length == 0 {
                     let _ = closed.send(());
+                    break;
+                }
+                // A phase change must not cancel a write after its bytes were read.
+                let written = if from_downstream {
+                    upstream.write_all(&from_client[..length]).await
+                } else {
+                    client.write_all(&from_origin[..length]).await
+                };
+                if written.is_err() {
                     break;
                 }
             }
@@ -117,17 +128,29 @@ async fn native_http2_ping_preserves_idle_connect_tunnel_and_pool_reuse() {
         let origin = origin(true, ping_tx).await;
         let connections = Arc::new(AtomicUsize::new(0));
         let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel();
-        let bridge = bridge(origin.address, Arc::clone(&connections), close_tx).await;
+        let (idle_tx, idle_rx) = tokio::sync::watch::channel(false);
+        let bridge = bridge(origin.address, Arc::clone(&connections), close_tx, idle_rx).await;
         let mut config = settings(origin.address, Some(bridge.address), "http", true);
         config.http2.enabled = true;
         config.http2.ping_interval_ms = enabled.then_some(PING.as_millis() as u64);
         let worker = worker(config).await;
-        assert!(get(worker.address).await.starts_with(b"HTTP/1.1 200"));
+        let initial = get(worker.address).await;
+        assert!(
+            initial.starts_with(b"HTTP/1.1 200"),
+            "initial response, ping={enabled}: {initial:?}"
+        );
+        // This test measures idle reuse, not how quickly CONNECT/H2 can start
+        // under a parallel test build. Arm expiry after observing readiness.
+        idle_tx.send_replace(true);
         if enabled {
             // Observed ACKed probes span more than the bridge's idle budget.
+            let armed_at = tokio::time::Instant::now();
             timeout(WAIT, async {
-                for _ in 0..15 {
+                loop {
                     ping_rx.recv().await.unwrap();
+                    if armed_at.elapsed() > BRIDGE_IDLE + PING {
+                        break;
+                    }
                 }
             })
             .await
@@ -137,6 +160,7 @@ async fn native_http2_ping_preserves_idle_connect_tunnel_and_pool_reuse() {
             timeout(WAIT, close_rx.recv()).await.unwrap().unwrap();
             assert!(ping_rx.try_recv().is_err());
         }
+        idle_tx.send_replace(false);
         assert!(get(worker.address).await.starts_with(b"HTTP/1.1 200"));
         assert_eq!(
             connections.load(Ordering::SeqCst),
