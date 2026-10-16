@@ -766,6 +766,25 @@ are explicit policy inputs. Runtime notifier traces use the
 `proxy_pingora::worker::notifier` target and contain callback indices and decisions,
 without serializing request facts.
 
+The default native proxy suite includes a bounded concurrent TCP regression.
+Three waves each overlap eight streamed uploads and four mid-upload disconnects.
+Latches prove that all uploads reach the origin before release. Unique payloads,
+correlation headers and exact body lengths detect crossed or truncated responses.
+While response tails and client readers are paused, a fresh request must finish.
+Each origin must acknowledge its validated exchange, all client tasks must join,
+and operation counters must return to zero before the next wave.
+
+Run `just stress` for 64 waves: 832 requests, including 256 mid-upload disconnects.
+The workload uses the real native engine over loopback sockets in the test process.
+It reports request counts, response bytes and elapsed time, with no throughput
+pass threshold. The 30-second per-wave deadline detects a stuck exchange.
+This is a short concurrency regression, not a production load or soak test.
+It does not establish an RSS limit, socket-buffer backpressure, callback admission
+saturation, sanitizer coverage, or production capacity. Pool reuse is disabled
+in this workload so each connection belongs to one exchange; separate native
+proxy tests cover reuse. Use deployment traffic, long durations, resource sampling
+and a suitable sanitizer build for those additional claims.
+
 Run `just bdd-observability` for the focused observation workflow. It reuses
 the matching infra main checkout beside this repository, as the worker's Cargo
 path dependencies require. It uses infra `WorkflowTrace` and prints bounded
