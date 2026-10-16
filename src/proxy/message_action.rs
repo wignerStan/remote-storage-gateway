@@ -42,7 +42,8 @@ pub(super) struct Metadata {
     pub decision: Decision,
     #[serde(default)]
     pub upstream: Upstream,
-    /// buffer keeps this frame until release. discard throws that buffer away.
+    /// Buffer retains an approved request or response until release in its original
+    /// direction. Discard drops held messages without forwarding them.
     #[serde(default)]
     pub hold: String,
     #[serde(default)]

@@ -418,7 +418,37 @@ impl NativeProxy {
                     if plan.hold == "release" {
                         // Front to back. Vec::pop would send the newest frame first.
                         for saved in release_hold(&mut held) {
-                            let _ = transport.forward_upstream(&saved.message).await;
+                            match saved.message.side {
+                                Side::Downstream => {
+                                    if matches!(
+                                        plan.upstream,
+                                        Upstream::Disconnect | Upstream::Close
+                                    ) {
+                                        return Err(refusal(
+                                            502,
+                                            "held request conflicts with upstream retirement",
+                                        ));
+                                    }
+                                    let generation = match transport.generation() {
+                                        Some(generation) => generation,
+                                        None => {
+                                            self.connect_websocket_generation(
+                                                transport,
+                                                exchange,
+                                                registration.codec.as_ref(),
+                                                request,
+                                                proxy.as_ref(),
+                                                ctx.request_id,
+                                            )
+                                            .await?
+                                        }
+                                    };
+                                    transport.forward_client(generation, &saved.message).await?;
+                                }
+                                Side::Upstream(_) => {
+                                    let _ = transport.forward_upstream(&saved.message).await;
+                                }
+                            }
                         }
                     }
                     match plan.decision {
@@ -775,6 +805,11 @@ async fn upstream_closed(
         .await??;
     if let Some(reply) = plan.reply {
         transport.send_downstream_wire(reply).await?;
+    }
+    if plan.upstream == Upstream::Close {
+        transport
+            .send_downstream(8, &1000_u16.to_be_bytes())
+            .await?;
     }
     Ok(())
 }
