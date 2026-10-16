@@ -117,6 +117,7 @@ impl Metadata {
         {
             return Err(refusal(502, "invalid hold"));
         }
+        validate_buffer_decision(&self.hold, self.decision)?;
         if self.version != 1 || self.set_headers.len() + self.remove_headers.len() > 64 {
             return Err(refusal(
                 502,
@@ -213,6 +214,15 @@ impl Metadata {
     }
 }
 
+/// Buffering defers an approved forward; it cannot suppress a terminal decision.
+/// Check both individual actions and the composed callback chain.
+pub(super) fn validate_buffer_decision(hold: &str, decision: Decision) -> Result<()> {
+    if hold == "buffer" && decision != Decision::Forward {
+        return Err(refusal(502, "buffer requires a forward decision"));
+    }
+    Ok(())
+}
+
 fn validate_proxy(value: &str) -> Result<Url> {
     let proxy = Url::parse(value).map_err(|_| refusal(502, "invalid message proxy"))?;
     if value.len() > 8192
@@ -282,6 +292,20 @@ mod tests {
         assert!(decode(&action, &grant(), false, 1).is_err());
         for cut in 0..action.len() - 2 {
             assert!(decode(&action[..cut], &grant(), false, 1024).is_err());
+        }
+    }
+    #[test]
+    fn buffer_rejects_reply_and_drop_but_preserves_forward_replacements() {
+        for response in [false, true] {
+            for (decision, payload) in [("reply", b"{}".as_slice()), ("drop", b"".as_slice())] {
+                let metadata = json!({"version":1,"decision":decision,"hold":"buffer"});
+                assert!(decode(&encoded(metadata, payload), &grant(), response, 1024).is_err());
+            }
+            let metadata = json!({"version":1,"decision":"forward","hold":"buffer"});
+            assert!(matches!(
+                decode(&encoded(metadata, b"replacement"), &grant(), response, 1024).unwrap(),
+                Reply::Action(action) if action.payload.as_ref() == b"replacement"
+            ));
         }
     }
     #[test]

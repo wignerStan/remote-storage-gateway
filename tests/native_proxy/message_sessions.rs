@@ -433,6 +433,11 @@ fn session_budget_artifact(dir: &Path, hold: bool) -> PathBuf {
     } else {
         source = source.replace("#if TEST_MODE == 2", "#if 1");
     }
+    compile_session_source(dir, &source)
+}
+
+fn compile_session_source(dir: &Path, source: &str) -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let source_path = dir.join("holding.c");
     std::fs::write(&source_path, source).unwrap();
     let path = dir.join("holding.so");
@@ -622,4 +627,115 @@ async fn callback_chain_uses_one_message_deadline_before_any_upstream_dial() {
     })
     .await
     .unwrap();
+}
+
+fn buffer_decision_artifact(dir: &Path, first: &str) -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut source =
+        std::fs::read_to_string(root.join("tests/fixtures/message_actions.c")).unwrap();
+    let start = source
+        .find("    if (begins(method, TEST_CODEC_PREFIX \"/response.completed/\"))")
+        .unwrap();
+    let end = source[start..].find("    /* A delta callback").unwrap() + start;
+    source.replace_range(
+        start..end,
+        &format!(
+            r#"
+    if (begins(method, TEST_CODEC_PREFIX "/response.completed/")) {{
+        if (++completed == 1) {{ {first} }}
+        return action("{{\"version\":1,\"decision\":\"forward\",\"hold\":\"release\"}}", "", out);
+    }}
+"#
+        ),
+    );
+    compile_session_source(dir, &source)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffered_response_releases_the_approved_replacement_before_the_next_message() {
+    const REDACTED: &[u8] = br#"{"type":"response.completed","response":{"id":"redacted"}}"#;
+    timeout(WAIT, async {
+        let origin = listen(|mut socket| async move {
+            let request = head(&mut socket).await;
+            upgrade(&mut socket, &request).await;
+            frame(&mut socket, true).await;
+            for _ in 0..2 {
+                socket
+                    .write_all(&websocket::encode_server(1, COMPLETED).unwrap())
+                    .await
+                    .unwrap();
+            }
+            let mut tail = Vec::new();
+            let _ = socket.read_to_end(&mut tail).await;
+        })
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let metadata = json!({"version":1,"decision":"forward","hold":"buffer"}).to_string();
+        let first = format!(
+            "return action({}, {}, out);",
+            serde_json::to_string(&metadata).unwrap(),
+            serde_json::to_string(std::str::from_utf8(REDACTED).unwrap()).unwrap()
+        );
+        let proxy = pingora_worker::assembly::assemble(config(
+            origin.address,
+            buffer_decision_artifact(directory.path(), &first),
+        ))
+        .await
+        .unwrap();
+        let worker = serve_engine(proxy.clone()).await;
+        let mut client = TcpStream::connect(worker.address).await.unwrap();
+        client.write_all(REQUEST).await.unwrap();
+        assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
+        client
+            .write_all(&websocket::encode_client(1, CREATE).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(frame(&mut client, false).await, (1, REDACTED.to_vec()));
+        assert_eq!(frame(&mut client, false).await, (1, COMPLETED.to_vec()));
+        client
+            .write_all(&websocket::encode_client(8, &1000_u16.to_be_bytes()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(frame(&mut client, false).await.0, 8);
+        drop(client);
+        drop(worker);
+        proxy.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffered_response_cannot_override_a_later_terminal_callback_decision() {
+    for terminal in [
+        r#"return action("{\"version\":1,\"decision\":\"drop\"}", "", out);"#,
+        r#"return action("{\"version\":1,\"decision\":\"reply\"}", "{\"type\":\"error\",\"error\":{\"message\":\"blocked\"}}", out);"#,
+        r#"const char *reply = "{\"type\":\"error\",\"error\":{\"message\":\"blocked\"}}"; return copy(reply, strlen(reply), out);"#,
+    ] {
+        timeout(WAIT, async {
+            let origin = listen(|mut socket| async move {
+                let request = head(&mut socket).await;
+                upgrade(&mut socket, &request).await;
+                frame(&mut socket, true).await;
+                socket.write_all(&websocket::encode_server(1, COMPLETED).unwrap()).await.unwrap();
+                let mut tail = Vec::new();
+                let _ = socket.read_to_end(&mut tail).await;
+            }).await;
+            let first = tempfile::tempdir().unwrap();
+            let second = tempfile::tempdir().unwrap();
+            let mut cfg = config(origin.address, buffer_decision_artifact(first.path(),
+                r#"return action("{\"version\":1,\"decision\":\"forward\",\"hold\":\"buffer\"}", "", out);"#));
+            let mut next = config(origin.address, buffer_decision_artifact(second.path(), terminal));
+            cfg.callbacks.append(&mut next.callbacks);
+            let proxy = pingora_worker::assembly::assemble(cfg).await.unwrap();
+            let worker = serve_engine(proxy.clone()).await;
+            let mut client = TcpStream::connect(worker.address).await.unwrap();
+            client.write_all(REQUEST).await.unwrap();
+            assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
+            client.write_all(&websocket::encode_client(1, CREATE).unwrap()).await.unwrap();
+            assert_eq!(frame(&mut client, false).await, (8, 1011_u16.to_be_bytes().to_vec()),
+                "a conflicting callback chain must fail before holding or sending response bytes");
+            drop(client); drop(worker); proxy.shutdown().await.unwrap();
+        }).await.unwrap();
+    }
 }

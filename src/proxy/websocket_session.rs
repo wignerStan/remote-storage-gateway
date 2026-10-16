@@ -403,7 +403,7 @@ impl NativeProxy {
                     }
                     if plan.hold == "buffer" {
                         held.push(retain_message(
-                            &message,
+                            plan.replacement.as_ref().unwrap_or(&message),
                             &held_bytes,
                             &held_count,
                             reservation
@@ -711,6 +711,7 @@ async fn evaluate(
             }
         }
     }
+    super::message_action::validate_buffer_decision(&plan.hold, plan.decision)?;
     Ok(plan)
 }
 
