@@ -153,17 +153,20 @@ async fn responses_ws_selects_lite_per_message_and_keeps_upstream_delta_opaque()
             frame(br#"{"type":"response.append","input":[{"type":"function_call_output","output":"ok"}]}"#),
         ]);
         let upstream_frames = frames.clone();
+        let (verified, mut origin_frames) = tokio::sync::mpsc::unbounded_channel();
         let origin = listen(move |mut socket| {
             let frames = upstream_frames.clone();
+            let verified = verified.clone();
             async move {
                 let request = String::from_utf8(head(&mut socket).await).unwrap();
                 assert!(!request.to_ascii_lowercase().contains("sec-websocket-extensions"));
                 socket.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n").await.unwrap();
-                for expected in frames.iter() {
-                    let mut actual=vec![0;expected.len()];socket.read_exact(&mut actual).await.unwrap();
-                    assert_eq!(&actual,expected);
+                for (index, expected) in frames.iter().enumerate() {
+                    let mut actual=vec![0;expected.len()];socket.read_exact(&mut actual).await.unwrap_or_else(|error| panic!("origin frame {index}: {error}"));
+                    assert_eq!(&actual,expected,"origin frame {index}");
                     // The request classifier must never see/deny upstream binary deltas.
                     socket.write_all(&[0x82,3,0,255,7]).await.unwrap();
+                    verified.send(index).unwrap();
                 }
             }
         }).await;
@@ -172,7 +175,13 @@ async fn responses_ws_selects_lite_per_message_and_keeps_upstream_delta_opaque()
         let worker=serve_engine(proxy.clone()).await;let mut client=TcpStream::connect(worker.address).await.unwrap();
         client.write_all(b"GET /v1/responses HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\r\n").await.unwrap();
         assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
-        for frame in frames.iter() {client.write_all(frame).await.unwrap();let mut delta=[0;5];client.read_exact(&mut delta).await.unwrap();assert_eq!(delta,[0x82,3,0,255,7]);}
+        for (index, frame) in frames.iter().enumerate() {
+            client.write_all(frame).await.unwrap();
+            let mut delta=[0;5];
+            client.read_exact(&mut delta).await.unwrap_or_else(|error| panic!("downstream delta {index}: {error}"));
+            assert_eq!(delta,[0x82,3,0,255,7]);
+            assert_eq!(origin_frames.recv().await, Some(index));
+        }
         drop(client);drop(worker);proxy.shutdown().await.unwrap();
     }).await.unwrap();
 }
