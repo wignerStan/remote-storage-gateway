@@ -164,7 +164,7 @@ pub struct NativeProxy {
     inspection: Arc<inspection::InspectionBudget>,
 }
 impl NativeProxy {
-    /// Stable axis manager for host-controlled client replacement.
+    /// Stable manager for remote registrations and their RPC connections.
     pub fn remote_plugins(&self) -> &Arc<crate::remote_axis::RemotePluginManager> {
         &self.remote_plugins
     }

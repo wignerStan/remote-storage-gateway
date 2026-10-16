@@ -871,6 +871,11 @@ The worker distributes no PostgreSQL, cache, or browser Tool artifacts. Business
 applications select their own dependencies. Reusable implementations remain in
 infra; their presence there does not make them worker requirements.
 
+The Responses protocol codecs (`openai.responses.v1` and `codex.responses.v1`)
+come from infra's native Rust `llm-protocols` crate. They parse protocol messages;
+they do not instantiate a browser client. Browser client Tools belong to the
+application's control plane and are not worker codec dependencies.
+
 Current decoder integration accepts trusted Rust-local `CodecPlugin` values
 through `assemble_with_codecs`, plus host-configured framing descriptors. Native
 callbacks inspect bounded complete messages. This is distinct from loading an
