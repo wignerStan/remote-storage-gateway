@@ -1033,7 +1033,7 @@ async fn native_metadata_preserves_ipv6_socket_peer_without_a_port() {
 #[tokio::test]
 async fn shared_memory_budget_rejects_before_native_call_and_recovers_after_release() {
     use plugin_lifecycle::coordination::memory::{Coordinator, Limits as MemoryLimits};
-    use plugin_lifecycle::manager::RegistrationSpec;
+    use plugin_registry::RegistrationSpec;
     let memory = Coordinator::new(MemoryLimits {
         max_subscribers: 2,
         max_bytes: FRAME_LIMIT,

@@ -1,4 +1,5 @@
 use super::*;
+use plugin_registry::RegistrationSpec;
 use action_execution::{Action, AsyncHandler, Binding, Context, Contract, ResponseMode, Schema};
 use action_router::Router;
 use network_local_control::{ControlService, listener::ControlListener};

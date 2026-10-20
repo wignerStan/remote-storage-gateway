@@ -26,6 +26,7 @@ action-execution = { path = "../infra/rust/crates/networking/action-execution" }
 network-local-control = { path = "../infra/rust/crates/networking/local-control" }
 network-actions = { path = "../infra/rust/crates/networking/actions" }
 plugin-lifecycle = { path = "../infra/rust/crates/plugins/lifecycle" }
+plugin-registry = { path = "../infra/rust/crates/plugins/registry" }
 plugin-loading = { path = "../infra/rust/crates/plugins/loading", features = ["async"] }
 proxy-protocols = { path = "../infra/rust/crates/networking/proxy/protocols", default-features = false }
 proxy-pingora = { path = "../infra/rust/crates/networking/proxy/pingora", features = ["native-proxy", "http-egress"] }
