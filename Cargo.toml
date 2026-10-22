@@ -57,4 +57,4 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 tempfile = "3"
 
 [patch.crates-io]
-pingora-proxy = { path = "../infra/rust/vendor/pingora-proxy" }
+pingora-proxy = { path = "../infra/rust/.patched/pingora-proxy-0.8.1" }
