@@ -129,12 +129,16 @@ fn response_kind_reaches_plugin(
         || response_enabled
         || matches!(
             kind,
-            "response.completed" | "response.done" | "response.incomplete"
+            "response.completed" | "response.done" | "response.incomplete" | "response.failed"
         )
         || (actions
             && matches!(
                 kind,
-                "response.metadata" | "response.created" | "response.error" | "transport.closed"
+                "response.metadata"
+                    | "response.created"
+                    | "response.error"
+                    | "rate_limits.updated"
+                    | "transport.closed"
             ))
 }
 
@@ -556,6 +560,30 @@ mod tests {
             false,
             true,
             "response.created"
+        ));
+        assert!(response_kind_reaches_plugin(
+            true,
+            false,
+            false,
+            "response.failed"
+        ));
+        assert!(!response_kind_reaches_plugin(
+            true,
+            false,
+            false,
+            "response.output_text.delta"
+        ));
+        assert!(!response_kind_reaches_plugin(
+            true,
+            false,
+            true,
+            "response.output_text.delta"
+        ));
+        assert!(response_kind_reaches_plugin(
+            true,
+            true,
+            false,
+            "response.output_text.delta"
         ));
         assert!(!response_kind_reaches_plugin(
             true,
