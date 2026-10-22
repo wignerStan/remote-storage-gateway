@@ -127,3 +127,156 @@ async fn stream_delivery_completion_and_reconnect_have_independent_observers() {
         evidence.record("then", "close", "entry revocation cancels idle observers and drains their sources", json!({"data_requests": 1, "policy_calls": 3, "entry_closed": true}));
     }).await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grpc_worker_control_live_mutates_admission_and_controls_proxy_traffic() {
+    timeout(Duration::from_secs(15), async {
+        let operations = Arc::new(Operations::default());
+        let control = Arc::new(WorkerControl::default());
+        let upstream_handled = Arc::new(AtomicUsize::new(0));
+        let upstream_counter = Arc::clone(&upstream_handled);
+
+        let upstream = listen(move |mut socket| {
+            let counter = Arc::clone(&upstream_counter);
+            async move {
+                let _ = head(&mut socket).await;
+                counter.fetch_add(1, Ordering::SeqCst);
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    .await
+                    .unwrap();
+            }
+        })
+        .await;
+
+        let native = NativeProxy::new(
+            settings(upstream.address, None, "", false),
+            Arc::clone(&control),
+            vec![],
+        )
+        .unwrap()
+        .with_operations(Arc::clone(&operations));
+        let worker = serve_engine(native).await;
+
+        let mut composition = Composition::new(ResourceSchema::new(&[ENTRY]).unwrap());
+        let entry = entry::install(
+            &mut composition,
+            ENTRY,
+            entry::Registration {
+                protocol: pingora_worker::config::ControlProtocol::Http,
+                worker_control: Some(Arc::clone(&control)),
+                logging_health: None,
+                endpoint: LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
+                permissions: SocketPermissions::default(),
+            },
+            Arc::clone(&operations),
+        )
+        .await
+        .unwrap();
+        let runtime = composition.commit().await.unwrap();
+        entry.activate().unwrap();
+
+        let mut client = ActionsClient::connect(format!("http://{}", entry.local_address().unwrap()))
+            .await
+            .unwrap();
+
+        // 1. Initial state inspection via gRPC
+        let initial: Value = serde_json::from_slice(
+            &client
+                .call(call("worker.get", b"{}"))
+                .await
+                .unwrap()
+                .into_inner()
+                .output,
+        )
+        .unwrap();
+        assert_eq!(initial["revision"], 1);
+        assert_eq!(initial["accepting"], true);
+        assert!(control.accepting());
+
+        // 2. Data plane: traffic passes while accepting=true
+        let mut conn1 = TcpStream::connect(worker.address).await.unwrap();
+        conn1
+            .write_all(b"GET /test HTTP/1.1\r\nHost: downstream\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let resp1 = head(&mut conn1).await;
+        assert!(resp1.starts_with(b"HTTP/1.1 200 OK"), "{resp1:?}");
+        assert_eq!(upstream_handled.load(Ordering::SeqCst), 1);
+
+        // 3. Live in-memory mutation: close admission via gRPC worker.apply
+        let updated: Value = serde_json::from_slice(
+            &client
+                .call(call("worker.apply", br#"{"expected_revision":1,"accepting":false}"#))
+                .await
+                .unwrap()
+                .into_inner()
+                .output,
+        )
+        .unwrap();
+        assert_eq!(updated["revision"], 2);
+        assert_eq!(updated["accepting"], false);
+        assert!(!control.accepting());
+
+        // 4. Data plane: new request immediately rejected with 503 without hitting origin
+        let mut conn2 = TcpStream::connect(worker.address).await.unwrap();
+        conn2
+            .write_all(b"GET /test HTTP/1.1\r\nHost: downstream\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp2 = Vec::new();
+        conn2.read_to_end(&mut resp2).await.unwrap();
+        assert!(resp2.starts_with(b"HTTP/1.1 503 Service Unavailable"), "{resp2:?}");
+        // Upstream was never contacted for the rejected request
+        assert_eq!(upstream_handled.load(Ordering::SeqCst), 1);
+
+        // 5. Stale revision CAS conflict rejected over gRPC
+        let conflict = client
+            .call(call("worker.apply", br#"{"expected_revision":1,"accepting":true}"#))
+            .await
+            .unwrap_err();
+        assert_eq!(conflict.code(), tonic::Code::Aborted);
+        assert!(!control.accepting());
+        assert_eq!(control.snapshot().revision, 2);
+
+        // 6. Live in-memory mutation: restore admission via gRPC worker.apply with current revision
+        let restored: Value = serde_json::from_slice(
+            &client
+                .call(call("worker.apply", br#"{"expected_revision":2,"accepting":true}"#))
+                .await
+                .unwrap()
+                .into_inner()
+                .output,
+        )
+        .unwrap();
+        assert_eq!(restored["revision"], 3);
+        assert_eq!(restored["accepting"], true);
+        assert!(control.accepting());
+
+        // 7. Data plane: traffic passes again immediately
+        let mut conn3 = TcpStream::connect(worker.address).await.unwrap();
+        conn3
+            .write_all(b"GET /test HTTP/1.1\r\nHost: downstream\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let resp3 = head(&mut conn3).await;
+        assert!(resp3.starts_with(b"HTTP/1.1 200 OK"), "{resp3:?}");
+        assert_eq!(upstream_handled.load(Ordering::SeqCst), 2);
+
+        // 8. Confirm active metrics counters via gRPC
+        let metrics: Value = serde_json::from_slice(
+            &client
+                .call(call("worker.metrics", b"{}"))
+                .await
+                .unwrap()
+                .into_inner()
+                .output,
+        )
+        .unwrap();
+        assert!(metrics["started"].as_u64().unwrap() >= 2);
+
+        timeout(WAIT, runtime.shutdown()).await.unwrap().unwrap();
+    })
+    .await
+    .unwrap();
+}
