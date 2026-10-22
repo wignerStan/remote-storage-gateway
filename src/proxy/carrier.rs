@@ -1,6 +1,28 @@
 //! Native Pingora callbacks drive the ordered worker lifecycle.
 use super::*;
 
+async fn write_admission_code(session: &mut Session, error: &Error) -> bool {
+    let Some(code) = error.context.as_ref().map(|value| value.to_string()) else {
+        return false;
+    };
+    let code = code.as_str();
+    if code.is_empty()
+        || !code.contains('_')
+        || !code
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    {
+        return false;
+    }
+    let body = format!(
+        "{{\"error\":{{\"message\":\"{code}\",\"type\":\"invalid_request_error\",\"code\":\"{code}\"}}}}"
+    );
+    session
+        .respond_error_with_body(403, bytes::Bytes::from(body))
+        .await
+        .is_ok()
+}
+
 #[async_trait]
 impl ProxyHttp for NativeProxy {
     type CTX = ProxyContext;
@@ -103,7 +125,7 @@ impl ProxyHttp for NativeProxy {
                 .lifecycle
                 .begin(ENDPOINT, &mut request, facts)
                 .await
-                .map_err(|_| refusal(403, "request denied by installed notifier"))?;
+                .map_err(|denied| Error::explain(ErrorType::HTTPStatus(403), denied))?;
             let (request_body, preserves_length) =
                 body::take_plan(&mut exchange.facts_mut().request_body)?;
             let variable = !preserves_length;
@@ -860,7 +882,9 @@ impl ProxyHttp for NativeProxy {
             }
         };
         if status != 0 {
-            let _ = session.respond_error(status).await;
+            if !write_admission_code(session, error).await {
+                let _ = session.respond_error(status).await;
+            }
         }
         pingora_proxy::FailToProxy {
             error_code: status,

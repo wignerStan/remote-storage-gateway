@@ -116,13 +116,17 @@ impl MessageCallback {
 
 /// Delta/event chunks remain in the carrier, regardless of callback grants.
 /// Complete terminal messages and separately granted metadata can be notified.
+fn response_is_delta(kind: &str) -> bool {
+    kind == "response.event" || kind.ends_with(".delta")
+}
+
 fn response_kind_reaches_plugin(
     response: bool,
     response_enabled: bool,
     actions: bool,
     kind: &str,
 ) -> bool {
-    if response && kind == "response.event" {
+    if response && response_is_delta(kind) {
         return false;
     }
     !response
@@ -319,7 +323,7 @@ pub(super) async fn filter_owned(
                 .ok_or_else(|| refusal(400, "message sequence exhausted"))?;
             // Validate sequence/kind but bypass delta callbacks before allocating
             // a method string or entering the native plugin runtime.
-            if response && message.kind == "response.event" {
+            if response && response_is_delta(message.kind) {
                 wire.extend(event.wire);
                 continue;
             }
@@ -579,7 +583,7 @@ mod tests {
             true,
             "response.output_text.delta"
         ));
-        assert!(response_kind_reaches_plugin(
+        assert!(!response_kind_reaches_plugin(
             true,
             true,
             false,

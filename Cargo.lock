@@ -699,6 +699,7 @@ dependencies = [
  "serde_ignored",
  "serde_json",
  "serde_yaml_ng",
+ "sha2",
  "thiserror 2.0.20",
  "toml",
 ]

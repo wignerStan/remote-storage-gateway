@@ -62,9 +62,9 @@ async fn sse_delta_bypasses_notifiers_while_complete_terminals_and_errors_requir
             "response.error",
         ),
         (
-            "openai.chat_completions.v1",
-            "/v1/chat/completions",
-            "chat_completion",
+            "openai.responses.v1",
+            "/v1/responses",
+            "response",
             r#"{"type":"response.completed","response":{"id":"complete-1","output":[]}}"#,
             "response.completed",
         ),
@@ -188,7 +188,7 @@ async fn upstream_websocket_messages_gate_independently_and_client_wire_stays_ma
         (
             r#"{"type":"response.output_text.delta","delta":"hello"}"#,
             false,
-            "response.event",
+            "response.output_text.delta",
         ),
         ("audio", true, "response.binary"),
     ] {
@@ -215,7 +215,7 @@ async fn upstream_websocket_messages_gate_independently_and_client_wire_stays_ma
                 let mut byte=[0];let first=timeout(Duration::from_millis(40),client.read(&mut byte)).await;let mut body=Vec::new();
                 assert!(first.is_err(),"partial upstream WS frame escaped response/reply framing guard");
                 release.add_permits(1);let _=client.read_to_end(&mut body).await;
-                assert_eq!(body,if grant&&deny && kind != "response.event" {Vec::new()}else{server_frame},"grant={grant} deny={deny} binary={binary}");
+                assert_eq!(body,if grant&&deny && kind != "response.event" && !kind.ends_with(".delta") {Vec::new()}else{server_frame},"grant={grant} deny={deny} binary={binary}");
                 drop(client);drop(worker);proxy.shutdown().await.unwrap();
             }).await.unwrap();
         }
