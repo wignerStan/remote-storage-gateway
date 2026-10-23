@@ -40,7 +40,7 @@ fn artifact(
     path
 }
 fn config(origin: SocketAddr, artifact: &Path, codec: &str, grant: bool) -> serde_json::Value {
-    json!({"upstream":format!("http://{origin}"),"callbacks":[{"binding":"direct", "path":artifact,"package":"worker.metadata.test","message_codec":codec,"message_responses":grant}]})
+    json!({"upstream":format!("http://{origin}"),"callbacks":[{"binding":"direct", "path":artifact,"package":"worker.metadata.test","message_codec":codec,"message_responses":grant,"message_actions":matches!(codec,"openai.responses.v1"|"codex.responses.v1")}]})
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -65,8 +65,16 @@ async fn sse_delta_bypasses_notifiers_while_complete_terminals_and_errors_requir
             "openai.chat_completions.v1",
             "/v1/chat/completions",
             "chat_completion",
+            // A Responses event on a Chat stream remains opaque Chat data.
             r#"{"type":"response.completed","response":{"id":"complete-1","output":[]}}"#,
-            "response.completed",
+            "response.event",
+        ),
+        (
+            "openai.chat_completions.v1",
+            "/v1/chat/completions",
+            "chat_completion",
+            "[DONE]",
+            "response.done",
         ),
         (
             "openai.chat_completions.v1",
@@ -183,7 +191,6 @@ fn frame(payload: &[u8], masked: bool, binary: bool) -> Vec<u8> {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upstream_websocket_messages_gate_independently_and_client_wire_stays_masked() {
-    const ACCEPT: &[u8]=b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
     for (payload, binary, kind) in [
         (
             r#"{"type":"response.output_text.delta","delta":"hello"}"#,
@@ -201,10 +208,14 @@ async fn upstream_websocket_messages_gate_independently_and_client_wire_stays_ma
                 let origin=listen(move|mut socket|{
                     let gate=gate.clone();let upload=expected_upload.clone();let download=expected_download.clone();
                     async move {
-                        head(&mut socket).await;socket.write_all(ACCEPT).await.unwrap();
+                        let request=String::from_utf8(head(&mut socket).await).unwrap();
+                        let key=request.lines().find_map(|line|line.split_once(':').filter(|(name,_)|name.eq_ignore_ascii_case("sec-websocket-key")).map(|(_,value)|value.trim())).unwrap();
+                        let accept=proxy_pingora::connect_upstream::websocket_session::handshake::accept_key(key).unwrap();
+                        socket.write_all(format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").as_bytes()).await.unwrap();
                         let mut actual=vec![0;upload.len()];socket.read_exact(&mut actual).await.unwrap();assert_eq!(actual,upload);
                         socket.write_all(&download[..3]).await.unwrap();
-                        gate.acquire().await.unwrap().forget();let _=socket.write_all(&download[3..]).await;
+                        gate.acquire().await.unwrap().forget();socket.write_all(&download[3..]).await.unwrap();
+                        std::future::pending::<()>().await;
                     }
                 }).await;
                 let dir=tempfile::tempdir().unwrap();let library=artifact(dir.path(),"openai.responses.v1","response.create",kind,payload,deny);
@@ -214,8 +225,13 @@ async fn upstream_websocket_messages_gate_independently_and_client_wire_stays_ma
                 assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));client.write_all(&client_frame).await.unwrap();
                 let mut byte=[0];let first=timeout(Duration::from_millis(40),client.read(&mut byte)).await;let mut body=Vec::new();
                 assert!(first.is_err(),"partial upstream WS frame escaped response/reply framing guard");
-                release.add_permits(1);let _=client.read_to_end(&mut body).await;
-                assert_eq!(body,if grant&&deny && kind != "response.event" {Vec::new()}else{server_frame},"grant={grant} deny={deny} binary={binary}");
+                release.add_permits(1);
+                let expected=if grant&&deny && kind != "response.event" {vec![0x88,2,3,243]}else{server_frame};
+                body.resize(expected.len(),0);client.read_exact(&mut body).await.unwrap();
+                assert_eq!(body,expected,"grant={grant} deny={deny} binary={binary}");
+                if !(grant&&deny && kind != "response.event") {
+                    assert!(timeout(Duration::from_millis(40),client.read_u8()).await.is_err(),"unexpected extra data on open upstream");
+                }
                 drop(client);drop(worker);proxy.shutdown().await.unwrap();
             }).await.unwrap();
         }
