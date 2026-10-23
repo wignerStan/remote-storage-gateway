@@ -458,9 +458,6 @@ impl NativeProxy {
                             transport
                                 .send_downstream_wire(plan.reply.clone().expect("validated reply"))
                                 .await?;
-                            if plan.close_downstream {
-                                transport.close_downstream_keep_upstream().await?;
-                            }
                         }
                         Decision::Drop => {}
                         Decision::Forward => {
@@ -489,6 +486,9 @@ impl NativeProxy {
                                 transport.forward_client(generation, selected).await?;
                             }
                         }
+                    }
+                    if close_after_decision(plan.decision, plan.close_downstream) {
+                        transport.close_downstream_keep_upstream().await?;
                     }
                     if plan.upstream == Upstream::Close {
                         let _ = transport.send_downstream(8, &1000_u16.to_be_bytes()).await;
@@ -606,6 +606,10 @@ impl NativeProxy {
             "upstream generation admitted");
         Ok(generation)
     }
+}
+
+fn close_after_decision(decision: Decision, requested: bool) -> bool {
+    requested && matches!(decision, Decision::Reply | Decision::Drop)
 }
 
 fn opaque_text_frames(payload: &[u8]) -> Result<Bytes> {
@@ -884,6 +888,20 @@ fn replacement(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn drop_and_prewarm_drop_close_downstream_without_replacing_upstream() {
+        for decision in ["drop", "reply"] {
+            let metadata = format!(
+                r#"{{"version":1,"decision":"{decision}","upstream":"keep","close_downstream":true}}"#
+            );
+            let action: crate::proxy::message_action::Metadata =
+                serde_json::from_str(&metadata).unwrap();
+            assert!(close_after_decision(action.decision, action.close_downstream));
+            assert_eq!(action.upstream, Upstream::Keep);
+        }
+        assert!(!close_after_decision(Decision::Drop, false));
+        assert!(!close_after_decision(Decision::Forward, true));
+    }
 
     #[test]
     fn replay_reply_preserves_multiple_text_frames_and_close_metadata() {
