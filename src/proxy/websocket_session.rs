@@ -1,10 +1,12 @@
 //! Execute granted message decisions through separately owned native sessions.
 //! Route, account, token and replay policy remain in the selected callbacks.
+mod generation_lifetime;
 mod http_bridge_session;
 use super::message_action::{Decision, Metadata, Reply, Upstream};
 use super::*;
 use admission_gate::budget::{Reservation, ResourceBudget};
 use bytes::Bytes;
+use generation_lifetime::GenerationLifetime;
 use proxy_pingora::{
     connect_upstream::websocket_session::{self as carrier, Event, Message, Side},
     worker::SessionExchange,
@@ -81,6 +83,36 @@ impl ResponseHold {
     }
 }
 
+async fn shutdown_event(
+    stop: &mut Option<tokio::sync::watch::Receiver<Option<tokio::time::Instant>>>,
+) {
+    if let Some(stop) = stop {
+        let deadline = *stop.borrow();
+        if let Some(at) = deadline {
+            tokio::time::sleep_until(at).await;
+        } else {
+            let _ = stop.changed().await;
+        }
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+fn shutdown_deadline(
+    stop: &Option<tokio::sync::watch::Receiver<Option<tokio::time::Instant>>>,
+) -> Option<tokio::time::Instant> {
+    stop.as_ref().and_then(|stop| *stop.borrow())
+}
+
+fn starts_turn(message: &Message) -> bool {
+    message.side == Side::Downstream
+        && message.message.as_ref().is_some_and(|semantic| {
+            matches!(
+                semantic.kind,
+                "response.create" | "responses_lite.create" | "responses_lite.delta"
+            )
+        })
+}
+
 fn response_terminal(message: &Message) -> bool {
     matches!(message.side, Side::Upstream(_))
         && message.message.as_ref().is_some_and(|semantic| {
@@ -116,6 +148,7 @@ fn validate_terminal_hold(message: &Message, plan: &Plan, held: bool) -> Result<
 /// Keep each reservation with its bytes, including while a release is writing.
 struct HeldMessage {
     message: Message,
+    starts_turn: bool,
     _bytes: Reservation,
     _count: Reservation,
     _inspection: Arc<Reservation>,
@@ -143,6 +176,7 @@ fn retain_message(
         .try_reserve(1)
         .ok_or_else(|| refusal(503, "held WebSocket message budget exhausted"))?;
     Ok(HeldMessage {
+        starts_turn: starts_turn(message),
         message: Message {
             side: message.side,
             message: None,
@@ -208,10 +242,31 @@ async fn notify_session_closed(
     request_id: u64,
     deadline: tokio::time::Instant,
 ) -> Result<()> {
+    notify_session_event(
+        registration,
+        "transport.closed",
+        method,
+        closed,
+        reservation,
+        request_id,
+        deadline,
+    )
+    .await
+}
+
+async fn notify_session_event(
+    registration: &message_codec::CodecRegistration,
+    kind: &str,
+    method: &str,
+    closed: Bytes,
+    reservation: Option<Arc<Reservation>>,
+    request_id: u64,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
     let failed = std::sync::atomic::AtomicBool::new(false);
     let mut cleanup = Vec::new();
     for (index, callback) in registration.callbacks.iter().enumerate() {
-        if !callback.interested(true, "transport.closed") {
+        if !callback.interested(true, kind) {
             continue;
         }
         let closed = closed.clone();
@@ -318,6 +373,7 @@ impl NativeProxy {
         // before its first decoder allocation and preserves it for queued wire.
         ctx.inspection_permit = None;
         let mut reservation = None;
+        let mut lifetime = GenerationLifetime::default();
         let result = self
             .run_websocket_session(
                 &mut transport,
@@ -329,8 +385,53 @@ impl NativeProxy {
                 },
                 ctx,
                 &mut reservation,
+                &mut lifetime,
             )
             .await;
+        if transport.downstream_closed() && lifetime.may_detach() {
+            // Signal admission cancellation before any callback can wait on the
+            // Go session mutex. No active reservation is released by this event.
+            let method = format!(
+                "{}/transport.detached/{:016x}/{:016x}",
+                registration.codec.id(),
+                ctx.request_id,
+                ctx.response_sequence
+            );
+            let detached = notify_session_event(
+                registration,
+                "transport.detached",
+                &method,
+                Bytes::from_static(br#"{"side":"downstream","reason":"close"}"#),
+                reservation.clone(),
+                ctx.request_id,
+                tokio::time::Instant::now() + self.config.io_timeout,
+            )
+            .await;
+            if let (Ok(()), Some(generation), Some(owner)) = (
+                detached,
+                lifetime.take(&mut transport),
+                &self.retained_sessions,
+            ) {
+                let stop = owner.subscribe();
+                let detached = generation_lifetime::DetachedOwner {
+                    registration: registration.clone(),
+                    inspection: Arc::clone(&self.inspection),
+                    reservation: reservation.take(),
+                    request_id: ctx.request_id,
+                    sequence: ctx.response_sequence,
+                    exchange,
+                    io_timeout: self.config.io_timeout,
+                };
+                let inspection = Arc::clone(&self.inspection);
+                let io_timeout = self.config.io_timeout;
+                owner.spawn(generation.run(Some(detached), stop, io_timeout, inspection, None));
+                // Downstream delivery failed. Upstream settlement remains owned by
+                // the resource task and cannot count this local 101 as delivery.
+                ctx.message_failed = true;
+                drop(transport);
+                return Ok(());
+            }
+        }
         if result.is_err() {
             // After 101 there is no HTTP error response. Close this WebSocket
             // with a protocol frame; never serialize internal errors/secrets.
@@ -400,22 +501,73 @@ impl NativeProxy {
         route: SessionRoute<'_>,
         ctx: &mut ProxyContext,
         reservation: &mut Option<Arc<Reservation>>,
+        lifetime: &mut GenerationLifetime,
     ) -> Result<()> {
         let SessionRoute { request, proxy } = route;
         let mut held: Vec<HeldMessage> = Vec::new();
         let mut response_hold = ResponseHold::default();
+        let mut stop = self
+            .retained_sessions
+            .as_ref()
+            .map(|owner| owner.subscribe());
         let held_bytes =
             ResourceBudget::new(self.inspection.limits.max_message_bytes.saturating_mul(2));
         let held_count = ResourceBudget::new(websocket::Limits::default().max_frames);
         loop {
-            let event = transport
-                .next_reserved(|| {
-                    if reservation.is_none() {
-                        *reservation = Some(self.inspection.buffers()?);
+            if let Some(deadline) = shutdown_deadline(&stop) {
+                if !lifetime.active {
+                    if let Some(generation) = lifetime.take(transport) {
+                        let owner = self
+                            .retained_sessions
+                            .as_ref()
+                            .expect("reserved physical owner");
+                        owner.spawn(generation.run(
+                            None,
+                            owner.subscribe(),
+                            self.config.io_timeout,
+                            Arc::clone(&self.inspection),
+                            reservation.clone(),
+                        ));
                     }
-                    Ok(())
-                })
+                    transport
+                        .send_downstream(8, &1001_u16.to_be_bytes())
+                        .await?;
+                    return Ok(());
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(refusal(
+                        504,
+                        "active session exceeded process drain deadline",
+                    ));
+                }
+            }
+            if lifetime.retirement_due() && !lifetime.active && transport.generation().is_some() {
+                self.retire_websocket_generation(
+                    transport,
+                    exchange,
+                    registration,
+                    ctx,
+                    reservation,
+                    lifetime,
+                )
                 .await?;
+                held.clear();
+                response_hold.clear();
+            }
+            let timer = async {
+                match lifetime.retire_at() {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            };
+            let event = tokio::select! {
+                _ = shutdown_event(&mut stop) => continue,
+                _ = timer => { lifetime.retire(); continue; },
+                event = transport.next_reserved(|| {
+                    if reservation.is_none() { *reservation = Some(self.inspection.buffers()?); }
+                    Ok(())
+                }) => event?,
+            };
             match event {
                 Event::Maintenance(maintenance) => {
                     if let Some(side) = transport.maintain(maintenance).await? {
@@ -424,6 +576,7 @@ impl NativeProxy {
                             Side::Upstream(generation) => {
                                 held.clear();
                                 response_hold.clear();
+                                lifetime.reset();
                                 exchange.upstream_closed().map_err(lifecycle_error)?;
                                 upstream_closed(
                                     transport,
@@ -443,6 +596,7 @@ impl NativeProxy {
                 Event::Closed(Side::Upstream(generation)) => {
                     held.clear();
                     response_hold.clear();
+                    lifetime.reset();
                     exchange.upstream_closed().map_err(lifecycle_error)?;
                     upstream_closed(
                         transport,
@@ -457,32 +611,114 @@ impl NativeProxy {
                 }
                 Event::Message(message) => {
                     let response = matches!(message.side, Side::Upstream(_));
-                    let sequence = if response {
-                        &mut ctx.response_sequence
+                    if starts_turn(&message) && shutdown_deadline(&stop).is_some() {
+                        transport.send_downstream(1,br#"{"type":"error","status":503,"error":{"code":"server_shutting_down","message":"Retry the full request on a new connection"}}"#).await?;
+                        continue;
+                    }
+                    let retirement = if !response && !lifetime.active {
+                        lifetime.retire_at()
                     } else {
-                        &mut ctx.message_sequence
+                        None
                     };
-                    let deadline = self.inspection.deadline();
-                    let pending = within_deadline(
-                        deadline,
-                        evaluate(
-                            registration,
-                            &message,
-                            sequence,
-                            ctx.request_id,
-                            self.inspection.limits.max_message_bytes,
-                            reservation.clone(),
-                        ),
-                        "message callback chain deadline exceeded",
-                    );
-                    let plan = transport
-                        .drive_until(pending, || {
+                    let approved = {
+                        let sequence = if response {
+                            &mut ctx.response_sequence
+                        } else {
+                            &mut ctx.message_sequence
+                        };
+                        let pending = within_deadline(
+                            self.inspection.deadline(),
+                            evaluate(
+                                registration,
+                                &message,
+                                sequence,
+                                ctx.request_id,
+                                self.inspection.limits.max_message_bytes,
+                                reservation.clone(),
+                            ),
+                            "message callback chain deadline exceeded",
+                        );
+                        let driving = transport.drive_until(pending, || {
                             if reservation.is_none() {
                                 *reservation = Some(self.inspection.buffers()?);
                             }
                             Ok(())
-                        })
-                        .await??;
+                        });
+                        let timer = async {
+                            match retirement {
+                                Some(at) => tokio::time::sleep_until(at).await,
+                                None => std::future::pending().await,
+                            }
+                        };
+                        tokio::pin!(driving);
+                        tokio::pin!(timer);
+                        loop {
+                            tokio::select! {
+                                biased;
+                                _=shutdown_event(&mut stop)=>{
+                                    if !lifetime.active || shutdown_deadline(&stop).is_some_and(|at|tokio::time::Instant::now()>=at) {break None;}
+                                },
+                                _=&mut timer=>break None,
+                                plan=&mut driving=>break Some(plan??),
+                            }
+                        }
+                    };
+                    let Some(plan) = approved else {
+                        if shutdown_deadline(&stop).is_some() {
+                            if let Some(generation) = lifetime.take(transport) {
+                                let owner = self
+                                    .retained_sessions
+                                    .as_ref()
+                                    .expect("reserved physical owner");
+                                owner.spawn(generation.run(
+                                    None,
+                                    owner.subscribe(),
+                                    self.config.io_timeout,
+                                    Arc::clone(&self.inspection),
+                                    reservation.clone(),
+                                ));
+                            }
+                            transport
+                                .send_downstream(8, &1001_u16.to_be_bytes())
+                                .await?;
+                            return Err(refusal(
+                                503,
+                                "pending turn cancelled during process drain",
+                            ));
+                        }
+                        self.retire_websocket_generation(
+                            transport,
+                            exchange,
+                            registration,
+                            ctx,
+                            reservation,
+                            lifetime,
+                        )
+                        .await?;
+                        return Err(refusal(
+                            409,
+                            "physical generation retired during admission; full retry required",
+                        ));
+                    };
+                    if !response
+                        && !lifetime.active
+                        && lifetime.retirement_due()
+                        && transport.generation().is_some()
+                    {
+                        self.retire_websocket_generation(
+                            transport,
+                            exchange,
+                            registration,
+                            ctx,
+                            reservation,
+                            lifetime,
+                        )
+                        .await?;
+                        return Err(refusal(
+                            409,
+                            "physical generation retired during admission; full retry required",
+                        ));
+                    }
                     // Apply the full chain to a draft only after every result is validated.
                     if !plan.patches.is_empty() {
                         let mut next_request = request.clone();
@@ -513,6 +749,7 @@ impl NativeProxy {
                     ) && let Some(generation) = transport.generation()
                     {
                         transport.disconnect(generation)?;
+                        lifetime.reset();
                         if plan.hold != "release" {
                             held.clear();
                         }
@@ -522,7 +759,13 @@ impl NativeProxy {
                         tracing::debug!(target: "proxy_pingora::session", request_id = ctx.request_id,
                             generation, decision = "disconnect", "upstream generation retired");
                     }
+                    lifetime.apply(&plan, transport)?;
                     response_hold.apply(&plan)?;
+                    // Callback settlement precedes any downstream write. A failed
+                    // write after a terminal must not keep the Go owner active.
+                    if response_terminal(&message) {
+                        lifetime.active = false;
+                    }
                     let selected = plan.replacement.as_ref().unwrap_or(&message);
                     validate_terminal_hold(selected, &plan, !held.is_empty())?;
                     if plan.hold == "buffer" || response_hold.buffers(selected, &plan) {
@@ -556,17 +799,22 @@ impl NativeProxy {
                                     let generation = match transport.generation() {
                                         Some(generation) => generation,
                                         None => {
-                                            self.connect_websocket_generation(
-                                                transport,
-                                                exchange,
-                                                registration.codec.as_ref(),
-                                                request,
-                                                proxy.as_ref(),
-                                                ctx.request_id,
-                                            )
-                                            .await?
+                                            lifetime.reserve(self)?;
+                                            let generation = self
+                                                .connect_websocket_generation(
+                                                    transport,
+                                                    exchange,
+                                                    registration.codec.as_ref(),
+                                                    request,
+                                                    proxy.as_ref(),
+                                                    ctx.request_id,
+                                                )
+                                                .await?;
+                                            lifetime.connected(transport);
+                                            generation
                                         }
                                     };
+                                    lifetime.active |= saved.starts_turn;
                                     transport.forward_client(generation, &saved.message).await?;
                                 }
                                 Side::Upstream(generation) => {
@@ -597,17 +845,22 @@ impl NativeProxy {
                                 let generation = match transport.generation() {
                                     Some(generation) => generation,
                                     None => {
-                                        self.connect_websocket_generation(
-                                            transport,
-                                            exchange,
-                                            registration.codec.as_ref(),
-                                            request,
-                                            proxy.as_ref(),
-                                            ctx.request_id,
-                                        )
-                                        .await?
+                                        lifetime.reserve(self)?;
+                                        let generation = self
+                                            .connect_websocket_generation(
+                                                transport,
+                                                exchange,
+                                                registration.codec.as_ref(),
+                                                request,
+                                                proxy.as_ref(),
+                                                ctx.request_id,
+                                            )
+                                            .await?;
+                                        lifetime.connected(transport);
+                                        generation
                                     }
                                 };
+                                lifetime.active |= starts_turn(selected);
                                 transport.forward_client(generation, selected).await?;
                             }
                         }
@@ -625,6 +878,44 @@ impl NativeProxy {
                 *reservation = None;
             }
         }
+    }
+
+    async fn retire_websocket_generation(
+        &self,
+        transport: &mut carrier::Session<'_>,
+        exchange: &mut SessionExchange<ProxyContract>,
+        registration: &message_codec::CodecRegistration,
+        ctx: &mut ProxyContext,
+        reservation: &mut Option<Arc<Reservation>>,
+        lifetime: &mut GenerationLifetime,
+    ) -> Result<()> {
+        let generation = transport.generation().expect("live retiring generation");
+        if let Some(retained) = lifetime.take(transport) {
+            let owner = self
+                .retained_sessions
+                .as_ref()
+                .expect("reserved physical owner");
+            owner.spawn(retained.run(
+                None,
+                owner.subscribe(),
+                self.config.io_timeout,
+                Arc::clone(&self.inspection),
+                reservation.clone(),
+            ));
+        }
+        exchange.upstream_closed().map_err(lifecycle_error)?;
+        upstream_closed(
+            transport,
+            registration,
+            ctx,
+            generation,
+            "retired",
+            &self.inspection,
+            reservation,
+        )
+        .await?;
+        lifetime.reset();
+        Ok(())
     }
 
     async fn connect_websocket_generation(
@@ -695,7 +986,7 @@ impl NativeProxy {
             .map_err(|_| refusal(504, "upstream resolution deadline exceeded"))??;
         peer.options.idle_timeout = Some(Duration::ZERO);
         let decoder = response_decoder(codec, self.inspection.limits.max_message_bytes)?;
-        let (generation, mut response) = tokio::time::timeout_at(
+        let connecting = tokio::time::timeout_at(
             deadline,
             transport.connect_authorized(
                 &self.session_connector,
@@ -705,9 +996,13 @@ impl NativeProxy {
                 decoder,
                 || async { exchange.connected().await.map_err(control_error) },
             ),
-        )
-        .await
-        .map_err(|_| refusal(504, "upstream handshake deadline exceeded"))??;
+        );
+        let connected = match &self.retained_sessions {
+            Some(owner) => owner.on_runtime(connecting).await,
+            None => connecting.await,
+        };
+        let (generation, mut response) =
+            connected.map_err(|_| refusal(504, "upstream handshake deadline exceeded"))??;
         codec.validate_response(&response)?;
         exchange.facts_mut().status = Some(response.status.as_u16());
         if let Err(error) = transport

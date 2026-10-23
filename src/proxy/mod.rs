@@ -7,6 +7,7 @@ mod message_action;
 pub mod message_codec;
 mod native_hooks;
 mod policy;
+pub(crate) mod retained_sessions;
 mod websocket_session;
 pub use native_hooks::{NativeHookContext, NativeHookProxy};
 
@@ -157,6 +158,7 @@ pub struct NativeProxy {
     control: Arc<WorkerControl>,
     operations: Arc<Operations>,
     runtime: Option<Runtime>,
+    retained_sessions: Option<Arc<retained_sessions::RetainedSessions>>,
     remote_plugins: Arc<crate::remote_axis::RemotePluginManager>,
     body_dump_limit: usize,
     capture_budget: Arc<admission_gate::budget::ResourceBudget>,
@@ -216,6 +218,7 @@ impl NativeProxy {
             control,
             operations: Arc::new(Operations::default()),
             runtime: None,
+            retained_sessions: None,
             remote_plugins: Arc::default(),
             body_dump_limit: 0,
             capture_budget: diagnostic_output::runtime::default_capture_budget(),
@@ -265,6 +268,13 @@ impl NativeProxy {
     }
     pub fn with_inspection_limits(mut self, limits: crate::config::Inspection) -> Self {
         self.inspection = Arc::new(inspection::InspectionBudget::new(limits));
+        self
+    }
+    pub(crate) fn with_retained_sessions(
+        mut self,
+        owner: Arc<retained_sessions::RetainedSessions>,
+    ) -> Self {
+        self.retained_sessions = Some(owner);
         self
     }
     pub fn with_runtime(mut self, runtime: Runtime) -> Self {
@@ -365,6 +375,11 @@ impl ProxyLifecycle for NativeProxy {
                 .map_err(|errors| errors.join("; "))?;
         }
         Ok(())
+    }
+    async fn shutdown_requested(&self) {
+        if let Some(owner) = &self.retained_sessions {
+            owner.request_shutdown();
+        }
     }
     async fn maintain(&self) {
         self.lifecycle.chain.maintain().await;

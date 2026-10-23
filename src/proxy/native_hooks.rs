@@ -270,6 +270,9 @@ where
     async fn shutdown(&self) -> std::result::Result<(), String> {
         self.worker.shutdown().await
     }
+    async fn shutdown_requested(&self) {
+        self.worker.shutdown_requested().await;
+    }
     async fn maintain(&self) {
         self.worker.maintain().await;
     }

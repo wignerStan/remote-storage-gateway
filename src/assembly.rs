@@ -58,6 +58,14 @@ const NOTIFIERS: Resource = Resource {
         },
     ],
 };
+const RETAINED_SESSIONS: Resource = Resource {
+    id: "retained-sessions",
+    provides: &["retained-sessions"],
+    requires: &[plugin_lifecycle::ResourceRequirement {
+        resource: "native-notifiers",
+        capability: "worker-notifiers",
+    }],
+};
 const MANAGEMENT: Resource = Resource {
     id: "management-control",
     provides: &["management-control"],
@@ -182,6 +190,7 @@ async fn assemble_selected(
     let proxy_config = config.proxy_config()?;
     let body_limit = config.logging.body_max_bytes;
     let inspection = config.inspection;
+    let shutdown_grace = std::time::Duration::from_secs(config.shutdown_seconds);
     let control = Arc::new(WorkerControl::default());
     let operations = Arc::new(diagnostic_output::operations::Operations::default());
     let mut resources = if config.callbacks.iter().any(|c| !c.actions.is_empty()) {
@@ -197,6 +206,7 @@ async fn assemble_selected(
     } else {
         vec![NOTIFIER_MEMORY, REMOTE_AXES, NOTIFIERS]
     };
+    resources.push(RETAINED_SESSIONS);
     if let Some(ingress) = &config.plugin_ingress {
         resources.push(if ingress.shared() {
             SHARED_PLUGIN_ROUTES
@@ -554,6 +564,19 @@ async fn assemble_selected(
         },
         None => None,
     };
+    let retained_sessions = crate::proxy::retained_sessions::RetainedSessions::new(
+        inspection.max_requests,
+        shutdown_grace,
+    );
+    let installing = Arc::clone(&retained_sessions);
+    composition
+        .install(RETAINED_SESSIONS, async move {
+            let closing = Arc::clone(&installing);
+            let inverse: Reversal =
+                Box::new(move || Box::pin(async move { closing.close().await }));
+            Ok((installing, inverse))
+        })
+        .await?;
     let runtime = composition.commit().await?;
     let native = runtime.require::<NativeSet>(NOTIFIERS.id)?.enter()?;
     let callbacks = native.callbacks.clone();
@@ -585,5 +608,6 @@ async fn assemble_selected(
         .with_message_callbacks(messages, codecs)
         .with_body_dump_limit(body_limit)
         .with_body_dump_budget(capture_budget)
+        .with_retained_sessions(retained_sessions)
         .with_runtime(runtime))
 }
