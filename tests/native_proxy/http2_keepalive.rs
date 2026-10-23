@@ -34,13 +34,18 @@ async fn write_frame(socket: &mut TcpStream, kind: u8, flags: u8, stream: u32, p
 
 // A minimal HTTP/2 origin uses the static HPACK :status 200 entry. Inspecting
 // native frames directly proves PING is connection-level and carries no DATA.
-async fn origin(acknowledge: bool, pings: tokio::sync::mpsc::UnboundedSender<()>) -> Listening {
+async fn origin(
+    acknowledge: bool,
+    pings: tokio::sync::mpsc::UnboundedSender<()>,
+    startup: Duration,
+) -> Listening {
     listen(move |mut socket| {
         let pings = pings.clone();
         async move {
             let mut preface = [0; 24];
             socket.read_exact(&mut preface).await.unwrap();
             assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+            tokio::time::sleep(startup).await;
             write_frame(&mut socket, 4, 0, 0, &[]).await;
             while let Ok((kind, flags, stream, payload)) = read_frame(&mut socket).await {
                 match kind {
@@ -70,10 +75,12 @@ async fn bridge(
     origin: SocketAddr,
     connections: Arc<AtomicUsize>,
     closed: tokio::sync::mpsc::UnboundedSender<()>,
+    idle: tokio::sync::watch::Receiver<bool>,
 ) -> Listening {
     listen(move |mut client| {
         let connections = Arc::clone(&connections);
         let closed = closed.clone();
+        let mut idle = idle.clone();
         async move {
             assert!(head(&mut client).await.starts_with(b"CONNECT "));
             let mut upstream = TcpStream::connect(origin).await.unwrap();
@@ -84,25 +91,52 @@ async fn bridge(
                 .unwrap();
             let mut from_client = [0; 8192];
             let mut from_origin = [0; 8192];
+            let mut deadline = None;
             loop {
-                let forward = async {
-                    tokio::select! {
-                        read = client.read(&mut from_client) => {
-                            let length = read.ok()?;
-                            if length == 0 { return None; }
-                            upstream.write_all(&from_client[..length]).await.ok()?;
-                        }
-                        read = upstream.read(&mut from_origin) => {
-                            let length = read.ok()?;
-                            if length == 0 { return None; }
-                            client.write_all(&from_origin[..length]).await.ok()?;
-                        }
+                if *idle.borrow() {
+                    deadline.get_or_insert_with(|| tokio::time::Instant::now() + BRIDGE_IDLE);
+                } else {
+                    deadline = None;
+                }
+                let read = tokio::select! {
+                    changed = idle.changed() => {
+                        if changed.is_err() { return; }
+                        deadline = None;
+                        continue;
                     }
-                    Some(())
+                    _ = async {
+                        match deadline {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending().await,
+                        }
+                    } => None,
+                    read = client.read(&mut from_client) => read.ok().filter(|n| *n > 0).map(|n| (true, n)),
+                    read = upstream.read(&mut from_origin) => read.ok().filter(|n| *n > 0).map(|n| (false, n)),
                 };
-                if !matches!(timeout(BRIDGE_IDLE, forward).await, Ok(Some(()))) {
+                let Some((from_downstream, length)) = read else {
+                    // Wait for the H2 driver's FIN acknowledgement before the
+                    // next request can select a pooled connection.
+                    let _ = client.shutdown().await;
+                    timeout(WAIT, async {
+                        loop {
+                            match client.read(&mut from_client).await {
+                                Ok(0) => break,
+                                Ok(_) => {},
+                                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                                Err(error) => panic!("H2 close acknowledgement failed: {error}"),
+                            }
+                        }
+                    }).await.expect("native H2 driver did not close after bridge FIN");
                     let _ = closed.send(());
                     break;
+                };
+                if from_downstream {
+                    upstream.write_all(&from_client[..length]).await.unwrap();
+                } else {
+                    client.write_all(&from_origin[..length]).await.unwrap();
+                }
+                if *idle.borrow() {
+                    deadline = Some(tokio::time::Instant::now() + BRIDGE_IDLE);
                 }
             }
         }
@@ -114,15 +148,31 @@ async fn bridge(
 async fn native_http2_ping_preserves_idle_connect_tunnel_and_pool_reuse() {
     for enabled in [false, true] {
         let (ping_tx, mut ping_rx) = tokio::sync::mpsc::unbounded_channel();
-        let origin = origin(true, ping_tx).await;
+        // Bootstrap delay is longer than the idle budget on purpose.
+        // The measured idle phase starts only after the first response.
+        let origin = origin(true, ping_tx, BRIDGE_IDLE * 2).await;
         let connections = Arc::new(AtomicUsize::new(0));
         let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel();
-        let bridge = bridge(origin.address, Arc::clone(&connections), close_tx).await;
+        let (idle_tx, idle_rx) = tokio::sync::watch::channel(false);
+        let bridge = bridge(origin.address, Arc::clone(&connections), close_tx, idle_rx).await;
         let mut config = settings(origin.address, Some(bridge.address), "http", true);
         config.http2.enabled = true;
         config.http2.ping_interval_ms = enabled.then_some(PING.as_millis() as u64);
         let worker = worker(config).await;
-        assert!(get(worker.address).await.starts_with(b"HTTP/1.1 200"));
+        let first = get(worker.address).await;
+        assert!(
+            first.starts_with(b"HTTP/1.1 200"),
+            "initial request failed: enabled={enabled}, bridge_closed={}, connections={}, response={}",
+            close_rx.try_recv().is_ok(),
+            connections.load(Ordering::SeqCst),
+            String::from_utf8_lossy(&first)
+        );
+        if enabled {
+            // Bootstrap probes do not count toward the measured idle phase.
+            while ping_rx.try_recv().is_ok() {}
+        }
+        let idle_started = tokio::time::Instant::now();
+        idle_tx.send(true).unwrap();
         if enabled {
             // Observed ACKed probes span more than the bridge's idle budget.
             timeout(WAIT, async {
@@ -132,12 +182,20 @@ async fn native_http2_ping_preserves_idle_connect_tunnel_and_pool_reuse() {
             })
             .await
             .unwrap();
+            assert!(idle_started.elapsed() > BRIDGE_IDLE);
             assert!(close_rx.try_recv().is_err());
         } else {
             timeout(WAIT, close_rx.recv()).await.unwrap().unwrap();
             assert!(ping_rx.try_recv().is_err());
         }
-        assert!(get(worker.address).await.starts_with(b"HTTP/1.1 200"));
+        idle_tx.send(false).unwrap();
+        let next = get(worker.address).await;
+        assert!(
+            next.starts_with(b"HTTP/1.1 200"),
+            "idle request failed: enabled={enabled}, connections={}, response={}",
+            connections.load(Ordering::SeqCst),
+            String::from_utf8_lossy(&next)
+        );
         assert_eq!(
             connections.load(Ordering::SeqCst),
             if enabled { 1 } else { 2 }
@@ -148,7 +206,7 @@ async fn native_http2_ping_preserves_idle_connect_tunnel_and_pool_reuse() {
 #[tokio::test]
 async fn native_http2_missing_ping_ack_closes_and_replaces_connection() {
     let (ping_tx, mut ping_rx) = tokio::sync::mpsc::unbounded_channel();
-    let origin = origin(false, ping_tx).await;
+    let origin = origin(false, ping_tx, Duration::ZERO).await;
     let connections = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&connections);
     let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel();
