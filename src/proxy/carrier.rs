@@ -103,6 +103,8 @@ impl ProxyHttp for NativeProxy {
         headers::validate_ingress(session.req_header())?;
         // Preserve the parsed ingress head: Pingora's body decoder and HEAD /
         // upgrade semantics depend on it. Only outbound metadata is cloned.
+        let bridge_index =
+            message_codec::select_http_bridge(&self.message_codecs, session.req_header())?;
         let mut request = session.req_header().clone();
         ctx.request_has_body = !session.is_body_empty();
         let facts = RequestFacts {
@@ -143,10 +145,12 @@ impl ProxyHttp for NativeProxy {
                 variable,
                 ctx.request_has_body,
             )?;
-            exchange
-                .before_upstream_send(&mut request)
-                .await
-                .map_err(lifecycle_error)?;
+            if bridge_index.is_none() {
+                exchange
+                    .before_upstream_send(&mut request)
+                    .await
+                    .map_err(lifecycle_error)?;
+            }
             // Final policy also checks compiled callbacks: an origin route and
             // body framing cannot be invalidated after configuration is sealed.
             if request.method != session.req_header().method
@@ -177,6 +181,14 @@ impl ProxyHttp for NativeProxy {
                 .map_err(|_| refusal(504, "request callback deadline exceeded"))??;
         if !self.control.accepting() {
             return Err(refusal(503, "worker admission closed during callbacks"));
+        }
+        if let Some(index) = bridge_index {
+            ctx.message_selection = Some((index, message_codec::Transport::HttpBody));
+            ctx.upstream_request = Some(request);
+            ctx.request_body = request_body;
+            ctx.exchange = Some(exchange);
+            self.serve_http_bridge(session, ctx, index).await?;
+            return Ok(true);
         }
         ctx.message_selection = message_codec::select_request(&self.message_codecs, &request)?;
         if let Some((index, _)) = ctx.message_selection {

@@ -42,11 +42,14 @@ http = "1"
 async-trait = "0.1"
 pingora-core = { version = "=0.8.1", default-features = false, features = ["rustls"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
+futures-util = "0.3"
+http-bridge = { path = "../infra/rust/crates/networking/http/bridge" }
 tokio = { version = "1", features = ["net", "sync", "rt-multi-thread", "macros", "time"] }
 tracing = "0.1"
 
 [dev-dependencies]
+h2 = "0.4"
 wat = "1"
 zstd = "0.13"
 test-support = { path = "../infra/rust/crates/testing/support" }

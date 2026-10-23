@@ -1,6 +1,9 @@
 #include "infra_plugin_v1.h"
 #include <stdlib.h>
 #include <string.h>
+#ifdef TEST_CLEANUP_PATH
+#include <stdio.h>
+#endif
 
 /* ABI-shaped C fixture; Go identity exercises loader policy, not Go runtime code. */
 #ifndef TEST_PLUGIN_KIND
@@ -61,6 +64,43 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
         *out = (InfraOwnedBytes){0};
         return result;
     }
+#ifdef TEST_HTTP_TO_WS
+    {
+        const char *prefix = "codex.responses.v1/response/";
+        const uint8_t allow[] = {0};
+        if (method.len == strlen(prefix) + 33 && !memcmp(method.ptr, prefix, strlen(prefix))) {
+            static const char body[] = "{\"type\":\"response.create\",\"model\":\"approved\",\"input\":[]}";
+            const char *large_prefix = "{\"type\":\"response.create\",";
+            int large = input.len > 1024 * 1024;
+            size_t body_len = large ? strlen(large_prefix) + input.len - 1 : sizeof(body) - 1;
+            size_t total = 5 + reply_len + body_len;
+            uint8_t *bytes = malloc(total);
+            if (!bytes) return INFRA_FAILED;
+            bytes[0] = 2;
+            for (int i = 0; i < 4; i++) bytes[i+1] = (uint8_t)(reply_len >> (i*8));
+            memcpy(bytes+5, reply_bytes, reply_len);
+            if (large) {
+                memcpy(bytes+5+reply_len,large_prefix,strlen(large_prefix));
+                memcpy(bytes+5+reply_len+strlen(large_prefix),input.ptr+1,input.len-1);
+            } else memcpy(bytes+5+reply_len, body, sizeof(body)-1);
+            uint32_t result = copy_reply(bytes, total, out);
+            free(bytes);return result;
+        }
+#ifdef TEST_CLEANUP_PATH
+        const char *closed = "codex.responses.v1/transport.closed/";
+        if (method.len == strlen(closed)+33 && !memcmp(method.ptr,closed,strlen(closed))) {
+            FILE *file=fopen(TEST_CLEANUP_PATH,"ab");
+            if (!file) return INFRA_FAILED;
+            fputc('x',file);fclose(file);
+        }
+#endif
+        /* Delta bypass is an explicit part of the selected Responses codec. */
+        const char *delta = "response.output_text.delta/";
+        for (size_t i=0; i+strlen(delta)<=method.len; i++)
+            if (!memcmp(method.ptr+i,delta,strlen(delta))) return INFRA_FAILED;
+        return copy_reply(allow,sizeof(allow),out);
+    }
+#endif
 #ifdef TEST_REQUIRE_CLIENT_IP
     {
         const char *expected = "\"client_ip\":\"127.0.0.1\"";

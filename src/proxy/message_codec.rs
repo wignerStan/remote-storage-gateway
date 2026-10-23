@@ -76,9 +76,14 @@ impl MessageCallback {
     ) -> Self {
         self.grant = Arc::new(super::message_action::Grant {
             enabled,
+            http_bridge: false,
             proxy,
             headers,
         });
+        self
+    }
+    pub(crate) fn with_http_bridge(mut self, enabled: bool) -> Self {
+        Arc::make_mut(&mut self.grant).http_bridge = enabled;
         self
     }
     pub(super) fn interested(&self, response: bool, kind: &str) -> bool {
@@ -193,6 +198,11 @@ pub(crate) struct CodecRegistration {
 }
 
 impl CodecRegistration {
+    pub(super) fn http_bridge(&self) -> bool {
+        self.callbacks
+            .iter()
+            .any(|callback| callback.grant.http_bridge)
+    }
     pub(super) fn session_control(&self) -> bool {
         self.callbacks.iter().any(|callback| callback.grant.enabled)
     }
@@ -204,6 +214,34 @@ impl AsRef<dyn CodecPlugin> for CodecRegistration {
     fn as_ref(&self) -> &(dyn CodecPlugin + 'static) {
         self.codec.as_ref()
     }
+}
+
+pub(super) fn select_http_bridge(
+    registrations: &[CodecRegistration],
+    request: &RequestHeader,
+) -> Result<Option<usize>> {
+    if request.method != http::Method::POST
+        || !matches!(
+            request.uri.path(),
+            "/responses" | "/v1/responses" | "/backend-api/codex/responses"
+        )
+    {
+        return Ok(None);
+    }
+    let mut selected = None;
+    for (index, registration) in registrations.iter().enumerate() {
+        if registration.http_bridge()
+            && matches!(
+                registration.codec.id(),
+                "codex.responses.v1" | "openai.responses.v1"
+            )
+        {
+            if selected.replace(index).is_some() {
+                return Err(refusal(500, "ambiguous HTTP bridge codec grant"));
+            }
+        }
+    }
+    Ok(selected)
 }
 
 pub(crate) fn select_request(

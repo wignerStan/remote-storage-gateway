@@ -291,7 +291,8 @@ async fn assemble_selected(
                                 crate::native_notifier::validate_patch_headers(
                                     &callback.patch_headers,
                                 )?,
-                            ),
+                            )
+                            .with_http_bridge(callback.message_http_bridge),
                         ));
                     }
                     if callback.hooks.is_empty() {
@@ -444,7 +445,8 @@ async fn assemble_selected(
                             crate::native_notifier::validate_patch_headers(
                                 &callback.patch_headers,
                             )?,
-                        ),
+                        )
+                        .with_http_bridge(callback.message_http_bridge),
                     ));
                 }
                 if callback.hooks.is_empty() {

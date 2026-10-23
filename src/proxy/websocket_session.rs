@@ -1,5 +1,6 @@
 //! Execute granted message decisions through separately owned native sessions.
 //! Route, account, token and replay policy remain in the selected callbacks.
+mod http_bridge_session;
 use super::message_action::{Decision, Metadata, Reply, Upstream};
 use super::*;
 use admission_gate::budget::{Reservation, ResourceBudget};
@@ -849,6 +850,34 @@ async fn upstream_closed(
     }
     Ok(())
 }
+// Fragment large configured messages using the existing bounded frame encoder.
+fn encode_text(client: bool, payload: &[u8]) -> std::result::Result<Bytes, websocket::Error> {
+    if std::str::from_utf8(payload).is_err() {
+        return Err(websocket::Error::Protocol("invalid text UTF-8"));
+    }
+    if payload.is_empty() {
+        return if client {
+            websocket::encode_client(1, payload)
+        } else {
+            websocket::encode_server(1, payload)
+        };
+    }
+    let mut output = Vec::new();
+    let chunks = payload.chunks(1024 * 1024);
+    let count = chunks.len();
+    for (index, chunk) in chunks.enumerate() {
+        let frame = if client {
+            websocket::encode_client(2, chunk)
+        } else {
+            websocket::encode_server(2, chunk)
+        }?;
+        let mut frame = frame.to_vec();
+        frame[0] = if index + 1 == count { 0x80 } else { 0 } | if index == 0 { 1 } else { 0 };
+        output.extend(frame);
+    }
+    Ok(Bytes::from(output))
+}
+
 fn replacement(
     codec: &dyn message_codec::CodecPlugin,
     side: Side,
@@ -857,11 +886,11 @@ fn replacement(
 ) -> Result<Message> {
     let (wire, mut decoder) = match side {
         Side::Downstream => (
-            websocket::encode_client(1, &payload),
+            encode_text(true, &payload),
             codec.create_with_limits(max_bytes)?,
         ),
         Side::Upstream(_) => (
-            websocket::encode_server(1, &payload),
+            encode_text(false, &payload),
             response_decoder(codec, max_bytes)?,
         ),
     };
@@ -896,7 +925,10 @@ mod tests {
             );
             let action: crate::proxy::message_action::Metadata =
                 serde_json::from_str(&metadata).unwrap();
-            assert!(close_after_decision(action.decision, action.close_downstream));
+            assert!(close_after_decision(
+                action.decision,
+                action.close_downstream
+            ));
             assert_eq!(action.upstream, Upstream::Keep);
         }
         assert!(!close_after_decision(Decision::Drop, false));
@@ -906,11 +938,15 @@ mod tests {
     #[test]
     fn replay_reply_preserves_multiple_text_frames_and_close_metadata() {
         let action: crate::proxy::message_action::Metadata = serde_json::from_str(
-            r#"{"version":1,"decision":"reply","text_frames":true,"close_downstream":true}"#
-        ).unwrap();
+            r#"{"version":1,"decision":"reply","text_frames":true,"close_downstream":true}"#,
+        )
+        .unwrap();
         assert!(action.text_frames);
         assert!(action.close_downstream);
-        let messages: [&[u8]; 2] = [br#"{"type":"error","status":409}"#, br#"{"type":"response.failed"}"#];
+        let messages: [&[u8]; 2] = [
+            br#"{"type":"error","status":409}"#,
+            br#"{"type":"response.failed"}"#,
+        ];
         let mut payload = Vec::new();
         let mut expected = Vec::new();
         for message in messages {

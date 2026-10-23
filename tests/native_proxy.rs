@@ -78,6 +78,9 @@ mod api_codecs;
 mod hardening;
 #[path = "native_proxy/http2_keepalive.rs"]
 mod http2_keepalive;
+#[cfg(unix)]
+#[path = "native_proxy/http_to_ws_bridge.rs"]
+mod http_to_ws_bridge;
 #[path = "native_proxy/native_hooks.rs"]
 mod native_hooks;
 #[path = "native_proxy/observability_workflow.rs"]

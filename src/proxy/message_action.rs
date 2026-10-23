@@ -12,6 +12,7 @@ const METADATA_LIMIT: usize = crate::native_notifier::FRAME_LIMIT;
 pub(super) struct Grant {
     pub enabled: bool,
     pub proxy: bool,
+    pub http_bridge: bool,
     pub headers: Vec<http::header::HeaderName>,
 }
 
@@ -260,6 +261,7 @@ mod tests {
         Grant {
             enabled: true,
             proxy: true,
+            http_bridge: false,
             headers: crate::native_notifier::validate_patch_headers(&["cookie".into()]).unwrap(),
         }
     }

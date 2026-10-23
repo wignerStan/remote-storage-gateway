@@ -243,6 +243,8 @@ pub struct NativeCallback {
     pub message_actions: bool,
     #[serde(default)]
     pub message_proxy: bool,
+    #[serde(default)]
+    pub message_http_bridge: bool,
     /// Inject explicitly selected native providers into this Object callback.
     #[serde(default)]
     pub graph: Option<CallbackGraph>,
@@ -566,6 +568,15 @@ impl Config {
             if callback.message_actions && callback.message_codec.is_none() {
                 return Err("message actions require an explicit codec grant".into());
             }
+            if callback.message_http_bridge
+                && (!callback.message_actions
+                    || !matches!(
+                        callback.message_codec.as_deref(),
+                        Some("codex.responses.v1" | "openai.responses.v1")
+                    ))
+            {
+                return Err("HTTP bridge requires Responses codec and message actions".into());
+            }
             if callback.message_proxy
                 && (!callback.message_actions || callback.backend != CallbackBackend::Native)
             {
@@ -837,6 +848,7 @@ impl Config {
                 .upgrade
                 .as_ref()
                 .map_or(1, |options| options.grace_period_seconds),
+            ..Default::default()
         };
         options.validate()?;
         Ok(options)
@@ -965,6 +977,29 @@ mod tests {
                 .unwrap_err()
                 .contains("unique")
         );
+    }
+
+    #[test]
+    fn http_bridge_requires_responses_message_action_grant() {
+        let input = json!({"upstream":"http://127.0.0.1:9", "axis_bindings":{"sub2api":{"endpoint":"unix:///run/sub2api.sock", "max_message_bytes":6291456}},
+            "callbacks":[{"binding":"remote", "package":"policy", "axis":"sub2api", "registration":"openai-oauth", "hooks":[], "message_codec":"codex.responses.v1", "message_actions":true,"message_http_bridge":true}]});
+        serde_json::from_value::<Config>(input.clone())
+            .unwrap()
+            .validate()
+            .unwrap();
+        for (field, value) in [
+            ("message_actions", json!(false)),
+            ("message_codec", json!("openai.chat_completions.v1")),
+        ] {
+            let mut invalid = input.clone();
+            invalid["callbacks"][0][field] = value;
+            assert!(
+                serde_json::from_value::<Config>(invalid)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
     }
 
     #[test]
