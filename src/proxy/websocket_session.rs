@@ -19,6 +19,8 @@ struct SessionRoute<'a> {
 
 struct Plan {
     decision: Decision,
+    socket_lifetime: Option<super::message_action::SocketLifetime>,
+    retain_upstream_on_downstream_close: Option<bool>,
     upstream: Upstream,
     hold: String,
     hold_response_at_unix_ms: Option<u64>,
@@ -788,6 +790,8 @@ async fn evaluate(
 ) -> Result<Plan> {
     let mut plan = Plan {
         decision: Decision::Forward,
+        socket_lifetime: None,
+        retain_upstream_on_downstream_close: None,
         upstream: Upstream::Keep,
         hold: String::new(),
         hold_response_at_unix_ms: None,
@@ -863,6 +867,24 @@ async fn evaluate(
                     }
                     plan.upstream = action.metadata.upstream;
                 }
+                if let Some(lifetime) = action.metadata.socket_lifetime {
+                    if plan
+                        .socket_lifetime
+                        .is_some_and(|previous| previous != lifetime)
+                    {
+                        return Err(refusal(502, "conflicting physical socket lifetimes"));
+                    }
+                    plan.socket_lifetime = Some(lifetime);
+                }
+                if let Some(retain) = action.metadata.retain_upstream_on_downstream_close {
+                    if plan
+                        .retain_upstream_on_downstream_close
+                        .is_some_and(|previous| previous != retain)
+                    {
+                        return Err(refusal(502, "conflicting downstream retention decisions"));
+                    }
+                    plan.retain_upstream_on_downstream_close = Some(retain);
+                }
                 if !action.metadata.hold.is_empty() {
                     plan.hold = action.metadata.hold.clone();
                 }
@@ -914,6 +936,8 @@ async fn evaluate(
     super::message_action::validate_buffer_decision(&plan.hold, plan.decision)?;
     // A later terminal callback decision supersedes an earlier forward draft.
     if plan.decision != Decision::Forward {
+        plan.socket_lifetime = None;
+        plan.retain_upstream_on_downstream_close = None;
         plan.hold_response_at_unix_ms = None;
     }
     Ok(plan)

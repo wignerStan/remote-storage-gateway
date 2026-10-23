@@ -148,6 +148,7 @@ fn response_kind_reaches_plugin(
                     | "response.error"
                     | "rate_limits.updated"
                     | "transport.closed"
+                    | "transport.detached"
             ))
 }
 

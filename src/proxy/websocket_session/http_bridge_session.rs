@@ -469,6 +469,12 @@ impl NativeProxy {
             ),
         )
         .await?;
+        if plan.socket_lifetime.is_some() || plan.retain_upstream_on_downstream_close.is_some() {
+            return Err(refusal(
+                502,
+                "HTTP request cannot retain a physical upstream",
+            ));
+        }
         if plan.decision == Decision::Reply {
             let payload = reply_payload(
                 registration,

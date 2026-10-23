@@ -36,10 +36,18 @@ pub(super) enum Upstream {
     Close,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SocketLifetime {
+    pub retire_after_ms: u64,
+    pub close_after_ms: u64,
+}
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Metadata {
     pub version: u8,
+    pub socket_lifetime: Option<SocketLifetime>,
+    pub retain_upstream_on_downstream_close: Option<bool>,
     pub decision: Decision,
     #[serde(default)]
     pub upstream: Upstream,
@@ -125,6 +133,20 @@ pub(super) fn decode(
 
 impl Metadata {
     fn validate(&self, grant: &Grant, response: bool, payload: &[u8]) -> Result<()> {
+        if let Some(lifetime) = self.socket_lifetime {
+            if response
+                || lifetime.retire_after_ms == 0
+                || lifetime.retire_after_ms > lifetime.close_after_ms
+                || tokio::time::Instant::now()
+                    .checked_add(Duration::from_millis(lifetime.close_after_ms))
+                    .is_none()
+            {
+                return Err(refusal(502, "invalid physical socket lifetime"));
+            }
+        }
+        if response && self.retain_upstream_on_downstream_close.is_some() {
+            return Err(refusal(502, "response cannot change downstream retention"));
+        }
         if !self.hold.is_empty() && !matches!(self.hold.as_str(), "buffer" | "release" | "discard")
         {
             return Err(refusal(502, "invalid hold"));
@@ -371,6 +393,33 @@ mod tests {
         ] {
             assert!(decode(&encoded(metadata, b"{}"), &grant(), false, 1024).is_err());
         }
+    }
+    #[test]
+    fn physical_lifetime_requires_bounded_granted_request_metadata() {
+        let metadata = json!({"version":1,"decision":"forward","socket_lifetime":{"retire_after_ms":3540000,"close_after_ms":3600000},"retain_upstream_on_downstream_close":true});
+        let wire = encoded(metadata, b"");
+        assert!(decode(&wire, &grant(), false, 1024).is_ok());
+        assert!(decode(&wire, &grant(), true, 1024).is_err());
+        assert!(decode(&wire, &Grant::default(), false, 1024).is_err());
+        for lifetime in [
+            json!({"retire_after_ms":0,"close_after_ms":100}),
+            json!({"retire_after_ms":101,"close_after_ms":100}),
+            json!({"retire_after_ms":1,"close_after_ms":-1}),
+            json!({"retire_after_ms":1,"close_after_ms":"later"}),
+            json!({"retire_after_ms":1,"close_after_ms":100,"idle":true}),
+        ] {
+            let wire = encoded(
+                json!({"version":1,"decision":"forward","socket_lifetime":lifetime}),
+                b"",
+            );
+            assert!(decode(&wire, &grant(), false, 1024).is_err());
+        }
+        let wire = encoded(
+            json!({"version":1,"decision":"forward","retain_upstream_on_downstream_close":false}),
+            b"",
+        );
+        assert!(decode(&wire, &grant(), false, 1024).is_ok());
+        assert!(decode(&wire, &grant(), true, 1024).is_err());
     }
     #[test]
     fn response_can_disconnect_with_reply_but_cannot_select_or_patch_a_route() {
