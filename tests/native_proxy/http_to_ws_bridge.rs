@@ -483,3 +483,38 @@ async fn http_to_ws_bridge_failed_terminal_preserves_raw_json_and_http_status() 
         }).await.unwrap();
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_to_ws_bridge_process_listener_accepts_h2_and_h1() {
+    struct Process(std::process::Child);
+    impl Drop for Process {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    timeout(Duration::from_secs(10),async {
+        let origin=listen(|mut socket|async move {upgrade(&mut socket).await;send(&mut socket,COMPLETE).await;}).await;
+        let dir=tempfile::tempdir().unwrap();
+        let reserve=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let address=reserve.local_addr().unwrap();drop(reserve);
+        let config=dir.path().join("config.json");
+        std::fs::write(&config,json!({"upstream":format!("http://{}",origin.address),"listen":address,"threads":1,
+            "callbacks":[{"binding":"direct","path":artifact(dir.path()),"package":"worker.metadata.test","hooks":[],
+            "message_codec":"codex.responses.v1","message_actions":true,"message_http_bridge":true,"message_responses":true,
+            "patch_headers":["authorization","x-approved"],"config":{"version":1,"decision":"forward","upstream":"connect",
+            "path":"/backend-api/codex/responses","set_headers":[["x-approved","yes"],["authorization","Bearer fixture"]]}}]}).to_string()).unwrap();
+        let log=dir.path().join("worker.log");
+        let mut process=Process(Command::new(env!("CARGO_BIN_EXE_pingora-worker")).arg("--config").arg(&config)
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::from(std::fs::File::create(&log).unwrap())).spawn().unwrap());
+        let socket=loop {
+            if let Ok(socket)=TcpStream::connect(address).await {break socket;}
+            assert!(process.0.try_wait().unwrap().is_none(),"{}",std::fs::read_to_string(&log).unwrap());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let(sender,connection)=h2::client::handshake(socket).await.unwrap();let task=tokio::spawn(connection);
+        let(response,_)=h2_post(&sender,br#"{"input":[]}"#).await;
+        assert_eq!(h2_body(response).await,br#"{"id":"r1","output":[],"number":12345678901234567890}"#);
+        let mut socket=post(address,br#"{"input":[]}"#).await;let mut bytes=Vec::new();socket.read_to_end(&mut bytes).await.unwrap();assert!(bytes.starts_with(b"HTTP/1.1 200"));
+        task.abort();
+    }).await.unwrap();
+}

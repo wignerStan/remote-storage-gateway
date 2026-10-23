@@ -848,7 +848,10 @@ impl Config {
                 .upgrade
                 .as_ref()
                 .map_or(1, |options| options.grace_period_seconds),
-            ..Default::default()
+            downstream_http2: self
+                .callbacks
+                .iter()
+                .any(|callback| callback.message_http_bridge),
         };
         options.validate()?;
         Ok(options)
