@@ -63,10 +63,10 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
         return action("{\"version\":1,\"decision\":\"forward\",\"set_headers\":[[\"host\",\"ungranted.invalid\"]]}", "", out);
 #else
         if (requests == 1) return action(
-            "{\"version\":1,\"decision\":\"forward\",\"upstream\":\"connect\",\"path\":\"/selected?generation=1\",\"set_headers\":[[\"cookie\",\"session=one\"],[\"x-request-id\",\"request-one\"]]}",
+            "{\"version\":1,\"decision\":\"forward\",\"upstream\":\"connect\",\"path\":\"/v1/responses?generation=1\",\"set_headers\":[[\"cookie\",\"session=one\"],[\"x-request-id\",\"request-one\"]]}",
             "{\"type\":\"response.create\",\"model\":\"approved-one\",\"input\":[]}", out);
         if (requests == 2) return action(
-            "{\"version\":1,\"decision\":\"forward\",\"upstream\":\"connect\",\"path\":\"/selected?generation=2\",\"set_headers\":[[\"cookie\",\"session=two\"],[\"x-request-id\",\"request-two\"]]}",
+            "{\"version\":1,\"decision\":\"forward\",\"upstream\":\"connect\",\"path\":\"/v1/responses?generation=2\",\"set_headers\":[[\"cookie\",\"session=two\"],[\"x-request-id\",\"request-two\"]]}",
             "{\"type\":\"response.create\",\"model\":\"approved-two\",\"input\":[]}", out);
         return INFRA_FAILED;
 #endif

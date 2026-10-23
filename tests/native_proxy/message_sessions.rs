@@ -102,7 +102,7 @@ async fn first_message_selects_and_rewrites_before_dial_then_replay_replaces_soc
                 assert!(generation <= 2);
                 let request = head(&mut socket).await;
                 let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
-                assert!(text.starts_with(&format!("get /selected?generation={generation} http/1.1\r\n")), "{text}");
+                assert!(text.starts_with(&format!("get /v1/responses?generation={generation} http/1.1\r\n")), "{text}");
                 let suffix = if generation == 1 { "one" } else { "two" };
                 assert!(text.contains(&format!("cookie: session={suffix}\r\n")), "{text}");
                 assert!(text.contains(&format!("x-request-id: request-{suffix}\r\n")), "{text}");
@@ -330,7 +330,7 @@ async fn codex_websocket_aliases_accept_locally_and_wait_for_an_admitted_create(
                 count.fetch_add(1, Ordering::SeqCst);
                 async move {
                     let request = head(&mut socket).await;
-                    assert!(request.starts_with(b"GET /selected?generation=1 HTTP/1.1"));
+                    assert!(request.starts_with(b"GET /v1/responses?generation=1 HTTP/1.1"));
                     upgrade(&mut socket, &request).await;
                     let (opcode, payload) = frame(&mut socket, true).await;
                     assert_eq!(opcode, 1);
