@@ -242,20 +242,63 @@ async fn http_to_ws_bridge_rejects_continuation_and_invalid_mode_before_dial() {
         let dir = tempfile::tempdir().unwrap();
         let proxy = proxy(origin.address, dir.path()).await;
         let worker = serve_engine(proxy.clone()).await;
-        for body in [
+        let invalid_bodies = [
             br#"{"input":[],"generate":false}"#.as_slice(),
+            br#"{"input":[],"generate":null}"#,
+            br#"{"input":[],"generate":0}"#,
+            br#"{"input":[],"generate":1}"#,
+            br#"{"input":[],"generate":[]}"#,
+            br#"{"input":[],"generate":{}}"#,
+            br#"{"input":[],"generate":"true"}"#,
+            br#"{"input":[],"generate":"false"}"#,
             br#"{"input":[],"previous_response_id":"other"}"#,
             br#"{"input":[],"stream":"true"}"#,
             br#"{"input":[]"#,
             b"[1,2]",
-        ] {
+        ];
+        for body in invalid_bodies {
             let mut socket = post(worker.address, body).await;
             let mut reply = Vec::new();
             socket.read_to_end(&mut reply).await.unwrap();
             assert!(reply.starts_with(b"HTTP/1.1 400"));
         }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert_eq!(std::fs::read(dir.path().join("closed")).unwrap(), b"xxxxx");
+        assert_eq!(
+            std::fs::read(dir.path().join("closed")).unwrap(),
+            vec![b'x'; invalid_bodies.len()]
+        );
+        drop(worker);
+        proxy.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_to_ws_bridge_accepts_explicit_generate_true_over_websocket() {
+    timeout(WAIT, async {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let origin = listen(move |mut socket| {
+            let count = count.clone();
+            async move {
+                upgrade(&mut socket).await;
+                count.fetch_add(1, Ordering::SeqCst);
+                send(&mut socket, COMPLETE).await;
+                let mut tail = Vec::new();
+                let _ = socket.read_to_end(&mut tail).await;
+            }
+        })
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let proxy = proxy(origin.address, dir.path()).await;
+        let worker = serve_engine(proxy.clone()).await;
+        let mut socket = post(worker.address, br#"{"input":[],"generate":true}"#).await;
+        let mut reply = Vec::new();
+        socket.read_to_end(&mut reply).await.unwrap();
+        assert!(reply.starts_with(b"HTTP/1.1 200"));
+        assert!(String::from_utf8_lossy(&reply).contains(r#""id":"r1""#));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(dir.path().join("closed")).unwrap(), b"x");
         drop(worker);
         proxy.shutdown().await.unwrap();
     })

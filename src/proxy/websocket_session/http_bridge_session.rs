@@ -16,10 +16,16 @@ fn request_mode(payload: &[u8]) -> Result<bool> {
     let object = value
         .as_object()
         .ok_or_else(|| refusal(400, "Responses request must be an object"))?;
-    if object.get("generate") == Some(&serde_json::Value::Bool(false))
-        || object
-            .get("previous_response_id")
-            .is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
+    match object.get("generate") {
+        None | Some(serde_json::Value::Bool(true)) => {}
+        Some(serde_json::Value::Bool(false)) => {
+            return Err(refusal(400, "HTTP bridge requires a full request"));
+        }
+        _ => return Err(refusal(400, "generate must be boolean")),
+    }
+    if object
+        .get("previous_response_id")
+        .is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
     {
         return Err(refusal(400, "HTTP bridge requires a full request"));
     }
@@ -748,11 +754,19 @@ mod tests {
     fn http_bridge_full_request_modes_and_raw_terminal_bytes() {
         assert!(!request_mode(br#"{"input":[]}"#).unwrap());
         assert!(request_mode(br#"{"input":[],"stream":true}"#).unwrap());
+        assert!(!request_mode(br#"{"input":[],"generate":true}"#).unwrap());
         for body in [
             br#"{"stream":null}"#.as_slice(),
             br#"{"stream":1}"#,
             br#"{"previous_response_id":12}"#,
             br#"{"generate":false}"#,
+            br#"{"generate":null}"#,
+            br#"{"generate":0}"#,
+            br#"{"generate":1}"#,
+            br#"{"generate":[]}"#,
+            br#"{"generate":{}}"#,
+            br#"{"generate":"true"}"#,
+            br#"{"generate":"false"}"#,
         ] {
             assert!(request_mode(body).is_err());
         }
