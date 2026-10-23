@@ -641,3 +641,31 @@ async fn responses_policy_paths_cannot_escape_the_ws_endpoint_before_dial() {
     }).await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_ws_handshake_never_falls_back_to_http_post_or_another_connection() {
+    timeout(WAIT, async {
+        for duplicate_accept in [false,true] {
+            let calls=Arc::new(AtomicUsize::new(0));let posts=Arc::new(AtomicUsize::new(0));
+            let observed=calls.clone();let seen_posts=posts.clone();
+            let origin=listen(move |mut socket| {let observed=observed.clone();let seen_posts=seen_posts.clone();async move {
+                observed.fetch_add(1,Ordering::SeqCst);
+                let request=String::from_utf8(head(&mut socket).await).unwrap();
+                if request.starts_with("POST "){seen_posts.fetch_add(1,Ordering::SeqCst);}
+                assert!(request.starts_with("GET /backend-api/codex/responses HTTP/1.1"));
+                let response=if duplicate_accept {
+                    let key=request.lines().find_map(|line|line.split_once(':').filter(|(name,_)|name.eq_ignore_ascii_case("sec-websocket-key")).map(|(_,value)|value.trim())).unwrap();
+                    let accept=proxy_pingora::connect_upstream::websocket_session::handshake::accept_key(key).unwrap();
+                    format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Accept: {accept}\r\n\r\n")
+                }else{"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()};
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }}).await;
+            let dir=tempfile::tempdir().unwrap();let proxy=proxy(origin.address,dir.path()).await;let worker=serve_engine(proxy.clone()).await;
+            let mut client=post(worker.address,br#"{"input":[]}"#).await;let reply=timeout(WAIT,head(&mut client)).await.unwrap();
+            assert!(reply.starts_with(b"HTTP/1.1 502"),"invalid WS101 was accepted: {}",String::from_utf8_lossy(&reply));
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            assert_eq!(calls.load(Ordering::SeqCst),1,"WS failure triggered another upstream attempt");
+            assert_eq!(posts.load(Ordering::SeqCst),0,"WS failure triggered HTTP POST fallback");
+            drop(worker);proxy.shutdown().await.unwrap();
+        }
+    }).await.unwrap();
+}
