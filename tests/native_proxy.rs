@@ -568,3 +568,6 @@ async fn native_operation_completion_failure_preserves_delivered_status() {
     assert_eq!(value.response_bytes, 5);
     assert_eq!(value.status_classes[2], 1);
 }
+#[cfg(unix)]
+#[path = "native_proxy/session_exit.rs"]
+mod session_exit;

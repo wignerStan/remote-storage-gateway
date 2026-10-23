@@ -352,7 +352,7 @@ fn sealed_drop_first() -> stream_transfer::chunk::ChunkChain {
     assert!(!chain.seal().unwrap());
     chain
 }
-async fn chunk(socket: &mut TcpStream) -> Vec<u8> {
+pub(super) async fn chunk(socket: &mut TcpStream) -> Vec<u8> {
     let mut line = Vec::new();
     while !line.ends_with(b"\r\n") {
         line.push(socket.read_u8().await.unwrap());

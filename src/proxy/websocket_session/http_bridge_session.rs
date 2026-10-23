@@ -398,26 +398,37 @@ impl NativeProxy {
         } else {
             br#"{"side":"downstream","reason":"error"}"#
         });
-        for callback in &registration.callbacks {
-            if callback.interested(true, "transport.closed") {
-                let _ = tokio::time::timeout(
-                    self.config.io_timeout,
-                    callback.notify_closed(&method, closed.clone(), ctx.inspection_permit.clone()),
-                )
-                .await;
-            }
-        }
-        match result {
+        // Match WS teardown: poll every owner before waiting for one slow
+        // callback. All cleanup and completion share one absolute deadline.
+        let cleanup_deadline = tokio::time::Instant::now() + self.config.io_timeout;
+        let cleanup_result = notify_session_closed(
+            registration,
+            &method,
+            closed,
+            ctx.inspection_permit.clone(),
+            ctx.request_id,
+            cleanup_deadline,
+        )
+        .await;
+        match result.and(cleanup_result) {
             Ok(()) => {
                 exchange.facts_mut().completed = true;
-                within_deadline(
-                    self.inspection.deadline(),
+                let completion = within_deadline(
+                    cleanup_deadline,
                     async { exchange.finish().await.map_err(lifecycle_error) },
                     "HTTP completion callback deadline exceeded",
                 )
-                .await?;
-                ctx.session_completed = true;
-                Ok(())
+                .await;
+                match completion {
+                    Ok(_) => {
+                        ctx.session_completed = true;
+                        Ok(())
+                    }
+                    Err(error) => {
+                        ctx.message_failed = true;
+                        Err(error)
+                    }
+                }
             }
             Err(error) => {
                 exchange.fail();

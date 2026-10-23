@@ -196,6 +196,50 @@ async fn complete_all(mut operations: Vec<Option<CleanupFuture<'_>>>) {
     .await;
 }
 
+// Poll every teardown owner before waiting for any one owner. Outputs cannot
+// alter a closed transport, but failed cleanup must not report delivery success.
+async fn notify_session_closed(
+    registration: &message_codec::CodecRegistration,
+    method: &str,
+    closed: Bytes,
+    reservation: Option<Arc<Reservation>>,
+    request_id: u64,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    let failed = std::sync::atomic::AtomicBool::new(false);
+    let mut cleanup = Vec::new();
+    for (index, callback) in registration.callbacks.iter().enumerate() {
+        if !callback.interested(true, "transport.closed") {
+            continue;
+        }
+        let closed = closed.clone();
+        let reservation = reservation.clone();
+        let failed = &failed;
+        cleanup.push(Some(Box::pin(async move {
+            let result = callback.notify_closed(method, closed, reservation).await;
+            if result.is_err() {
+                failed.store(true, Ordering::Relaxed);
+            }
+            tracing::debug!(target: "proxy_pingora::session", request_id,
+                callback_index = index, outcome = if result.is_ok() { "complete" } else { "error" },
+                "session owner cleanup attempted");
+        }) as CleanupFuture<'_>));
+    }
+    within_deadline(
+        deadline,
+        async {
+            complete_all(cleanup).await;
+            if failed.load(Ordering::Relaxed) {
+                Err(refusal(502, "session owner cleanup failed"))
+            } else {
+                Ok(())
+            }
+        },
+        "session cleanup callback deadline exceeded",
+    )
+    .await
+}
+
 impl NativeProxy {
     pub(super) async fn serve_websocket_session(
         &self,
@@ -307,47 +351,36 @@ impl NativeProxy {
             ctx.response_sequence
         );
         let cleanup_deadline = tokio::time::Instant::now() + self.config.io_timeout;
-        let mut cleanup = Vec::new();
-        for (index, callback) in registration.callbacks.iter().enumerate() {
-            if !callback.interested(true, "transport.closed") {
-                continue;
-            }
-            let method = &method;
-            let closed = closed.clone();
-            let reservation = reservation.clone();
-            let request_id = ctx.request_id;
-            cleanup.push(Some(Box::pin(async move {
-                let result = callback.notify_closed(method, closed, reservation).await;
-                tracing::debug!(target: "proxy_pingora::session", request_id,
-                    callback_index = index, outcome = if result.is_ok() { "complete" } else { "error" },
-                    "session owner cleanup attempted");
-            }) as CleanupFuture<'_>));
-        }
-        let cleanup_result = within_deadline(
+        let cleanup_result = notify_session_closed(
+            registration,
+            &method,
+            closed,
+            reservation.clone(),
+            ctx.request_id,
             cleanup_deadline,
-            async {
-                complete_all(cleanup).await;
-                Ok(())
-            },
-            "session cleanup callback deadline exceeded",
         )
         .await;
         drop(transport);
         drop(reservation);
-        match result {
+        match result.and(cleanup_result) {
             Ok(()) => {
                 exchange.facts_mut().completed = true;
-                ctx.session_completed = within_deadline(
+                let completion = within_deadline(
                     cleanup_deadline,
-                    async {
-                        cleanup_result?;
-                        exchange.finish().await.map_err(lifecycle_error)
-                    },
+                    async { exchange.finish().await.map_err(lifecycle_error) },
                     "completion callback deadline exceeded",
                 )
-                .await
-                .map(|_| true)?;
-                Ok(())
+                .await;
+                match completion {
+                    Ok(_) => {
+                        ctx.session_completed = true;
+                        Ok(())
+                    }
+                    Err(error) => {
+                        ctx.message_failed = true;
+                        Err(error)
+                    }
+                }
             }
             Err(error) => {
                 exchange.fail();
