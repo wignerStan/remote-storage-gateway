@@ -584,7 +584,11 @@ async fn responses_bridge_requires_its_codec_to_match_the_path() {
     let worker = serve_engine(proxy.clone()).await;
     let mut socket = post_path(worker.address, "/v1/responses", br#"{"input":[]}"#).await;
     let response = timeout(WAIT, head(&mut socket)).await.unwrap();
-    assert!(response.starts_with(b"HTTP/1.1 403"), "{}", String::from_utf8_lossy(&response));
+    assert!(
+        response.starts_with(b"HTTP/1.1 403"),
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
@@ -615,3 +619,25 @@ async fn responses_invalid_methods_and_aliases_never_reach_upstream() {
         drop(worker);proxy.shutdown().await.unwrap();
     }).await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn responses_policy_paths_cannot_escape_the_ws_endpoint_before_dial() {
+    timeout(WAIT,async {
+        let calls=Arc::new(AtomicUsize::new(0));let observed=calls.clone();
+        let origin=listen(move |mut socket|{let observed=observed.clone();async move {
+            observed.fetch_add(1,Ordering::SeqCst);let _=head(&mut socket).await;
+            let _=socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+        }}).await;
+        let dir=tempfile::tempdir().unwrap();let library=artifact(dir.path());
+        for path in ["/v1/response","/v1/responses/","/unrelated","/v1/%72esponses"] {
+            let config=json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"binding":"direct","path":library,"package":"worker.metadata.test","hooks":[],"message_codec":"codex.responses.v1","message_actions":true,"message_http_bridge":true,"config":{"version":1,"decision":"forward","upstream":"connect","path":path}}]});
+            let proxy=pingora_worker::assembly::assemble(serde_json::from_value(config).unwrap()).await.unwrap();let worker=serve_engine(proxy.clone()).await;
+            let mut client=post_path(worker.address,"/v1/responses",br#"{"input":[]}"#).await;
+            let reply=timeout(WAIT,head(&mut client)).await.unwrap();
+            assert!(reply.starts_with(b"HTTP/1.1 502"),"{}",String::from_utf8_lossy(&reply));
+            assert_eq!(calls.load(Ordering::SeqCst),0,"callback path escaped to upstream");
+            drop(worker);proxy.shutdown().await.unwrap();
+        }
+    }).await.unwrap();
+}
+

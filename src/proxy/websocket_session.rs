@@ -537,6 +537,7 @@ impl NativeProxy {
             false,
         )?;
         codec.prepare_request(&mut head)?;
+        message_codec::validate_responses_upstream(codec, &head)?;
         let expected_accept = carrier::handshake::prepare_request(&mut head)?;
         snapshot_request(&head, exchange.facts_mut());
         let target = proxy.unwrap_or(&self.config.upstream);

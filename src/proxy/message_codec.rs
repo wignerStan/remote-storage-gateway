@@ -345,6 +345,25 @@ pub(super) fn select_http_bridge(
         .ok_or_else(|| refusal(403, "Responses requires a matching HTTP-to-WebSocket grant"))
 }
 
+pub(super) fn validate_responses_upstream(
+    codec: &dyn CodecPlugin,
+    request: &RequestHeader,
+) -> Result<()> {
+    if responses_codec(codec)
+        && (!responses_path(request.uri.path())
+            || request.uri.scheme().is_some()
+            || request.uri.authority().is_some()
+            || request.method != http::Method::GET
+            || request.version != http::Version::HTTP_11)
+    {
+        return Err(refusal(
+            502,
+            "Responses upstream must be an HTTP1 WebSocket on a canonical path",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn select_request(
     registrations: &[CodecRegistration],
     request: &RequestHeader,

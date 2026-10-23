@@ -524,7 +524,14 @@ impl NativeProxy {
             request.remove_header(name);
         }
         registration.codec.prepare_request(request)?;
+        message_codec::validate_responses_upstream(registration.codec.as_ref(), request)?;
         let expected = carrier::handshake::prepare_request(request)?;
+        http_bridge::websocket::validate_request::<()>(
+            request.version,
+            &request.method,
+            &request.headers,
+        )
+        .map_err(|_| refusal(502, "invalid WS bridge request"))?;
         snapshot_request(request, exchange.facts_mut());
         let mut peer = while_connected(
             session,
