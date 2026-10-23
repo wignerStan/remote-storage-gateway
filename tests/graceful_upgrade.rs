@@ -1,6 +1,7 @@
 //! Real executable upgrades use Pingora's native listener FD transfer on Linux.
 #![cfg(target_os = "linux")]
 
+use futures_util::FutureExt;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -170,18 +171,50 @@ fn config(
     .unwrap();
     path
 }
-async fn ready(process: &mut Process, address: SocketAddr) {
+// Let the child bind port zero itself. A parent bind/drop reservation can be
+// reclaimed by another fixture before this child reaches its listener startup.
+async fn ready(process: &mut Process) -> SocketAddr {
     timeout(WAIT, async {
         loop {
             process.assert_running();
-            if TcpStream::connect(address).await.is_ok() {
-                return;
+            if let Some(address) = owned_listener(process) {
+                get_from(process, address, "HTTP readiness").await;
+                process.assert_running();
+                assert!(owns_socket(process, &listener_inode(address)));
+                return address;
             }
             sleep(POLL).await;
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("listener did not start: {}", process.output()));
+    .unwrap_or_else(|_| panic!("owned HTTP listener did not start: {}", process.output()))
+}
+fn owned_listener(process: &Process) -> Option<SocketAddr> {
+    let table = fs::read_to_string("/proc/net/tcp").unwrap();
+    let addresses: Vec<_> = table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let (ip, port) = fields[1].split_once(':')?;
+            if fields[3] != "0A"
+                || ip != "0100007F"
+                || !owns_socket(process, &format!("socket:[{}]", fields[9]))
+            {
+                return None;
+            }
+            Some(
+                format!("127.0.0.1:{}", u16::from_str_radix(port, 16).unwrap())
+                    .parse()
+                    .unwrap(),
+            )
+        })
+        .collect();
+    assert!(
+        addresses.len() <= 1,
+        "unexpected child TCP listeners: {addresses:?}"
+    );
+    addresses.into_iter().next()
 }
 async fn get(address: SocketAddr) -> Vec<u8> {
     timeout(WAIT, async {
@@ -228,18 +261,30 @@ async fn get(address: SocketAddr) -> Vec<u8> {
     .await
     .unwrap()
 }
+async fn get_from(process: &mut Process, address: SocketAddr, stage: &str) -> Vec<u8> {
+    match std::panic::AssertUnwindSafe(get(address))
+        .catch_unwind()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => panic!(
+            "GET failed at {stage}, address={address}, process={:?}: {}",
+            process.child.try_wait().unwrap(),
+            process.output()
+        ),
+    }
+}
 fn listener_inode(address: SocketAddr) -> String {
+    find_listener_inode(address).expect("missing native listening socket")
+}
+fn find_listener_inode(address: SocketAddr) -> Option<String> {
     let table = fs::read_to_string("/proc/net/tcp").unwrap();
     let port = format!("{:04X}", address.port());
-    table
-        .lines()
-        .skip(1)
-        .find_map(|line| {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            (fields[1].ends_with(&format!(":{port}")) && fields[3] == "0A")
-                .then(|| format!("socket:[{}]", fields[9]))
-        })
-        .expect("missing native listening socket")
+    table.lines().skip(1).find_map(|line| {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        (fields[1].ends_with(&format!(":{port}")) && fields[3] == "0A")
+            .then(|| format!("socket:[{}]", fields[9]))
+    })
 }
 fn owns_socket(process: &Process, inode: &str) -> bool {
     fs::read_dir(format!("/proc/{}/fd", process.child.id()))
@@ -253,14 +298,42 @@ fn owns_socket(process: &Process, inode: &str) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn readiness_selects_the_child_listener_instead_of_a_foreign_reserved_port() {
+    let directory = tempfile::tempdir_in("/tmp").unwrap();
+    let socket = directory.path().join("upgrade.sock");
+    let origin = origin("owned").await;
+    // A bare TCP readiness probe succeeds against an unserved reservation.
+    let foreign = ReservedPort::bind("127.0.0.1:0").unwrap();
+    let foreign_address = foreign.local_addr().unwrap();
+    assert!(TcpStream::connect(foreign_address).await.is_ok());
+    let path = config(
+        directory.path(),
+        "owned",
+        "127.0.0.1:0".parse().unwrap(),
+        origin.address,
+        &socket,
+    );
+    let mut process = Process::spawn(directory.path(), "owned", &path, false);
+    let address = ready(&mut process).await;
+    assert_ne!(address, foreign_address);
+    assert!(owns_socket(&process, &listener_inode(address)));
+    assert!(
+        get_from(&mut process, address, "owned listener verification")
+            .await
+            .ends_with(b"owned")
+    );
+    process.signal("-TERM");
+    assert!(process.wait().await.success(), "{}", process.output());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn executable_upgrade_preserves_listener_and_drains_old_in_flight_response() {
     // Keep the UDS path short even when the repository lives in a deep worktree.
     let directory = tempfile::tempdir_in("/tmp").unwrap();
     let socket = directory.path().join("upgrade.sock");
     let old_origin = origin("old").await;
     let new_origin = origin("new").await;
-    let reservation = ReservedPort::bind("127.0.0.1:0").unwrap();
-    let address = reservation.local_addr().unwrap();
+    let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let old_config = config(
         directory.path(),
         "old",
@@ -275,9 +348,8 @@ async fn executable_upgrade_preserves_listener_and_drains_old_in_flight_response
         new_origin.address,
         &socket,
     );
-    drop(reservation);
     let mut old = Process::spawn(directory.path(), "old", &old_config, false);
-    ready(&mut old, address).await;
+    let address = ready(&mut old).await;
     assert!(get(address).await.ends_with(b"old"));
     let inode = listener_inode(address);
     assert!(owns_socket(&old, &inode));
@@ -376,8 +448,7 @@ async fn invalid_replacement_plugin_fails_before_handoff_and_old_keeps_serving()
     let directory = tempfile::tempdir_in("/tmp").unwrap();
     let socket = directory.path().join("upgrade.sock");
     let origin = origin("old").await;
-    let reservation = ReservedPort::bind("127.0.0.1:0").unwrap();
-    let address = reservation.local_addr().unwrap();
+    let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let old_config = config(directory.path(), "old", address, origin.address, &socket);
     let invalid_config = config(
         directory.path(),
@@ -389,10 +460,13 @@ async fn invalid_replacement_plugin_fails_before_handoff_and_old_keeps_serving()
     let mut value: Value = serde_json::from_slice(&fs::read(&invalid_config).unwrap()).unwrap();
     value["callbacks"] = json!([{"binding":"direct", "path":directory.path().join("missing.so"),"package":"trusted.metadata","hooks":["pre_routing"]}]);
     fs::write(&invalid_config, value.to_string()).unwrap();
-    drop(reservation);
     let mut old = Process::spawn(directory.path(), "old", &old_config, false);
-    ready(&mut old, address).await;
-    assert!(get(address).await.ends_with(b"old"));
+    let address = ready(&mut old).await;
+    assert!(
+        get_from(&mut old, address, "before invalid replacement")
+            .await
+            .ends_with(b"old")
+    );
     let inode = listener_inode(address);
     let mut invalid = Process::spawn(directory.path(), "invalid", &invalid_config, true);
     assert!(
@@ -413,7 +487,11 @@ async fn invalid_replacement_plugin_fails_before_handoff_and_old_keeps_serving()
     old.assert_running();
     assert_eq!(listener_inode(address), inode);
     for _ in 0..4 {
-        assert!(get(address).await.ends_with(b"old"));
+        assert!(
+            get_from(&mut old, address, "after invalid replacement")
+                .await
+                .ends_with(b"old")
+        );
     }
     old.signal("-TERM");
     assert!(old.wait().await.success(), "{}", old.output());
@@ -511,8 +589,13 @@ impl NativeCall {
         );
     }
 }
-async fn hold_native(address: SocketAddr) -> TcpStream {
-    let mut held = TcpStream::connect(address).await.unwrap();
+async fn hold_native(process: &mut Process, address: SocketAddr) -> TcpStream {
+    let mut held = TcpStream::connect(address).await.unwrap_or_else(|error| {
+        panic!(
+            "native request connect failed at {address}: {error}: {}",
+            process.output()
+        )
+    });
     held.write_all(b"GET /native-held HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();
@@ -561,8 +644,7 @@ async fn executable_handoff_retains_native_call_until_return_and_cleanup() {
     let socket = directory.path().join("upgrade.sock");
     let old_origin = origin("old").await;
     let new_origin = origin("new").await;
-    let reservation = ReservedPort::bind("127.0.0.1:0").unwrap();
-    let address = reservation.local_addr().unwrap();
+    let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let old_config = config(
         directory.path(),
         "old",
@@ -579,11 +661,10 @@ async fn executable_handoff_retains_native_call_until_return_and_cleanup() {
     );
     let native = NativeCall::compile(directory.path(), "old-native", false);
     native.configure(&old_config, 30000);
-    drop(reservation);
     let mut old = Process::spawn(directory.path(), "old", &old_config, false);
-    ready(&mut old, address).await;
+    let address = ready(&mut old).await;
     let inode = listener_inode(address);
-    let mut held = hold_native(address).await;
+    let mut held = hold_native(&mut old, address).await;
     native.entered(&mut old).await;
     let mut replacement = Process::spawn(directory.path(), "new", &new_config, true);
     native_handoff(&mut old, &mut replacement, &socket, address).await;
@@ -614,8 +695,7 @@ async fn replacement_native_init_failure_preserves_old_active_call_and_listener(
     let directory = tempfile::tempdir_in("/tmp").unwrap();
     let socket = directory.path().join("upgrade.sock");
     let origin = origin("old").await;
-    let reservation = ReservedPort::bind("127.0.0.1:0").unwrap();
-    let address = reservation.local_addr().unwrap();
+    let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let old_config = config(directory.path(), "old", address, origin.address, &socket);
     let invalid_config = config(
         directory.path(),
@@ -628,11 +708,10 @@ async fn replacement_native_init_failure_preserves_old_active_call_and_listener(
     let failing = NativeCall::compile(directory.path(), "failing-native", true);
     native.configure(&old_config, 30000);
     failing.configure(&invalid_config, 30000);
-    drop(reservation);
     let mut old = Process::spawn(directory.path(), "old", &old_config, false);
-    ready(&mut old, address).await;
+    let address = ready(&mut old).await;
     let inode = listener_inode(address);
-    let mut held = hold_native(address).await;
+    let mut held = hold_native(&mut old, address).await;
     native.entered(&mut old).await;
     let mut invalid = Process::spawn(directory.path(), "invalid", &invalid_config, true);
     assert!(
@@ -675,8 +754,7 @@ async fn handoff_bounds_shutdown_without_claiming_native_cancellation_stops_code
     let socket = directory.path().join("upgrade.sock");
     let old_origin = origin("old").await;
     let new_origin = origin("new").await;
-    let reservation = ReservedPort::bind("127.0.0.1:0").unwrap();
-    let address = reservation.local_addr().unwrap();
+    let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let old_config = config(
         directory.path(),
         "old",
@@ -694,10 +772,9 @@ async fn handoff_bounds_shutdown_without_claiming_native_cancellation_stops_code
     let native = NativeCall::compile(directory.path(), "old-native", false);
     // The host deadline expires, but the native fixture keeps waiting for release.
     native.configure(&old_config, 100);
-    drop(reservation);
     let mut old = Process::spawn(directory.path(), "old", &old_config, false);
-    ready(&mut old, address).await;
-    let held = hold_native(address).await;
+    let address = ready(&mut old).await;
+    let held = hold_native(&mut old, address).await;
     native.entered(&mut old).await;
     let mut replacement = Process::spawn(directory.path(), "new", &new_config, true);
     native_handoff(&mut old, &mut replacement, &socket, address).await;
