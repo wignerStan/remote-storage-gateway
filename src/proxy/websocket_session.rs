@@ -21,10 +21,93 @@ struct Plan {
     decision: Decision,
     upstream: Upstream,
     hold: String,
+    hold_response_at_unix_ms: Option<u64>,
     close_downstream: bool,
     patches: Vec<Metadata>,
     replacement: Option<Message>,
     reply: Option<Bytes>,
+}
+
+/// Convert an application wall-clock boundary once. Runtime comparisons use the
+/// monotonic clock, so a later host clock adjustment cannot move the boundary.
+#[derive(Default)]
+struct ResponseHold {
+    deadline: Option<tokio::time::Instant>,
+}
+impl ResponseHold {
+    fn clear(&mut self) {
+        self.deadline = None;
+    }
+
+    fn apply(&mut self, plan: &Plan) -> Result<()> {
+        if matches!(plan.hold.as_str(), "release" | "discard")
+            || matches!(
+                plan.upstream,
+                Upstream::Replace | Upstream::Disconnect | Upstream::Close
+            )
+        {
+            self.clear();
+        }
+        if let Some(at) = plan.hold_response_at_unix_ms
+            && !matches!(plan.hold.as_str(), "release" | "discard")
+        {
+            self.deadline = if at == 0 {
+                None
+            } else {
+                super::message_action::validate_response_hold_time(at)?;
+                Some(
+                    tokio::time::Instant::now()
+                        + Duration::from_millis(
+                            at.saturating_sub(super::message_action::unix_ms()?),
+                        ),
+                )
+            };
+        }
+        Ok(())
+    }
+
+    fn buffers(&self, message: &Message, plan: &Plan) -> bool {
+        plan.decision == Decision::Forward
+            && plan.hold.is_empty()
+            && plan.upstream == Upstream::Keep
+            && matches!(message.side, Side::Upstream(_))
+            && message.message.is_some()
+            && !response_terminal(message)
+            && self
+                .deadline
+                .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+    }
+}
+
+fn response_terminal(message: &Message) -> bool {
+    matches!(message.side, Side::Upstream(_))
+        && message.message.as_ref().is_some_and(|semantic| {
+            matches!(
+                semantic.kind,
+                "response.completed"
+                    | "response.done"
+                    | "response.failed"
+                    | "response.incomplete"
+                    | "response.error"
+                    | "response.cancelled"
+                    | "response.canceled"
+                    | "error"
+            )
+        })
+}
+
+fn validate_terminal_hold(message: &Message, plan: &Plan, held: bool) -> Result<()> {
+    if held
+        && response_terminal(message)
+        && plan.decision == Decision::Forward
+        && plan.hold.is_empty()
+    {
+        return Err(refusal(
+            502,
+            "terminal delivery requires release or discard of held messages",
+        ));
+    }
+    Ok(())
 }
 
 /// Application-held wire is outside Pingora's decoder and pending-event queues.
@@ -285,6 +368,7 @@ impl NativeProxy {
     ) -> Result<()> {
         let SessionRoute { request, proxy } = route;
         let mut held: Vec<HeldMessage> = Vec::new();
+        let mut response_hold = ResponseHold::default();
         let held_bytes =
             ResourceBudget::new(self.inspection.limits.max_message_bytes.saturating_mul(2));
         let held_count = ResourceBudget::new(websocket::Limits::default().max_frames);
@@ -304,6 +388,7 @@ impl NativeProxy {
                             Side::Downstream => return Ok(()),
                             Side::Upstream(generation) => {
                                 held.clear();
+                                response_hold.clear();
                                 exchange.upstream_closed().map_err(lifecycle_error)?;
                                 upstream_closed(
                                     transport,
@@ -322,6 +407,7 @@ impl NativeProxy {
                 Event::Closed(Side::Downstream) => return Ok(()),
                 Event::Closed(Side::Upstream(generation)) => {
                     held.clear();
+                    response_hold.clear();
                     exchange.upstream_closed().map_err(lifecycle_error)?;
                     upstream_closed(
                         transport,
@@ -401,7 +487,9 @@ impl NativeProxy {
                         tracing::debug!(target: "proxy_pingora::session", request_id = ctx.request_id,
                             generation, decision = "disconnect", "upstream generation retired");
                     }
-                    if plan.hold == "buffer" {
+                    response_hold.apply(&plan)?;
+                    validate_terminal_hold(&message, &plan, !held.is_empty())?;
+                    if plan.hold == "buffer" || response_hold.buffers(&message, &plan) {
                         held.push(retain_message(
                             plan.replacement.as_ref().unwrap_or(&message),
                             &held_bytes,
@@ -668,6 +756,7 @@ async fn evaluate(
         decision: Decision::Forward,
         upstream: Upstream::Keep,
         hold: String::new(),
+        hold_response_at_unix_ms: None,
         close_downstream: false,
         patches: Vec::new(),
         replacement: None,
@@ -743,6 +832,15 @@ async fn evaluate(
                 if !action.metadata.hold.is_empty() {
                     plan.hold = action.metadata.hold.clone();
                 }
+                if let Some(at) = action.metadata.hold_response_at_unix_ms {
+                    if plan
+                        .hold_response_at_unix_ms
+                        .is_some_and(|previous| previous != at)
+                    {
+                        return Err(refusal(502, "conflicting response hold schedules"));
+                    }
+                    plan.hold_response_at_unix_ms = Some(at);
+                }
                 plan.close_downstream = action.metadata.close_downstream;
                 plan.decision = action.metadata.decision;
                 match plan.decision {
@@ -780,6 +878,10 @@ async fn evaluate(
         }
     }
     super::message_action::validate_buffer_decision(&plan.hold, plan.decision)?;
+    // A later terminal callback decision supersedes an earlier forward draft.
+    if plan.decision != Decision::Forward {
+        plan.hold_response_at_unix_ms = None;
+    }
     Ok(plan)
 }
 
@@ -1104,5 +1206,86 @@ mod tests {
             );
             assert_eq!(sequence, 7);
         }
+    }
+
+    #[tokio::test]
+    async fn scheduled_response_hold_excludes_controls_and_clears_with_explicit_actions() {
+        let registration = message_codec::CodecRegistration {
+            codec: Arc::new(proxy_pingora::http_ingress::message_codec::WebSocketCodec),
+            callbacks: vec![],
+        };
+        let mut delta = held_test_message();
+        delta.message = Some(proxy_protocols::message_codec::Message {
+            kind: "response.event",
+            payload: Bytes::from_static(br#"{"delta":"bypassed"}"#),
+        });
+        let mut sequence = 0;
+        let mut plan = evaluate(&registration, &delta, &mut sequence, 1, 1024, None)
+            .await
+            .unwrap();
+        let mut schedule = ResponseHold::default();
+        plan.hold_response_at_unix_ms =
+            Some(super::super::message_action::unix_ms().unwrap() + 100);
+        schedule.apply(&plan).unwrap();
+        plan.hold_response_at_unix_ms = None;
+        assert!(!schedule.buffers(&delta, &plan));
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(schedule.buffers(&delta, &plan));
+        let terminal = Message {
+            side: Side::Upstream(1),
+            message: Some(proxy_protocols::message_codec::Message {
+                kind: "response.completed",
+                payload: Bytes::from_static(b"{}"),
+            }),
+            wire: vec![],
+        };
+        assert!(
+            !schedule.buffers(&terminal, &plan),
+            "an allowed terminal must not wait for another callback"
+        );
+        assert!(validate_terminal_hold(&terminal, &plan, false).is_ok());
+        assert!(validate_terminal_hold(&terminal, &plan, true).is_err());
+        assert!(
+            !schedule.buffers(&held_test_message(), &plan),
+            "control wire must progress"
+        );
+        let request = Message {
+            side: Side::Downstream,
+            message: delta.message.as_ref().map(|message| {
+                proxy_protocols::message_codec::Message {
+                    kind: message.kind,
+                    payload: message.payload.clone(),
+                }
+            }),
+            wire: delta.wire.clone(),
+        };
+        assert!(!schedule.buffers(&request, &plan));
+        for decision in [Decision::Reply, Decision::Drop] {
+            plan.decision = decision;
+            assert!(!schedule.buffers(&delta, &plan));
+        }
+        plan.decision = Decision::Forward;
+        for hold in ["release", "discard"] {
+            schedule.deadline = Some(tokio::time::Instant::now());
+            plan.hold = hold.into();
+            assert!(!schedule.buffers(&delta, &plan));
+            schedule.apply(&plan).unwrap();
+            assert!(schedule.deadline.is_none());
+        }
+        plan.hold.clear();
+        for retirement in [Upstream::Replace, Upstream::Disconnect, Upstream::Close] {
+            schedule.deadline = Some(tokio::time::Instant::now());
+            plan.upstream = retirement;
+            schedule.apply(&plan).unwrap();
+            assert!(
+                schedule.deadline.is_none(),
+                "new generations cannot inherit the deadline"
+            );
+        }
+        plan.upstream = Upstream::Keep;
+        schedule.deadline = Some(tokio::time::Instant::now());
+        plan.hold_response_at_unix_ms = Some(0);
+        schedule.apply(&plan).unwrap();
+        assert!(schedule.deadline.is_none());
     }
 }

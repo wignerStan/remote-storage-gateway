@@ -138,6 +138,7 @@ struct Source<'a> {
     held_count: Arc<ResourceBudget>,
     reservation: Arc<Reservation>,
     assembly_deadline: Option<tokio::time::Instant>,
+    response_hold: ResponseHold,
 }
 impl Source<'_> {
     async fn next(&mut self) -> Result<Option<Output>> {
@@ -215,11 +216,13 @@ impl Source<'_> {
                 "HTTP response policy deadline exceeded",
             )
             .await?;
+            self.response_hold.apply(&plan)?;
             if plan.hold == "discard" {
                 self.held.clear();
             }
+            validate_terminal_hold(&message, &plan, !self.held.is_empty())?;
             let selected = plan.replacement.as_ref().unwrap_or(&message);
-            if plan.hold == "buffer" {
+            if plan.hold == "buffer" || self.response_hold.buffers(&message, &plan) {
                 let semantic = selected
                     .message
                     .as_ref()
@@ -467,6 +470,8 @@ impl NativeProxy {
         {
             return Err(refusal(403, "HTTP full request was not admitted"));
         }
+        let mut response_hold = ResponseHold::default();
+        response_hold.apply(&plan)?;
         let approved = plan
             .replacement
             .ok_or_else(|| refusal(502, "HTTP bridge requires approved full create"))?;
@@ -629,6 +634,7 @@ impl NativeProxy {
             held_count: ResourceBudget::new(websocket::Limits::default().max_frames),
             reservation,
             assembly_deadline: None,
+            response_hold,
         };
         let first = while_connected(session, async {
             loop {

@@ -97,6 +97,9 @@ mod remote_axis;
 #[path = "native_proxy/response_streams.rs"]
 mod response_streams;
 #[cfg(unix)]
+#[path = "native_proxy/scheduled_response_hold.rs"]
+mod scheduled_response_hold;
+#[cfg(unix)]
 #[path = "native_proxy/websocket_abi.rs"]
 mod websocket_abi;
 

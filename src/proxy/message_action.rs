@@ -47,6 +47,10 @@ pub(super) struct Metadata {
     /// direction. Discard drops held messages without forwarding them.
     #[serde(default)]
     pub hold: String,
+    /// Start retaining upstream business messages at this Unix millisecond time.
+    /// Zero clears the schedule. Only request-side forward actions can set it.
+    #[serde(default)]
+    pub hold_response_at_unix_ms: Option<u64>,
     /// Payload is length-prefixed opaque texts. Each one is its own websocket text frame.
     #[serde(default)]
     pub text_frames: bool,
@@ -126,6 +130,15 @@ impl Metadata {
             return Err(refusal(502, "invalid hold"));
         }
         validate_buffer_decision(&self.hold, self.decision)?;
+        if let Some(at) = self.hold_response_at_unix_ms {
+            if response || self.decision != Decision::Forward {
+                return Err(refusal(
+                    502,
+                    "response hold schedule requires a request forward",
+                ));
+            }
+            validate_response_hold_time(at)?;
+        }
         if self.version != 1 || self.set_headers.len() + self.remove_headers.len() > 64 {
             return Err(refusal(
                 502,
@@ -222,6 +235,26 @@ impl Metadata {
     }
 }
 
+/// Bound clock mistakes and prevent unbounded schedules. Past deadlines within
+/// this window start holding immediately; zero explicitly removes a schedule.
+pub(super) fn validate_response_hold_time(at: u64) -> Result<()> {
+    if at != 0 && at.abs_diff(unix_ms()?) > 24 * 60 * 60 * 1000 {
+        return Err(refusal(
+            502,
+            "response hold schedule exceeds the 24 hour window",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn unix_ms() -> Result<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .ok_or_else(|| refusal(502, "invalid host clock for response hold schedule"))
+}
+
 /// Buffering defers an approved forward; it cannot suppress a terminal decision.
 /// Check both individual actions and the composed callback chain.
 pub(super) fn validate_buffer_decision(hold: &str, decision: Decision) -> Result<()> {
@@ -315,6 +348,28 @@ mod tests {
                 decode(&encoded(metadata, b"replacement"), &grant(), response, 1024).unwrap(),
                 Reply::Action(action) if action.payload.as_ref() == b"replacement"
             ));
+        }
+    }
+    #[test]
+    fn scheduled_response_hold_requires_granted_request_forward_and_bounded_time() {
+        let now = unix_ms().unwrap();
+        for at in [0, now.saturating_sub(1000), now + 250_000] {
+            let metadata = json!({"version":1,"decision":"forward","hold_response_at_unix_ms":at});
+            let wire = encoded(metadata, b"");
+            assert!(decode(&wire, &grant(), false, 1024).is_ok());
+            assert!(decode(&wire, &grant(), true, 1024).is_err());
+            assert!(decode(&wire, &Grant::default(), false, 1024).is_err());
+        }
+        for metadata in [
+            json!({"version":1,"decision":"reply","hold_response_at_unix_ms":now}),
+            json!({"version":1,"decision":"drop","hold_response_at_unix_ms":0}),
+            json!({"version":1,"decision":"forward","hold_response_at_unix_ms":1}),
+            json!({"version":1,"decision":"forward","hold_response_at_unix_ms":u64::MAX}),
+            json!({"version":1,"decision":"forward","hold_response_at_unix_ms":now + 86_401_000}),
+            json!({"version":1,"decision":"forward","hold_response_at_unix_ms":-1}),
+            json!({"version":1,"decision":"forward","hold_response_at_unix_ms":"later"}),
+        ] {
+            assert!(decode(&encoded(metadata, b"{}"), &grant(), false, 1024).is_err());
         }
     }
     #[test]
