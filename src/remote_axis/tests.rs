@@ -1,8 +1,8 @@
 use super::*;
+use plugin_registry::RegistrationSpec;
 use action_execution::{Action, AsyncHandler, Binding, Context, Contract, ResponseMode, Schema};
 use action_router::Router;
 use network_local_control::{ControlService, listener::ControlListener};
-use plugin_registry::RegistrationSpec;
 use tokio::sync::Notify;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

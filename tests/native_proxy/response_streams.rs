@@ -195,7 +195,7 @@ async fn upstream_websocket_messages_gate_independently_and_client_wire_stays_ma
         (
             r#"{"type":"response.output_text.delta","delta":"hello"}"#,
             false,
-            "response.event",
+            "response.output_text.delta",
         ),
         ("audio", true, "response.binary"),
     ] {
@@ -226,10 +226,10 @@ async fn upstream_websocket_messages_gate_independently_and_client_wire_stays_ma
                 let mut byte=[0];let first=timeout(Duration::from_millis(40),client.read(&mut byte)).await;let mut body=Vec::new();
                 assert!(first.is_err(),"partial upstream WS frame escaped response/reply framing guard");
                 release.add_permits(1);
-                let expected=if grant&&deny && kind != "response.event" {vec![0x88,2,3,243]}else{server_frame};
+                let expected=if grant&&deny && kind != "response.event" && !kind.ends_with(".delta") {vec![0x88,2,3,243]}else{server_frame};
                 body.resize(expected.len(),0);client.read_exact(&mut body).await.unwrap();
                 assert_eq!(body,expected,"grant={grant} deny={deny} binary={binary}");
-                if !(grant&&deny && kind != "response.event") {
+                if !(grant&&deny && kind != "response.event" && !kind.ends_with(".delta")) {
                     assert!(timeout(Duration::from_millis(40),client.read_u8()).await.is_err(),"unexpected extra data on open upstream");
                 }
                 drop(client);drop(worker);proxy.shutdown().await.unwrap();

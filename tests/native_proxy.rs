@@ -574,3 +574,6 @@ mod session_exit;
 #[cfg(unix)]
 #[path = "native_proxy/generation_lifetime.rs"]
 mod generation_lifetime;
+
+#[path = "native_proxy/stress.rs"]
+mod stress;
