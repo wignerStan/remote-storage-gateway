@@ -46,6 +46,12 @@ pub(super) struct Metadata {
     /// direction. Discard drops held messages without forwarding them.
     #[serde(default)]
     pub hold: String,
+    /// Payload is length-prefixed opaque texts. Each one is its own websocket text frame.
+    #[serde(default)]
+    pub text_frames: bool,
+    /// After the reply is written, close the client and leave the upstream generation up.
+    #[serde(default)]
+    pub close_downstream: bool,
     #[serde(default)]
     pub set_headers: Vec<(String, String)>,
     #[serde(default)]

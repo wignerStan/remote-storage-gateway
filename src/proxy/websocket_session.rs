@@ -10,8 +10,6 @@ use proxy_pingora::{
 };
 use proxy_protocols::{message_codec::Decoder, websocket};
 
-const REPLAY_REQUIRED: &[u8] = br#"{"type":"error","status":409,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response was not found. Retrying the full request.","param":"previous_response_id"}}"#;
-
 /// Mutable route draft retained across upstream generations of one session.
 struct SessionRoute<'a> {
     request: &'a mut RequestHeader,
@@ -22,6 +20,7 @@ struct Plan {
     decision: Decision,
     upstream: Upstream,
     hold: String,
+    close_downstream: bool,
     patches: Vec<Metadata>,
     replacement: Option<Message>,
     reply: Option<Bytes>,
@@ -459,6 +458,9 @@ impl NativeProxy {
                             transport
                                 .send_downstream_wire(plan.reply.clone().expect("validated reply"))
                                 .await?;
+                            if plan.close_downstream {
+                                transport.close_downstream_keep_upstream().await?;
+                            }
                         }
                         Decision::Drop => {}
                         Decision::Forward => {
@@ -596,9 +598,6 @@ impl NativeProxy {
         {
             if error.to_string().contains("upstream control denied") {
                 let _ = transport.disconnect(generation);
-                if let Some(frame) = codec.response_error(REPLAY_REQUIRED) {
-                    let _ = transport.send_downstream_wire(Bytes::from(frame)).await;
-                }
             }
             return Err(error);
         }
@@ -607,6 +606,31 @@ impl NativeProxy {
             "upstream generation admitted");
         Ok(generation)
     }
+}
+
+fn opaque_text_frames(payload: &[u8]) -> Result<Bytes> {
+    let mut out = Vec::new();
+    let mut rest = payload;
+    let mut count = 0usize;
+    while !rest.is_empty() {
+        if count == 4 || rest.len() < 4 {
+            return Err(refusal(502, "invalid text frame list"));
+        }
+        let len = u32::from_le_bytes(rest[..4].try_into().expect("checked prefix")) as usize;
+        rest = &rest[4..];
+        if len == 0 || len > rest.len() {
+            return Err(refusal(502, "invalid text frame list"));
+        }
+        let frame = websocket::encode_server(1, &rest[..len])
+            .map_err(|_| refusal(502, "text frame encode failed"))?;
+        out.extend_from_slice(&frame);
+        rest = &rest[len..];
+        count += 1;
+    }
+    if count == 0 {
+        return Err(refusal(502, "invalid text frame list"));
+    }
+    Ok(Bytes::from(out))
 }
 
 fn release_hold<T>(held: &mut Vec<T>) -> Vec<T> {
@@ -638,6 +662,7 @@ async fn evaluate(
         decision: Decision::Forward,
         upstream: Upstream::Keep,
         hold: String::new(),
+        close_downstream: false,
         patches: Vec::new(),
         replacement: None,
         reply: None,
@@ -712,6 +737,7 @@ async fn evaluate(
                 if !action.metadata.hold.is_empty() {
                     plan.hold = action.metadata.hold.clone();
                 }
+                plan.close_downstream = action.metadata.close_downstream;
                 plan.decision = action.metadata.decision;
                 match plan.decision {
                     Decision::Forward if !action.payload.is_empty() => {
@@ -721,6 +747,9 @@ async fn evaluate(
                             action.payload,
                             max_bytes,
                         )?);
+                    }
+                    Decision::Reply if action.metadata.text_frames => {
+                        plan.reply = Some(opaque_text_frames(&action.payload)?);
                     }
                     Decision::Reply => {
                         plan.reply = Some(validate_reply(
@@ -855,6 +884,27 @@ fn replacement(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn replay_reply_preserves_multiple_text_frames_and_close_metadata() {
+        let action: crate::proxy::message_action::Metadata = serde_json::from_str(
+            r#"{"version":1,"decision":"reply","text_frames":true,"close_downstream":true}"#
+        ).unwrap();
+        assert!(action.text_frames);
+        assert!(action.close_downstream);
+        let messages: [&[u8]; 2] = [br#"{"type":"error","status":409}"#, br#"{"type":"response.failed"}"#];
+        let mut payload = Vec::new();
+        let mut expected = Vec::new();
+        for message in messages {
+            payload.extend_from_slice(&(message.len() as u32).to_le_bytes());
+            payload.extend_from_slice(message);
+            expected.extend_from_slice(&websocket::encode_server(1, message).unwrap());
+        }
+        assert_eq!(opaque_text_frames(&payload).unwrap().as_ref(), expected);
+        assert!(opaque_text_frames(&[]).is_err());
+        assert!(opaque_text_frames(&[0, 0, 0, 0]).is_err());
+        assert!(opaque_text_frames(&[5, 0, 0, 0, 1]).is_err());
+    }
     use super::*;
 
     #[test]
