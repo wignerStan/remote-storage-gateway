@@ -13,7 +13,7 @@ pub fn artifact_with_delay(
     retain: bool,
     delay_ns: u64,
 ) -> PathBuf {
-    artifact_custom(dir, retire, close, retain, delay_ns, 0)
+    artifact_custom(dir, retire, close, retain, delay_ns, 0, false)
 }
 #[allow(dead_code)]
 pub fn artifact_with_admission_delay(
@@ -23,7 +23,11 @@ pub fn artifact_with_admission_delay(
     retain: bool,
     delay_ns: u64,
 ) -> PathBuf {
-    artifact_custom(dir, retire, close, retain, 0, delay_ns)
+    artifact_custom(dir, retire, close, retain, 0, delay_ns, false)
+}
+#[allow(dead_code)]
+pub fn artifact_with_stale_terminal(dir: &Path, retire: u64, close: u64) -> PathBuf {
+    artifact_custom(dir, retire, close, true, 0, 0, true)
 }
 fn artifact_custom(
     dir: &Path,
@@ -32,6 +36,7 @@ fn artifact_custom(
     retain: bool,
     delay_ns: u64,
     admission_delay_ns: u64,
+    drop_stale: bool,
 ) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut source =
@@ -40,6 +45,7 @@ fn artifact_custom(
     let end = source.find("static uint32_t next(").unwrap();
     let metadata = serde_json::to_string(&json!({"version":1,"decision":"forward","upstream":"keep", "socket_lifetime":{"retire_after_ms":retire,"close_after_ms":close},"retain_upstream_on_downstream_close":retain})).unwrap();
     let marker = serde_json::to_string(&dir.join("events")).unwrap();
+    let drop_stale = u8::from(drop_stale);
     let delay_secs = delay_ns / 1_000_000_000;
     let delay_nanos = delay_ns % 1_000_000_000;
     source.replace_range(start..end, &format!(r#"
@@ -59,6 +65,10 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
         struct timespec delay={{{delay_secs},{delay_nanos}}};nanosleep(&delay,NULL);if ({delay_ns}) mark('m');
     }}
     if (begins(method,"openai.responses.v1/response.completed/")) {{
+        if ({drop_stale} && ++completed==2) {{
+            if (!memmem(input.ptr,input.len,"\"id\":\"first\"",12)) return INFRA_FAILED;
+            mark('s');return action("{{\"version\":1,\"decision\":\"drop\",\"upstream\":\"keep\"}}","",out);
+        }}
         struct timespec delay={{{delay_secs},{delay_nanos}}};nanosleep(&delay,NULL);mark('t');
     }}
     const uint8_t allow=0; return copy(&allow,1,out);

@@ -765,7 +765,7 @@ impl NativeProxy {
                     response_hold.apply(&plan)?;
                     // Callback settlement precedes any downstream write. A failed
                     // write after a terminal must not keep the Go owner active.
-                    if response_terminal(&message) {
+                    if response_terminal(&message) && plan.decision != Decision::Drop {
                         lifetime.active = false;
                     }
                     let selected = plan.replacement.as_ref().unwrap_or(&message);

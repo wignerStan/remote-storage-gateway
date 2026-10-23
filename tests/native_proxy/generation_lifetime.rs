@@ -472,3 +472,101 @@ async fn ignored_idle_interrupt_does_not_extend_turn_or_native_read_timeout() {
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropped_old_terminal_cannot_make_the_next_turn_idle_at_expiry() {
+    timeout(Duration::from_secs(20), async {
+        for detach_before_stale in [false, true] {
+            let first = br#"{"type":"response.completed","response":{"id":"first","output":[]}}"#;
+            let second = br#"{"type":"response.completed","response":{"id":"second","output":[]}}"#;
+            let second_started = Arc::new(Notify::new());
+            let stale = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let closed = Arc::new(Notify::new());
+            let origin = listen({
+                let second_started = second_started.clone();
+                let stale = stale.clone();
+                let release = release.clone();
+                let closed = closed.clone();
+                move |mut socket| {
+                    let second_started = second_started.clone();
+                    let stale = stale.clone();
+                    let release = release.clone();
+                    let closed = closed.clone();
+                    async move {
+                        upstream(&mut socket).await;
+                        socket
+                            .write_all(&websocket::encode_server(1, first).unwrap())
+                            .await
+                            .unwrap();
+                        assert_eq!(frame(&mut socket, true).await, (1, CREATE.to_vec()));
+                        socket
+                            .write_all(
+                                &websocket::encode_server(
+                                    1,
+                                    br#"{"type":"response.created","response":{"id":"second"}}"#,
+                                )
+                                .unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                        second_started.notify_one();
+                        stale.notified().await;
+                        socket
+                            .write_all(&websocket::encode_server(1, first).unwrap())
+                            .await
+                            .unwrap();
+                        release.notified().await;
+                        socket
+                            .write_all(&websocket::encode_server(1, second).unwrap())
+                            .await
+                            .unwrap();
+                        assert_eq!(frame(&mut socket, true).await.0, 8);
+                        closed.notify_one();
+                    }
+                }
+            })
+            .await;
+            let dir = tempfile::tempdir().unwrap();
+            let artifact = fixture::artifact_with_stale_terminal(dir.path(), 150, 250);
+            let proxy = proxy_with_artifact(origin.address, artifact, 8).await;
+            let worker = serve_engine(proxy.clone()).await;
+            let mut socket = client(worker.address).await;
+            create(&mut socket).await;
+            assert_eq!(frame(&mut socket, false).await, (1, first.to_vec()));
+            create(&mut socket).await;
+            assert_eq!(frame(&mut socket, false).await.0, 1); // response.created for second
+            second_started.notified().await;
+            let mut socket = Some(socket);
+            if detach_before_stale {
+                drop(socket.take());
+                marker(dir.path(), 'd').await;
+            }
+            stale.notify_one();
+            marker(dir.path(), 's').await;
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            assert_eq!(
+                events(dir.path()),
+                if detach_before_stale { "tds" } else { "ts" },
+                "dropped duplicate terminal retired the live second turn"
+            );
+            drop(socket.take());
+            marker(dir.path(), 'd').await;
+            release.notify_one();
+            closed.notified().await;
+            marker(dir.path(), 'c').await;
+            assert_eq!(
+                events(dir.path()),
+                if detach_before_stale {
+                    "tdstc"
+                } else {
+                    "tsdtc"
+                }
+            );
+            drop(worker);
+            proxy.shutdown().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}

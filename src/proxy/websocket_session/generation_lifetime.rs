@@ -217,7 +217,7 @@ impl RetainedGeneration {
                         };
                         match result {
                             Ok(plan) => {
-                                if response_terminal(&message) {
+                                if response_terminal(&message) && plan.decision != Decision::Drop {
                                     self.active = false;
                                     self.socket.set_read_idle_timeout(None);
                                 }
