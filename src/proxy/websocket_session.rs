@@ -357,11 +357,16 @@ impl NativeProxy {
             downstream_ping: self.config.websocket_keepalive.enabled
                 && self.config.websocket_keepalive.downstream,
         };
+        let decoder = codec.create_with_limits(max_bytes)?;
+        // All HTTP policy and body checks are complete. Release the temporary
+        // inspection reservation before the client can receive the 101 response.
+        // An idle session has no buffers; the carrier reserves before decoding.
+        ctx.inspection_permit = None;
         let mut transport = carrier::Session::accept_with_decoder(
             &mut session.downstream_session,
             response,
             limits,
-            codec.create_with_limits(max_bytes)?,
+            decoder,
         )
         .await?;
         ctx.response_dump.set_status(101);
@@ -369,9 +374,6 @@ impl NativeProxy {
         ctx.upgraded = true;
         ctx.response_received = true;
         ctx.dump.finish(ctx.request_id);
-        // Idle sessions reserve no body memory. The carrier acquires a permit
-        // before its first decoder allocation and preserves it for queued wire.
-        ctx.inspection_permit = None;
         let mut reservation = None;
         let mut lifetime = GenerationLifetime::default();
         let result = self

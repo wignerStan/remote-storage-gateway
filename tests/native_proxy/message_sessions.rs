@@ -463,6 +463,71 @@ fn compile_session_source(dir: &Path, source: &str) -> PathBuf {
     path
 }
 
+#[derive(Default)]
+struct HandshakeFlushGate {
+    released: std::sync::atomic::AtomicBool,
+    waiter: futures_util::task::AtomicWaker,
+}
+impl HandshakeFlushGate {
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.waiter.wake();
+    }
+}
+// TCP can expose a101 before the writer's flush future completes. Keep the
+// first upgrade at that exact boundary while another client requests admission.
+struct DelayedHandshakeFlush {
+    socket: TcpStream,
+    gate: Option<Arc<HandshakeFlushGate>>,
+    upgrade_written: bool,
+}
+impl tokio::io::AsyncRead for DelayedHandshakeFlush {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().socket).poll_read(cx, buffer)
+    }
+}
+impl tokio::io::AsyncWrite for DelayedHandshakeFlush {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let result = std::pin::Pin::new(&mut this.socket).poll_write(cx, bytes);
+        if matches!(result, std::task::Poll::Ready(Ok(n)) if n > 0)
+            && bytes.starts_with(b"HTTP/1.1 101")
+        {
+            this.upgrade_written = true;
+        }
+        result
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if this.upgrade_written
+            && let Some(gate) = &this.gate
+        {
+            gate.waiter.register(cx.waker());
+            if !gate.released.load(Ordering::SeqCst) {
+                return std::task::Poll::Pending;
+            }
+        }
+        std::pin::Pin::new(&mut this.socket).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().socket).poll_shutdown(cx)
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_response_keeps_body_reservation_across_peer_ping() {
     timeout(WAIT, async {
@@ -488,7 +553,38 @@ async fn held_response_keeps_body_reservation_across_peer_ping() {
         cfg.inspection.max_message_bytes = 1024;
         cfg.inspection.max_buffered_bytes = 8 * 1024 + 8 * 1024 * 1024 + 512 * 1024;
         let proxy = pingora_worker::assembly::assemble(cfg).await.unwrap();
-        let worker = serve_engine(proxy.clone()).await;
+        let mut engine = HttpProxy::new(
+            proxy.clone(),
+            Arc::new(ServerConf {
+                max_retries: 1,
+                ..ServerConf::default()
+            }),
+        );
+        engine.handle_init_modules();
+        let engine = Arc::new(engine);
+        let gate = Arc::new(HandshakeFlushGate::default());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let worker = listen({
+            let gate = gate.clone();
+            move |socket| {
+                let gate = (accepted.fetch_add(1, Ordering::SeqCst) == 0).then(|| gate.clone());
+                let engine = engine.clone();
+                async move {
+                    let stream =
+                        proxy_pingora::connect_upstream::ProtocolL4Connect::box_stream_to_pingora(
+                            Box::new(DelayedHandshakeFlush {
+                                socket,
+                                gate,
+                                upgrade_written: false,
+                            }),
+                        );
+                    let session = ServerSession::new_http1(Box::new(stream));
+                    let (_stop, shutdown) = tokio::sync::watch::channel(false);
+                    let _ = engine.process_new_http(session, &shutdown).await;
+                }
+            }
+        })
+        .await;
         let mut first = TcpStream::connect(worker.address).await.unwrap();
         first.write_all(REQUEST).await.unwrap();
         assert!(head(&mut first).await.starts_with(b"HTTP/1.1 101"));
@@ -496,7 +592,13 @@ async fn held_response_keeps_body_reservation_across_peer_ping() {
         // idle peer before the first session consumes the sole reservation.
         let mut second = TcpStream::connect(worker.address).await.unwrap();
         second.write_all(REQUEST).await.unwrap();
-        assert!(head(&mut second).await.starts_with(b"HTTP/1.1 101"));
+        let reply = head(&mut second).await;
+        assert!(
+            reply.starts_with(b"HTTP/1.1 101"),
+            "idle handshake retained the sole inspection reservation: {}",
+            String::from_utf8_lossy(&reply)
+        );
+        gate.release();
         first
             .write_all(&websocket::encode_client(1, CREATE).unwrap())
             .await
