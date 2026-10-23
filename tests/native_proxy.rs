@@ -571,3 +571,6 @@ async fn native_operation_completion_failure_preserves_delivered_status() {
 #[cfg(unix)]
 #[path = "native_proxy/session_exit.rs"]
 mod session_exit;
+#[cfg(unix)]
+#[path = "native_proxy/generation_lifetime.rs"]
+mod generation_lifetime;
