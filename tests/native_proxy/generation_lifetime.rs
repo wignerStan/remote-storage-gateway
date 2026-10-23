@@ -570,3 +570,69 @@ async fn dropped_old_terminal_cannot_make_the_next_turn_idle_at_expiry() {
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upstream_eof_drop_keep_has_no_replay_and_keeps_downstream_until_client_close() {
+    timeout(Duration::from_secs(15), async {
+        let count = Arc::new(AtomicUsize::new(0));
+        let ended = Arc::new(Notify::new());
+        let origin = listen({
+            let count = count.clone();
+            let ended = ended.clone();
+            move |mut socket| {
+                let count = count.clone();
+                let ended = ended.clone();
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    upstream(&mut socket).await;
+                    // The physical upstream sends EOF without a semantic terminal.
+                    socket.shutdown().await.unwrap();
+                    ended.notify_one();
+                }
+            }
+        })
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let proxy = proxy(origin.address, dir.path(), 1000, 2000, true, 8).await;
+        let worker = serve_engine(proxy.clone()).await;
+        let mut socket = client(worker.address).await;
+        create(&mut socket).await;
+        ended.notified().await;
+        marker(dir.path(), 'u').await;
+        assert_eq!(
+            events(dir.path()),
+            "u",
+            "EOF fabricated a semantic completion or downstream cleanup"
+        );
+        assert!(
+            timeout(Duration::from_millis(100), socket.read_u8())
+                .await
+                .is_err(),
+            "Drop/Keep fabricated a replay, body, Close, or downstream EOF"
+        );
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "EOF silently dialed another business connection"
+        );
+        socket
+            .write_all(&websocket::encode_client(8, &1000_u16.to_be_bytes()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            frame(&mut socket, false).await,
+            (8, 1000_u16.to_be_bytes().to_vec())
+        );
+        assert_eq!(
+            socket.read_u8().await.unwrap_err().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+        marker(dir.path(), 'c').await;
+        assert_eq!(events(dir.path()), "uc");
+        drop(socket);
+        drop(worker);
+        proxy.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
+}

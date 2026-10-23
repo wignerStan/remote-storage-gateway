@@ -59,7 +59,9 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
     }}
     if (begins(method,"openai.responses.v1/transport.detached/")) mark('d');
     if (begins(method,"openai.responses.v1/transport.closed/")) {{
-        if (input.len > 20 && memmem(input.ptr,input.len,"\"side\":\"upstream\"",17)) mark('u'); else mark('c');
+        if (input.len > 20 && memmem(input.ptr,input.len,"\"side\":\"upstream\"",17)) {{
+            mark('u');return action("{{\"version\":1,\"decision\":\"drop\",\"upstream\":\"keep\"}}","",out);
+        }} else mark('c');
     }}
     if (begins(method,"openai.responses.v1/response.created/")) {{
         struct timespec delay={{{delay_secs},{delay_nanos}}};nanosleep(&delay,NULL);if ({delay_ns}) mark('m');
