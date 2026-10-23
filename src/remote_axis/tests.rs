@@ -1,8 +1,8 @@
 use super::*;
-use plugin_registry::RegistrationSpec;
 use action_execution::{Action, AsyncHandler, Binding, Context, Contract, ResponseMode, Schema};
 use action_router::Router;
 use network_local_control::{ControlService, listener::ControlListener};
+use plugin_registry::RegistrationSpec;
 use tokio::sync::Notify;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -68,7 +68,7 @@ async fn cancelled_waiter_keeps_membership_pinned_until_remote_exchange_settles(
             },
         )]);
         let manager = Arc::new(
-            RemotePluginManager::connect(bindings, surface)
+            RemotePluginManager::connect(bindings, surface, 32)
                 .await
                 .unwrap(),
         );
@@ -216,6 +216,7 @@ async fn remote_message_carries_large_raw_payload_and_keeps_metadata_bounded() {
                 .with_codec(Some("codex.responses.v1".into())),
         ])
         .unwrap(),
+        32,
     )
     .await
     .unwrap();
@@ -252,4 +253,142 @@ async fn remote_message_carries_large_raw_payload_and_keeps_metadata_bounded() {
     manager.close().await.unwrap();
     listener.shutdown().await.unwrap();
     drop(registration);
+}
+
+#[test]
+fn lifecycle_lane_requires_exact_validated_host_method() {
+    for method in [
+        "codex.responses.v1/transport.closed/0000000000000001/0000000000000002",
+        "openai.responses.v1/transport.detached/ffffffffffffffff/0123456789abcdef",
+    ] {
+        assert_eq!(
+            message_call_class(method, br#"{"side":"downstream"}"#),
+            CallClass::Control
+        );
+    }
+    for method in [
+        "codex.responses.v1/response.create/0000000000000001/0000000000000002",
+        "codex.responses.v1/transport.closed/1/2",
+        "codex.responses.v1/transport.closed/gggggggggggggggg/0000000000000002",
+        "codex.responses.v1/transport.closed/0000000000000001/0000000000000002/extra",
+        "codex.responses.v1/transport.closed.forged/0000000000000001/0000000000000002",
+        "/transport.closed/0000000000000001/0000000000000002",
+    ] {
+        assert_eq!(
+            message_call_class(method, br#"{"side":"downstream"}"#),
+            CallClass::Ordinary,
+            "{method}"
+        );
+    }
+}
+
+#[test]
+fn lifecycle_lane_rejects_invalid_oversized_or_business_payloads() {
+    let method = "codex.responses.v1/transport.closed/0000000000000001/0000000000000000";
+    for body in [
+        b"".as_slice(),
+        b"{",
+        b"null",
+        br#"{"side":1}"#,
+        br#"{"side":"other"}"#,
+        br#"{"side":"downstream","reason":3}"#,
+        br#"{"side":"downstream","generation":-1}"#,
+        br#"{"side":"downstream","side":"upstream"}"#,
+        br#"{"side":"downstream","si\u0064e":"upstream"}"#,
+        br#"{"side":"downstream","type":"response.create"}"#,
+        br#"{"type":"response.create","input":[]}"#,
+        br#"{"side":"downstream"} trailing"#,
+    ] {
+        assert_eq!(message_call_class(method, body), CallClass::Ordinary);
+    }
+    assert_eq!(
+        message_call_class(method, &vec![b' '; 65536]),
+        CallClass::Ordinary
+    );
+    assert_eq!(
+        message_call_class(
+            "codex.responses.v1/transport.detached/0000000000000001/0000000000000000",
+            br#"{"side":"upstream"}"#
+        ),
+        CallClass::Ordinary
+    );
+    assert_eq!(
+        message_call_class(
+            "codex.responses.v1/transport.closed/0000000000000000/0000000000000000",
+            br#"{"side":"downstream"}"#
+        ),
+        CallClass::Ordinary
+    );
+}
+
+#[test]
+fn event_lane_covers_fast_callbacks_and_preserves_business_admission() {
+    let large = serde_json::to_vec(
+        &serde_json::json!({"type":"response.completed","opaque":"x".repeat(70<<10)}),
+    )
+    .unwrap();
+    assert!(large.len() > 65536);
+    assert_eq!(
+        message_call_class(
+            "codex.responses.v1/response.completed/0000000000000001/0000000000000001",
+            &large
+        ),
+        CallClass::Event
+    );
+    for kind in [
+        "response.completed",
+        "response.metadata",
+        "response.created",
+        "response.in_progress",
+        "response.done",
+        "response.error",
+        "response.interrupt",
+        "response.append",
+        "codex.response.metadata",
+        "codex.rate_limits",
+        "rate_limits.updated",
+        "responsesapi.websocket_timing",
+        "response.future",
+    ] {
+        let method = format!("codex.responses.v1/{kind}/0000000000000001/0000000000000001");
+        assert_eq!(
+            message_call_class(&method, br#"{"type":"opaque"}"#),
+            CallClass::Event,
+            "{kind}"
+        );
+    }
+    for kind in [
+        "response",
+        "response.create",
+        "response.prewarm",
+        "responses_lite.create",
+        "responses_lite.prewarm",
+        "responses_lite.delta",
+        "responses_lite.full",
+        "transport.unknown",
+    ] {
+        let method = format!("codex.responses.v1/{kind}/0000000000000001/0000000000000001");
+        assert_eq!(
+            message_call_class(&method, br#"{"type":"opaque"}"#),
+            CallClass::Ordinary,
+            "{kind}"
+        );
+    }
+    assert_eq!(
+        metadata_call_class("authenticate", br#"{"request_id":1}"#),
+        CallClass::Ordinary
+    );
+    assert_eq!(
+        metadata_call_class("upstream_response", br#"{"request_id":1}"#),
+        CallClass::Event
+    );
+    assert_eq!(
+        metadata_call_class("complete", br#"{"request_id":1}"#),
+        CallClass::Control
+    );
+    assert_eq!(
+        metadata_call_class("complete", br#"{"request_id":0}"#),
+        CallClass::Ordinary
+    );
+    assert_eq!(metadata_call_class("complete", b"{"), CallClass::Ordinary);
 }

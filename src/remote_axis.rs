@@ -5,7 +5,7 @@ pub(crate) mod surface;
 mod tests;
 use crate::config::{CallbackBackend, CallbackBinding, NativeCallback};
 use event_stamp::StampSource;
-use network_local_control::client::{Limits, RemoteBindings};
+use network_local_control::client::{CallClass, ControlLimits, Limits, RemoteBindings};
 use network_sockets::LocalEndpoint;
 use plugin_lifecycle::Reversal;
 use plugin_lifecycle::manager::PluginManager;
@@ -159,6 +159,7 @@ impl RemotePluginManager {
     pub(crate) async fn connect(
         config: BTreeMap<String, AxisBinding>,
         surface: Surface,
+        control_waiting: usize,
     ) -> Result<Self, String> {
         let mut result = Self {
             axes: BTreeMap::new(),
@@ -166,7 +167,7 @@ impl RemotePluginManager {
             incarnation: event_stamp::SystemSource.new_id().to_string(),
         };
         for (axis, binding) in config {
-            let connected = RemoteBindings::connect(
+            let connected = RemoteBindings::connect_with_lanes(
                 control_path(&binding.endpoint)?,
                 Limits {
                     max_input: binding
@@ -179,6 +180,21 @@ impl RemotePluginManager {
                         + 65541,
                     max_inflight: binding.max_inflight,
                     connect_timeout: Duration::from_millis(binding.connect_timeout_ms),
+                },
+                ControlLimits {
+                    max_inflight: binding.max_inflight,
+                    max_waiting: control_waiting,
+                    max_payload: crate::native_notifier::FRAME_LIMIT,
+                    max_queued_bytes: 64 << 20,
+                },
+                ControlLimits {
+                    max_inflight: binding.max_inflight,
+                    max_waiting: control_waiting,
+                    max_payload: binding
+                        .max_message_bytes
+                        .max(crate::native_notifier::FRAME_LIMIT)
+                        + 258,
+                    max_queued_bytes: 1 << 30,
                 },
             )
             .await;
@@ -355,7 +371,15 @@ impl RemotePluginBinding {
             return Err("remote metadata exceeds frame limit".into());
         }
         let method = self.grant.method(hook)?.to_owned();
-        let reply = self.exchange(method, input, timeout, custody).await?;
+        let class = metadata_call_class(hook, &input);
+        let timeout = if class == CallClass::Control {
+            timeout.min(self.axis.shutdown_timeout)
+        } else {
+            timeout
+        };
+        let reply = self
+            .exchange(class, method, input, timeout, custody)
+            .await?;
         if reply.len() > crate::native_notifier::FRAME_LIMIT {
             return Err("remote metadata reply exceeds frame limit".into());
         }
@@ -376,10 +400,18 @@ impl RemotePluginBinding {
         envelope.extend_from_slice(&(method.len() as u16).to_be_bytes());
         envelope.extend_from_slice(method.as_bytes());
         envelope.extend_from_slice(&input);
-        self.exchange(binding, envelope, timeout, custody).await
+        let class = message_call_class(method, &input);
+        let timeout = if class == CallClass::Control {
+            timeout.min(self.axis.shutdown_timeout)
+        } else {
+            timeout
+        };
+        self.exchange(class, binding, envelope, timeout, custody)
+            .await
     }
     async fn exchange(
         &self,
+        class: CallClass,
         method: String,
         input: Vec<u8>,
         timeout: Duration,
@@ -396,11 +428,91 @@ impl RemotePluginBinding {
         tokio::spawn(async move {
             let client = Arc::clone(&participant.client);
             client
-                .call_with_custody(method, input, timeout, (participant, custody))
+                .call_classified_with_custody(class, method, input, timeout, (participant, custody))
                 .await
                 .map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| format!("remote plugin exchange task failed: {e}"))?
+    }
+}
+
+// Only host lifecycle events get the reserved lane. Validation stays at this
+// application boundary; generic RPC never reads the message envelope.
+fn message_call_class(method: &str, input: &[u8]) -> CallClass {
+    let parts: Vec<_> = method.split('/').collect();
+    if parts.len() != 4
+        || !matches!(parts[0], "codex.responses.v1" | "openai.responses.v1")
+        || parts[2] == "0000000000000000"
+        || !parts[2..]
+            .iter()
+            .all(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return CallClass::Ordinary;
+    }
+    if parts[1].is_empty()
+        || matches!(
+            parts[1],
+            "response"
+                | "response.create"
+                | "response.prewarm"
+                | "responses_lite.create"
+                | "responses_lite.prewarm"
+                | "responses_lite.delta"
+                | "responses_lite.full"
+        )
+    {
+        return CallClass::Ordinary;
+    }
+    if !parts[1].starts_with("transport.") {
+        // The codec already validated business JSON. Keep the full body in its
+        // carrier buffer; the application checks the framed RPC envelope.
+        return CallClass::Event;
+    }
+    if method.len().saturating_add(input.len()).saturating_add(2)
+        > crate::native_notifier::FRAME_LIMIT
+        || !matches!(parts[1], "transport.closed" | "transport.detached")
+    {
+        return CallClass::Ordinary;
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct HostEvent {
+        side: String,
+        #[serde(default)]
+        reason: Option<String>,
+        #[serde(default)]
+        generation: Option<u64>,
+    }
+    let event: HostEvent = match serde_json::from_slice(input) {
+        Ok(event) => event,
+        Err(_) => return CallClass::Ordinary,
+    };
+    let _ = (&event.reason, event.generation);
+    if !matches!(event.side.as_str(), "upstream" | "downstream")
+        || (parts[1] == "transport.detached" && event.side != "downstream")
+    {
+        return CallClass::Ordinary;
+    }
+    CallClass::Control
+}
+
+fn metadata_call_class(hook: &str, input: &[u8]) -> CallClass {
+    if hook == "authenticate" {
+        return CallClass::Ordinary;
+    }
+    #[derive(serde::Deserialize)]
+    struct Metadata {
+        request_id: u64,
+    }
+    match serde_json::from_slice::<Metadata>(input) {
+        Ok(event) if event.request_id != 0 => {
+            if hook == "complete" {
+                CallClass::Control
+            } else {
+                CallClass::Event
+            }
+        }
+        _ => CallClass::Ordinary,
     }
 }

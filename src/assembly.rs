@@ -233,8 +233,12 @@ async fn assemble_selected(
     composition
         .install(REMOTE_AXES, async move {
             let axes = Arc::new(
-                crate::remote_axis::RemotePluginManager::connect(config.axis_bindings, surface)
-                    .await?,
+                crate::remote_axis::RemotePluginManager::connect(
+                    config.axis_bindings,
+                    surface,
+                    inspection.max_requests,
+                )
+                .await?,
             );
             let closing = Arc::clone(&axes);
             let _ = remote_send.send(Arc::clone(&axes));

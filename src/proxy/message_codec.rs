@@ -646,6 +646,7 @@ mod tests {
                     .with_codec(Some("codex.responses.v1".into())),
             ])
             .unwrap(),
+            32,
         )
         .await
         .unwrap();
