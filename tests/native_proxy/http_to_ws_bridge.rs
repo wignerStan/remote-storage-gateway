@@ -518,3 +518,100 @@ async fn http_to_ws_bridge_process_listener_accepts_h2_and_h1() {
         task.abort();
     }).await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn responses_without_a_matching_ws_grant_never_reach_the_http_upstream() {
+    timeout(Duration::from_secs(10), async {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let origin = listen(move |mut socket| {
+            let observed = observed.clone();
+            async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                let _ = head(&mut socket).await;
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+            }
+        }).await;
+        let dir = tempfile::tempdir().unwrap();
+        let library = artifact(dir.path());
+        for codec in [None, Some("websocket.v1"), Some("codex.responses.v1"), Some("openai.responses.v1")] {
+            let callbacks = codec.map(|id| vec![json!({"binding":"direct","path":library,"package":"worker.metadata.test","hooks":[],"message_codec":id})]).unwrap_or_default();
+            let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":callbacks})).unwrap()).await.unwrap();
+            let worker = serve_engine(proxy.clone()).await;
+            for path in ["/responses", "/v1/responses", "/backend-api/codex/responses", "/v1/response", "/responses/", "/v1/responses/", "/v1/%72esponses", "/v1/%2572esponses", "/v1//responses", "/v1/./responses", "/v1/x/../responses"] {
+                let mut client = TcpStream::connect(worker.address).await.unwrap();
+                let body = br#"{"input":[]}"#;
+                client.write_all(format!("POST {path} HTTP/1.1\r\nHost: local\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await.unwrap();
+                client.write_all(body).await.unwrap();
+                let mut response = Vec::new();
+                let _ = client.read_to_end(&mut response).await;
+                assert!(!response.starts_with(b"HTTP/1.1 200"), "Responses fell through to HTTP for codec={codec:?} path={path}");
+                assert_eq!(calls.load(Ordering::SeqCst), 0, "Responses reached upstream without a matching WS grant");
+            }
+            drop(worker);
+            proxy.shutdown().await.unwrap();
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn responses_bridge_requires_its_codec_to_match_the_path() {
+    use pingora_http::RequestHeader;
+    use proxy_pingora::http_ingress::message_codec::{CodecPlugin, Transport};
+    struct OtherPath;
+    impl CodecPlugin for OtherPath {
+        fn id(&self) -> &str {
+            "codex.responses.v1"
+        }
+        fn select_request(&self, _: &RequestHeader) -> pingora_error::Result<Option<Transport>> {
+            Ok(None)
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let origin = listen(move |_socket| {
+        let observed = observed.clone();
+        async move {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config=serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"binding":"direct","path":artifact(dir.path()),"package":"worker.metadata.test","hooks":[],"message_codec":"codex.responses.v1","message_actions":true,"message_http_bridge":true}]})).unwrap();
+    let proxy = pingora_worker::assembly::assemble_with_codecs(config, vec![Arc::new(OtherPath)])
+        .await
+        .unwrap();
+    let worker = serve_engine(proxy.clone()).await;
+    let mut socket = post_path(worker.address, "/v1/responses", br#"{"input":[]}"#).await;
+    let response = timeout(WAIT, head(&mut socket)).await.unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 403"), "{}", String::from_utf8_lossy(&response));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "bridge widened the codec path grant"
+    );
+    drop(worker);
+    proxy.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn responses_invalid_methods_and_aliases_never_reach_upstream() {
+    timeout(WAIT, async {
+        let calls=Arc::new(AtomicUsize::new(0));let observed=calls.clone();
+        let origin=listen(move |mut socket| {let observed=observed.clone();async move {
+            observed.fetch_add(1,Ordering::SeqCst);
+            let _=head(&mut socket).await;
+            let _=socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+        }}).await;
+        let dir=tempfile::tempdir().unwrap();let proxy=proxy(origin.address,dir.path()).await;let worker=serve_engine(proxy.clone()).await;
+        for (method,path,upgrade) in [("GET","/v1/responses",false),("PUT","/v1/responses",false),("POST","/v1/responses",true),("POST","/v1/response",false),("POST","/v1/responses/",false),("GET","/responses/",true),("POST","/backend-api/codex/responses/extra",false)] {
+            let mut client=TcpStream::connect(worker.address).await.unwrap();
+            let upgrade=if upgrade{"Upgrade: websocket\r\n"}else{""};
+            client.write_all(format!("{method} {path} HTTP/1.1\r\nHost: local\r\nConnection: close\r\nContent-Length: 0\r\n{upgrade}\r\n").as_bytes()).await.unwrap();
+            let mut reply=Vec::new();let _=client.read_to_end(&mut reply).await;
+            assert!(!reply.starts_with(b"HTTP/1.1 200"),"unsupported Responses carrier escaped: {method} {path}");
+            assert_eq!(calls.load(Ordering::SeqCst),0);
+        }
+        drop(worker);proxy.shutdown().await.unwrap();
+    }).await.unwrap();
+}

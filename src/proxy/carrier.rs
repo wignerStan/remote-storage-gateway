@@ -182,6 +182,15 @@ impl ProxyHttp for NativeProxy {
         if !self.control.accepting() {
             return Err(refusal(503, "worker admission closed during callbacks"));
         }
+        if (message_codec::responses_path(session.req_header().uri.path())
+            && !message_codec::responses_path(request.uri.path()))
+            || message_codec::select_http_bridge(&self.message_codecs, &request)? != bridge_index
+        {
+            return Err(refusal(
+                403,
+                "callbacks changed the Responses transport selection",
+            ));
+        }
         if let Some(index) = bridge_index {
             ctx.message_selection = Some((index, message_codec::Transport::HttpBody));
             ctx.upstream_request = Some(request);

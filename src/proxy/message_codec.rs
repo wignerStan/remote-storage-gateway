@@ -216,32 +216,133 @@ impl AsRef<dyn CodecPlugin> for CodecRegistration {
     }
 }
 
+fn responses_codec(codec: &dyn CodecPlugin) -> bool {
+    matches!(codec.id(), "codex.responses.v1" | "openai.responses.v1")
+}
+
+pub(super) fn responses_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/responses" | "/v1/responses" | "/backend-api/codex/responses"
+    )
+}
+
+fn responses_route_name(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    [
+        "/responses",
+        "/v1/responses",
+        "/backend-api/codex/responses",
+        "/response",
+        "/v1/response",
+        "/backend-api/codex/response",
+    ]
+    .into_iter()
+    .any(|route| {
+        path == route
+            || path
+                .strip_prefix(route)
+                .is_some_and(|tail| tail.starts_with('/'))
+    })
+}
+
+fn responses_family(path: &str) -> bool {
+    if responses_route_name(path) {
+        return true;
+    }
+    // Normalize only to refuse alternate spellings. Never admit a decoded or
+    // rewritten alias: an HTTP origin could otherwise normalize it after egress.
+    let mut bytes = path.as_bytes().to_vec();
+    for _ in 0..3 {
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' && index + 2 < bytes.len() {
+                let hex = |value: u8| (value as char).to_digit(16);
+                if let (Some(a), Some(b)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                    decoded.push((a * 16 + b) as u8);
+                    index += 3;
+                    continue;
+                }
+            }
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+        if decoded == bytes {
+            break;
+        }
+        bytes = decoded;
+    }
+    let decoded = String::from_utf8_lossy(&bytes);
+    let mut segments = Vec::new();
+    for segment in decoded.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            segment => segments.push(segment),
+        }
+    }
+    responses_route_name(&format!("/{}", segments.join("/")))
+}
+
+/// Responses business requests must enter a granted WS session or HTTP-to-WS
+/// bridge. Missing codecs and unsupported aliases cannot fall through to HTTP.
 pub(super) fn select_http_bridge(
     registrations: &[CodecRegistration],
     request: &RequestHeader,
 ) -> Result<Option<usize>> {
-    if request.method != http::Method::POST
-        || !matches!(
-            request.uri.path(),
-            "/responses" | "/v1/responses" | "/backend-api/codex/responses"
-        )
-    {
-        return Ok(None);
+    if !responses_path(request.uri.path()) {
+        return if responses_family(request.uri.path()) {
+            Err(refusal(404, "unsupported Responses path"))
+        } else {
+            Ok(None)
+        };
     }
+    if request.method == http::Method::GET {
+        let selected = select_request(registrations, request)?;
+        return match selected {
+            Some((index, Transport::Upgrade))
+                if responses_codec(registrations[index].codec.as_ref())
+                    && registrations[index].session_control() =>
+            {
+                Ok(None)
+            }
+            _ => Err(refusal(
+                403,
+                "Responses requires a granted WebSocket session",
+            )),
+        };
+    }
+    if request.method != http::Method::POST {
+        return Err(refusal(405, "unsupported Responses method"));
+    }
+    if request.headers.contains_key("upgrade") {
+        return Err(refusal(400, "HTTP Responses cannot request an upgrade"));
+    }
+    // Ask the trusted codec whether it supports WS on this exact path. HTTP
+    // clients have no upgrade header; that does not widen the codec's routes.
+    let mut upgrade = request.clone();
+    upgrade.method = http::Method::GET;
+    upgrade.version = http::Version::HTTP_11;
+    upgrade.insert_header("upgrade", "websocket")?;
+    upgrade.insert_header("connection", "Upgrade")?;
     let mut selected = None;
     for (index, registration) in registrations.iter().enumerate() {
         if registration.http_bridge()
-            && matches!(
-                registration.codec.id(),
-                "codex.responses.v1" | "openai.responses.v1"
-            )
+            && registration.session_control()
+            && responses_codec(registration.codec.as_ref())
+            && registration.codec.select_request(&upgrade)? == Some(Transport::Upgrade)
         {
             if selected.replace(index).is_some() {
                 return Err(refusal(500, "ambiguous HTTP bridge codec grant"));
             }
         }
     }
-    Ok(selected)
+    selected
+        .map(Some)
+        .ok_or_else(|| refusal(403, "Responses requires a matching HTTP-to-WebSocket grant"))
 }
 
 pub(crate) fn select_request(
