@@ -488,10 +488,11 @@ impl NativeProxy {
                             generation, decision = "disconnect", "upstream generation retired");
                     }
                     response_hold.apply(&plan)?;
-                    validate_terminal_hold(&message, &plan, !held.is_empty())?;
-                    if plan.hold == "buffer" || response_hold.buffers(&message, &plan) {
+                    let selected = plan.replacement.as_ref().unwrap_or(&message);
+                    validate_terminal_hold(selected, &plan, !held.is_empty())?;
+                    if plan.hold == "buffer" || response_hold.buffers(selected, &plan) {
                         held.push(retain_message(
-                            plan.replacement.as_ref().unwrap_or(&message),
+                            selected,
                             &held_bytes,
                             &held_count,
                             reservation

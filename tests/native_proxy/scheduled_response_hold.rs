@@ -8,6 +8,9 @@ use std::{
     process::Command,
 };
 
+// Includes C compilation and four native scenarios. Wire assertions keep their own short bounds.
+const FIXTURE_WAIT: Duration = Duration::from_secs(20);
+
 const CREATE: &[u8] = br#"{"type":"response.create","model":"m","input":[]}"#;
 const BEFORE: &[u8] = br#"{"type":"response.output_text.delta","delta":"before"}"#;
 const AFTER1: &[u8] = br#"{"type":"response.output_text.delta","delta":"after-one"}"#;
@@ -25,13 +28,25 @@ fn artifact(dir: &Path, hold: &str, http: bool) -> PathBuf {
     } else {
         "response.create/"
     };
-    let delay = if hold == "allow" { 0 } else { 200 };
-    let terminal_action = if hold == "allow" {
+    let delay = if matches!(hold, "allow" | "replacement_terminal") {
+        0
+    } else {
+        200
+    };
+    let terminal_action = if matches!(hold, "allow" | "replacement_terminal") {
         String::new()
     } else {
         format!(
             r#"if (++completed == 1) return action("{{\"version\":1,\"decision\":\"forward\",\"hold\":\"{hold}\"}}", "", out);"#
         )
+    };
+    let replacement_action = if hold == "replacement_terminal" {
+        format!(
+            r#"if (begins(method, "openai.responses.v1/response.created/")) return action("{{\"version\":1,\"decision\":\"forward\"}}", {}, out);"#,
+            serde_json::to_string(std::str::from_utf8(COMPLETE).unwrap()).unwrap()
+        )
+    } else {
+        String::new()
     };
     // The first request has a near-future boundary. The next request explicitly
     // clears it and replaces the generation. Unexpected delta callbacks fail.
@@ -45,6 +60,7 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
         snprintf(metadata, sizeof(metadata), "{{\"version\":1,\"decision\":\"forward\",\"upstream\":\"%s\",\"hold_response_at_unix_ms\":%llu}}", requests == 1 ? "connect" : "replace", at);
         return action(metadata, "{{\"type\":\"response.create\",\"model\":\"m\",\"input\":[]}}", out);
     }}
+    {replacement_action}
     if (begins(method, "openai.responses.v1/response.completed/")) {{
         {terminal_action}
     }} else if (begins(method, "openai.responses.v1/response.event/") || begins(method, "openai.responses.v1/response.output_text.delta/")) {{
@@ -126,7 +142,7 @@ async fn send(socket: &mut TcpStream, body: &[u8]) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn allowed_terminal_never_waits_on_schedule_and_missing_release_fails_closed() {
-    timeout(WAIT, async {
+    timeout(FIXTURE_WAIT, async {
         for http in [false, true] {
             for held in [false, true] {
                 let origin = listen(move |mut socket| async move {
@@ -161,8 +177,44 @@ async fn allowed_terminal_never_waits_on_schedule_and_missing_release_fails_clos
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn granted_terminal_replacement_obeys_schedule_and_pending_hold_rules() {
+    timeout(FIXTURE_WAIT, async {
+        for http in [false, true] {
+            for held in [false, true] {
+                let origin = listen(move |mut socket| async move {
+                    upstream(&mut socket).await;
+                    if held { send(&mut socket, AFTER1).await; }
+                    send(&mut socket, br#"{"type":"response.created","response":{"id":"pending"}}"#).await;
+                    let mut tail = Vec::new(); let _ = socket.read_to_end(&mut tail).await;
+                }).await;
+                let dir = tempfile::tempdir().unwrap();
+                let proxy = proxy(origin.address, dir.path(), "replacement_terminal", http).await;
+                let worker = serve_engine(proxy.clone()).await;
+                let mut client = TcpStream::connect(worker.address).await.unwrap();
+                if http {
+                    let body = br#"{"model":"m","input":[]}"#;
+                    client.write_all(format!("POST /v1/responses HTTP/1.1\r\nHost: local\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+                    client.write_all(body).await.unwrap();
+                    let mut reply = Vec::new(); client.read_to_end(&mut reply).await.unwrap();
+                    assert!(reply.starts_with(if held { b"HTTP/1.1 502" } else { b"HTTP/1.1 200" }));
+                    if !held { assert!(String::from_utf8_lossy(&reply).contains("done")); }
+                    assert!(!String::from_utf8_lossy(&reply).contains("after-one"));
+                } else {
+                    client.write_all(b"GET /v1/responses HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();
+                    assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
+                    client.write_all(&websocket::encode_client(1, CREATE).unwrap()).await.unwrap();
+                    let expected = if held { (8, 1011_u16.to_be_bytes().to_vec()) } else { (1, COMPLETE.to_vec()) };
+                    assert_eq!(frame(&mut client, false).await, expected);
+                }
+                drop(client); drop(worker); proxy.shutdown().await.unwrap();
+            }
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ws_scheduled_hold_preserves_delta_bypass_release_order_discard_and_next_generation() {
-    timeout(WAIT, async {
+    timeout(FIXTURE_WAIT, async {
         for hold in ["release", "discard"] {
             let sent = Arc::new(tokio::sync::Notify::new());
             let finish = Arc::new(tokio::sync::Notify::new());
@@ -213,7 +265,7 @@ async fn ws_scheduled_hold_preserves_delta_bypass_release_order_discard_and_next
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http_scheduled_hold_preserves_sse_delta_bypass_and_release_order_or_discard() {
-    timeout(WAIT, async {
+    timeout(FIXTURE_WAIT, async {
         for hold in ["release", "discard"] {
             let sent = Arc::new(tokio::sync::Notify::new());
             let finish = Arc::new(tokio::sync::Notify::new());

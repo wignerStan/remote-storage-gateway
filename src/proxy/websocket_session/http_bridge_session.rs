@@ -226,9 +226,9 @@ impl Source<'_> {
             if plan.hold == "discard" {
                 self.held.clear();
             }
-            validate_terminal_hold(&message, &plan, !self.held.is_empty())?;
             let selected = plan.replacement.as_ref().unwrap_or(&message);
-            if plan.hold == "buffer" || self.response_hold.buffers(&message, &plan) {
+            validate_terminal_hold(selected, &plan, !self.held.is_empty())?;
+            if plan.hold == "buffer" || self.response_hold.buffers(selected, &plan) {
                 let semantic = selected
                     .message
                     .as_ref()
