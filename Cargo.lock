@@ -699,6 +699,7 @@ dependencies = [
  "serde_ignored",
  "serde_json",
  "serde_yaml_ng",
+ "sha2",
  "thiserror 2.0.20",
  "toml",
 ]
@@ -2771,6 +2772,7 @@ dependencies = [
  "plugin-abi",
  "plugin-lifecycle",
  "plugin-loading",
+ "plugin-registry",
  "proxy-pingora",
  "proxy-protocols",
  "serde",
@@ -2810,6 +2812,7 @@ version = "0.1.0"
 dependencies = [
  "admission-gate",
  "futures",
+ "plugin-registry",
  "tokio",
 ]
 
@@ -2832,6 +2835,10 @@ dependencies = [
  "wasm-sandbox",
  "wasmtime",
 ]
+
+[[package]]
+name = "plugin-registry"
+version = "0.1.0"
 
 [[package]]
 name = "plugin-schema"

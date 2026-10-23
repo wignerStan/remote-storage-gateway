@@ -25,6 +25,7 @@ action-router = { path = "../infra/rust/crates/networking/action-router" }
 action-execution = { path = "../infra/rust/crates/networking/action-execution" }
 network-local-control = { path = "../infra/rust/crates/networking/local-control" }
 network-actions = { path = "../infra/rust/crates/networking/actions" }
+plugin-registry = { path = "../infra/rust/crates/plugins/registry" }
 plugin-lifecycle = { path = "../infra/rust/crates/plugins/lifecycle" }
 plugin-loading = { path = "../infra/rust/crates/plugins/loading", features = ["async"] }
 proxy-protocols = { path = "../infra/rust/crates/networking/proxy/protocols", default-features = false }
@@ -56,4 +57,4 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 tempfile = "3"
 
 [patch.crates-io]
-pingora-proxy = { path = "../infra/rust/vendor/pingora-proxy" }
+pingora-proxy = { path = "../infra/rust/.patched/pingora-proxy-0.8.1" }

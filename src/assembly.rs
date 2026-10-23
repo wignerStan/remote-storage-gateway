@@ -257,7 +257,7 @@ async fn assemble_selected(
             };
             for (index, (callback, input)) in callbacks.into_iter().enumerate() {
                 let subscriber = match memory
-                    .subscribe(plugin_lifecycle::manager::RegistrationSpec {
+                    .subscribe(plugin_registry::RegistrationSpec {
                         name: format!("callback-{index}"),
                         contract: "worker.metadata.v1".into(),
                     })
