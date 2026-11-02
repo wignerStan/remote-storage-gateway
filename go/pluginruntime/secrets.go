@@ -6,10 +6,11 @@ import (
 	"errors"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
 )
 
 func descriptorConfig(a descriptor.Implementation, p json.RawMessage, s map[string]string) error {
-	return descriptor.ValidateConfig(a, p, s)
+	return admission.ValidateConfig(a, p, s)
 }
 
 type scopedSecrets struct {
@@ -20,8 +21,8 @@ type scopedSecrets struct {
 
 func (s scopedSecrets) Resolve(ctx context.Context, name string) (client.Secret, error) {
 	declared := false
-	for _, f := range s.a.ConfigSchema.Fields {
-		if f.Path == name && f.Secret {
+	for _, f := range admission.SecretFields(s.a) {
+		if f.Name == name {
 			declared = true
 			break
 		}

@@ -1,20 +1,23 @@
-package management
+package httpapi
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"github.com/wignerStan/infra/go/code/schema"
+	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
+	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
+	"github.com/wignerStan/network-data-plane-worker/go/management"
+	"github.com/wignerStan/network-data-plane-worker/go/pluginruntime"
+	"github.com/wignerStan/network-data-plane-worker/go/worker"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
-
-	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
-	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
-	"github.com/wignerStan/network-data-plane-worker/go/pluginruntime"
-	"github.com/wignerStan/network-data-plane-worker/go/worker"
 )
 
 type factory struct {
@@ -22,8 +25,12 @@ type factory struct {
 	preparations atomic.Int32
 }
 
-func (f *factory) Descriptor() descriptor.Descriptor   { return f.record.Descriptor }
-func (f *factory) DescriptorRecord() descriptor.Record { return f.record }
+func (f *factory) Descriptor() descriptor.Descriptor {
+	return f.record.Descriptor
+}
+func (f *factory) DescriptorRecord() descriptor.Record {
+	return f.record
+}
 func (f *factory) Prepare(context.Context, client.PluginConfig) (client.Candidate, error) {
 	f.preparations.Add(1)
 	return candidate{}, nil
@@ -31,13 +38,21 @@ func (f *factory) Prepare(context.Context, client.PluginConfig) (client.Candidat
 
 type candidate struct{}
 
-func (candidate) Validate(context.Context) error  { return nil }
-func (candidate) Abort(context.Context) error     { return nil }
-func (candidate) Publish() (client.Client, error) { return instance{}, nil }
+func (candidate) Validate(context.Context) error {
+	return nil
+}
+func (candidate) Abort(context.Context) error {
+	return nil
+}
+func (candidate) Publish() (client.Client, error) {
+	return instance{}, nil
+}
 
 type instance struct{}
 
-func (instance) Close(context.Context) error { return nil }
+func (instance) Close(context.Context) error {
+	return nil
+}
 func (instance) Stat(context.Context, client.ObjectRef) (client.ObjectInfo, error) {
 	return client.ObjectInfo{}, client.ErrUnsupported
 }
@@ -50,15 +65,24 @@ func (instance) Open(context.Context, client.OpenRequest) (client.ReadPlan, erro
 func (instance) Put(context.Context, client.PutRequest) (client.PutResult, error) {
 	return client.PutResult{}, client.ErrUnsupported
 }
-func (instance) Delete(context.Context, client.ObjectRef) error { return client.ErrUnsupported }
-
+func (instance) Delete(context.Context, client.ObjectRef) error {
+	return client.ErrUnsupported
+}
 func setup(t *testing.T) (*Handler, *pluginruntime.Manager, *factory) {
 	t.Helper()
-	r, err := descriptor.Encode(descriptor.Descriptor{Schema: descriptor.Schema, PluginID: "test.client", PluginVersion: "1", Contract: client.Contract, Runtime: "go", BuildDigest: "sha256:" + strings.Repeat("a", 64), Implementations: []descriptor.Implementation{{ID: "test", ConfigSchema: descriptor.ConfigSchema{Version: 1}, Capabilities: []string{"stat"}}}})
+	doc, err := schema.Derive[struct{}](schema.Identity{ID: "worker.test.config", Version: "1", Owner: "network-data-plane-worker"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err = descriptor.Decode(append([]byte(" \n"), r.Bytes...))
+	configSchema, err := json.Marshal(doc.Schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := admission.Encode(descriptor.Descriptor{Schema: descriptor.Schema, PluginID: "test.client", PluginVersion: "1", Contract: client.Contract, Runtime: "go", BuildDigest: "sha256:" + strings.Repeat("a", 64), Implementations: []descriptor.Implementation{{ID: "test", ConfigSchema: configSchema, Capabilities: []string{"stat"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err = admission.Decode(append([]byte(" \n"), r.Bytes...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +95,9 @@ func setup(t *testing.T) (*Handler, *pluginruntime.Manager, *factory) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { m.Close(context.Background()) })
+	t.Cleanup(func() {
+		m.Close(context.Background())
+	})
 	manifest, err := worker.Capabilities(registry)
 	if err != nil {
 		t.Fatal(err)
@@ -82,12 +108,11 @@ func setup(t *testing.T) (*Handler, *pluginruntime.Manager, *factory) {
 	}
 	return h, m, f
 }
-
 func TestSDKPassiveDiscoveryExactDescriptorAndCAS(t *testing.T) {
 	h, m, f := setup(t)
 	s := httptest.NewServer(h)
 	defer s.Close()
-	c, err := NewClient(s.URL, s.Client())
+	c, err := management.NewClient(s.URL, s.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +120,20 @@ func TestSDKPassiveDiscoveryExactDescriptorAndCAS(t *testing.T) {
 	manifest, err := c.Manifest(ctx)
 	if err != nil || len(manifest.PluginDescriptors) != 1 {
 		t.Fatal(manifest, err)
+	}
+	openAPI, err := c.OpenAPI(ctx)
+	if err != nil {
+		t.Fatal("generated OpenAPI unavailable", err)
+	}
+	var document struct {
+		OpenAPI    string                                `json:"openapi"`
+		Paths      map[string]map[string]json.RawMessage `json:"paths"`
+		Components struct {
+			Schemas map[string]json.RawMessage `json:"schemas"`
+		} `json:"components"`
+	}
+	if json.Unmarshal(openAPI, &document) != nil || len(document.Paths) != len(h.Routes()) || document.Paths[management.ClientPrefix+"{name}"]["post"] == nil || document.Components.Schemas["ReplaceRequest"] == nil {
+		t.Fatal("typed routes and DTOs were not generated into OpenAPI")
 	}
 	r, err := c.Descriptor(ctx, manifest.PluginDescriptors[0].DescriptorDigest)
 	if err != nil || !bytes.Equal(r.Bytes, f.record.Bytes) {
@@ -113,7 +152,7 @@ func TestSDKPassiveDiscoveryExactDescriptorAndCAS(t *testing.T) {
 	if _, err = c.Replace(ctx, selection.Name, expected, selection); err == nil {
 		t.Fatal("stale CAS accepted")
 	} else {
-		var status *StatusError
+		var status *management.StatusError
 		if !errors.As(err, &status) || status.StatusCode != http.StatusConflict {
 			t.Fatal(err)
 		}
@@ -122,23 +161,22 @@ func TestSDKPassiveDiscoveryExactDescriptorAndCAS(t *testing.T) {
 	if err != nil || len(state) != 1 || state[0].Version != v {
 		t.Fatal(state, err)
 	}
-	if _, err = c.Replace(ctx, "another", v, selection); !errors.Is(err, ErrInvalid) {
+	if _, err = c.Replace(ctx, "another", v, selection); !errors.Is(err, management.ErrInvalid) {
 		t.Fatal("mismatched route identity accepted", err)
 	}
 }
-
 func TestRegisteredRoutesFailClosed(t *testing.T) {
 	h, _, _ := setup(t)
 	for _, test := range []struct {
 		method, path, body string
 		status             int
 	}{
-		{"POST", ManifestPath, "{}", 405},
+		{"POST", management.ManifestPath, "{}", 405},
 		{"GET", "/v1/object/open", "", 404},
-		{"POST", ClientPrefix + "unknown", "{}", 404},
-		{"POST", ClientPrefix + "account", `{"expected":{},"expected":{},"selection":{}}`, 400},
-		{"GET", ObservedPath + "?target=http://arbitrary.invalid", "", 400},
-		{"POST", ClientPrefix + "account", strings.Repeat(" ", descriptor.MaxBytes+1), 400},
+		{"POST", management.ClientPrefix + "unknown", "{}", 404},
+		{"POST", management.ClientPrefix + "account", `{"expected":{},"expected":{},"selection":{}}`, 400},
+		{"GET", management.ObservedPath + "?target=http://arbitrary.invalid", "", 400},
+		{"POST", management.ClientPrefix + "account", strings.Repeat(" ", descriptor.MaxBytes+1), 413},
 	} {
 		r := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
 		r.Header.Set("Content-Type", "application/json")
@@ -148,36 +186,38 @@ func TestRegisteredRoutesFailClosed(t *testing.T) {
 			t.Fatalf("%s %s: %d", test.method, test.path, w.Code)
 		}
 	}
-	routes := RouteDefinitions()
+	routes := h.Routes()
+	firstPath := routes[0].Path
 	routes[0].Path = "tampered"
-	if RouteDefinitions()[0].Path != ManifestPath || !IsPath("/v1/unknown") || IsPath("/dav/file") {
+	if h.Routes()[0].Path != firstPath || !management.IsPath("/v1/unknown") || management.IsPath("/dav/file") {
 		t.Fatal("route definitions not isolated")
 	}
 }
-
 func TestSDKRejectsDigestMismatchRedirectsAndRemoteDiagnostics(t *testing.T) {
 	_, _, f := setup(t)
 	var redirected atomic.Int32
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { redirected.Add(1) }))
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected.Add(1)
+	}))
 	defer target.Close()
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, DescriptorPrefix) {
+		if strings.HasPrefix(r.URL.Path, management.DescriptorPrefix) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(f.record.Bytes)
 			return
 		}
-		if r.URL.Path == ManifestPath {
+		if r.URL.Path == management.ManifestPath {
 			http.Redirect(w, r, target.URL, http.StatusFound)
 			return
 		}
 		http.Error(w, "provider-token-secret", http.StatusForbidden)
 	}))
 	defer s.Close()
-	c, err := NewClient(s.URL, s.Client())
+	c, err := management.NewClient(s.URL, s.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = c.Descriptor(context.Background(), "sha256:"+strings.Repeat("b", 64)); !errors.Is(err, ErrInvalid) {
+	if _, err = c.Descriptor(context.Background(), "sha256:"+strings.Repeat("b", 64)); !errors.Is(err, management.ErrInvalid) {
 		t.Fatal("wrong descriptor approved", err)
 	}
 	if _, err = c.Manifest(context.Background()); err == nil || redirected.Load() != 0 {
@@ -187,23 +227,22 @@ func TestSDKRejectsDigestMismatchRedirectsAndRemoteDiagnostics(t *testing.T) {
 		t.Fatal("remote diagnostic escaped", err)
 	}
 	for _, url := range []string{s.URL + "/path", "http://user:password@localhost", "file:///tmp/x", s.URL + "?x=y"} {
-		if _, err = NewClient(url, nil); err == nil {
+		if _, err = management.NewClient(url, nil); err == nil {
 			t.Fatal("unsafe origin", url)
 		}
 	}
 }
-
 func TestSDKBoundsResponseAndCancellation(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, strings.Repeat(" ", descriptor.MaxBytes+1))
 	}))
 	defer s.Close()
-	c, err := NewClient(s.URL, s.Client())
+	c, err := management.NewClient(s.URL, s.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = c.Observed(context.Background()); !errors.Is(err, ErrInvalid) {
+	if _, err = c.Observed(context.Background()); !errors.Is(err, management.ErrInvalid) {
 		t.Fatal("oversized frame admitted", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())

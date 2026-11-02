@@ -47,11 +47,19 @@ without reading secrets or constructing provider clients. `--print-capabilities`
 reports the selected lanes and approved artifact descriptors. Product-specific
 data listeners belong to their ingress composition, not to the inspection CLI.
 
-The public `management` package provides the authenticated-composition handler
-and typed control-plane SDK for manifest, exact descriptor, observed generation,
-and CAS replacement routes. `RouteDefinitions()` is the authority for those
-registrations. This port carries bounded administrative metadata; provider
-management SDKs and ordinary streaming object operations remain separate.
+The public `management` package provides the typed control-plane SDK. Its
+`management/httpapi` adapter registers typed operations through Infra's common
+Huma binding on the standard HTTP mux and publishes OpenAPI at `/v1/openapi.json` and
+generated component schemas under `/v1/schemas`. Its registered OpenAPI
+operations are the route authority. This port carries bounded administrative
+metadata; ordinary streaming object operations retain their separate port.
+
+Plugin descriptor envelope v2 carries standard JSON Schema in `config_schema`.
+Concrete plugin adapters generate it from their own public Go configuration
+types with Huma. The Worker retains the neutral document and interprets standard
+`writeOnly` secret annotations; it has no competing field-description schema.
+The old v1 field-list representation is rejected and requires fresh artifact
+and descriptor approval after migration.
 
 The Rust application preserves its existing native L7 proxy and adds an
 independently selectable static TCP L4 entry. Select `l4`, `l7`, or `l4,l7`

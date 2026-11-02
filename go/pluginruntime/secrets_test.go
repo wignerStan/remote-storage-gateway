@@ -30,10 +30,13 @@ type optionalSecretFactory struct {
 	*fakeFactory
 	published atomic.Int32
 }
+type optionalConfig struct {
+	Token string `json:"token,omitempty" writeOnly:"true"`
+}
 
 func (f *optionalSecretFactory) Descriptor() descriptor.Descriptor {
 	d := f.fakeFactory.Descriptor()
-	d.Implementations[0].ConfigSchema.Fields = []descriptor.Field{{Path: "token", Type: "string", Secret: true, WriteOnly: true}}
+	d.Implementations[0].ConfigSchema = generatedConfig[optionalConfig]()
 	return d
 }
 func (f *optionalSecretFactory) Prepare(ctx context.Context, cfg client.PluginConfig) (client.Candidate, error) {
@@ -101,7 +104,7 @@ func TestOptionalSecretAbsenceAndUnavailableExplicitReference(t *testing.T) {
 }
 
 func TestScopedSecretsClosesPartialValuesAndRejectsMissingValues(t *testing.T) {
-	implementation := descriptor.Implementation{ConfigSchema: descriptor.ConfigSchema{Fields: []descriptor.Field{{Path: "token", Secret: true}}}}
+	implementation := descriptor.Implementation{ConfigSchema: generatedConfig[optionalConfig]()}
 	for _, test := range []struct {
 		name                   string
 		sourceError, errorWant error

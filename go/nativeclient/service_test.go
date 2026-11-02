@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/wignerStan/infra/go/code/schema"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"io"
@@ -19,8 +20,20 @@ type testFactory struct {
 	c        *testClient
 }
 
+func generatedConfig[T any]() descriptor.ConfigSchema {
+	doc, err := schema.Derive[T](schema.Identity{ID: "worker.test.config", Version: "1", Owner: "network-data-plane-worker"})
+	if err != nil {
+		panic(err)
+	}
+	b, err := json.Marshal(doc.Schema)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
 func (f *testFactory) Descriptor() descriptor.Descriptor {
-	return descriptor.Descriptor{Schema: descriptor.Schema, PluginID: "test.native", PluginVersion: "1", Contract: client.Contract, Runtime: "go", BuildDigest: "sha256:" + string(bytes.Repeat([]byte("a"), 64)), Implementations: []descriptor.Implementation{{ID: "fake", ConfigSchema: descriptor.ConfigSchema{Version: 1}, Capabilities: []string{"stat", "list", "open", "put", "delete", "range", "unknown-size-put"}}}}
+	return descriptor.Descriptor{Schema: descriptor.Schema, PluginID: "test.native", PluginVersion: "1", Contract: client.Contract, Runtime: "go", BuildDigest: "sha256:" + string(bytes.Repeat([]byte("a"), 64)), Implementations: []descriptor.Implementation{{ID: "fake", ConfigSchema: generatedConfig[struct{}](), Capabilities: []string{"stat", "list", "open", "put", "delete", "range", "unknown-size-put"}}}}
 }
 func (f *testFactory) Prepare(context.Context, client.PluginConfig) (client.Candidate, error) {
 	f.prepared.Add(1)

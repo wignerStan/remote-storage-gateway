@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
 	"io"
 	"mime"
 	"net/http"
@@ -12,7 +13,6 @@ import (
 
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	workercontract "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
-	"github.com/wignerStan/network-data-plane-worker/go/pluginruntime"
 )
 
 type Client struct {
@@ -55,6 +55,9 @@ func (c *Client) call(ctx context.Context, method, path string, input any) ([]by
 		return nil, ErrInvalid
 	}
 	r.Header.Set("Accept", "application/json")
+	if path == OpenAPIPath {
+		r.Header.Set("Accept", "application/openapi+json")
+	}
 	if input != nil {
 		r.Header.Set("Content-Type", "application/json")
 	}
@@ -70,11 +73,31 @@ func (c *Client) call(ctx context.Context, method, path string, input any) ([]by
 		return nil, &StatusError{response.StatusCode}
 	}
 	media, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if err != nil || media != "application/json" {
+	if err != nil || (media != "application/json" && !(path == OpenAPIPath && media == "application/openapi+json")) {
 		return nil, ErrInvalid
 	}
 	b, err := io.ReadAll(io.LimitReader(response.Body, descriptor.MaxBytes+1))
 	if err != nil || len(b) == 0 || len(b) > descriptor.MaxBytes {
+		return nil, ErrInvalid
+	}
+	return b, nil
+}
+
+// OpenAPI retrieves the exact generated API document from the Worker adapter.
+func (c *Client) OpenAPI(ctx context.Context) (json.RawMessage, error) {
+	b, err := c.call(ctx, http.MethodGet, OpenAPIPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var doc map[string]any
+	if admission.StrictJSON(b, &doc) != nil || doc == nil {
+		return nil, ErrInvalid
+	}
+	version, _ := doc["openapi"].(string)
+	if version != "3.1.0" && version != "3.0.3" {
+		return nil, ErrInvalid
+	}
+	if _, ok := doc["paths"].(map[string]any); !ok {
 		return nil, ErrInvalid
 	}
 	return b, nil
@@ -86,7 +109,7 @@ func (c *Client) Manifest(ctx context.Context) (workercontract.Manifest, error) 
 	if err != nil {
 		return out, err
 	}
-	if descriptor.StrictJSON(b, &out) != nil || out.Schema != workercontract.CapabilitySchema || !descriptor.ValidDigest(out.BuildDigest) || len(out.PluginDescriptors) > 64 {
+	if admission.StrictJSON(b, &out) != nil || out.Schema != workercontract.CapabilitySchema || !descriptor.ValidDigest(out.BuildDigest) || len(out.PluginDescriptors) > 64 {
 		return workercontract.Manifest{}, ErrInvalid
 	}
 	supported := false
@@ -114,20 +137,20 @@ func (c *Client) Descriptor(ctx context.Context, digest string) (descriptor.Reco
 	if err != nil {
 		return descriptor.Record{}, err
 	}
-	record, err := descriptor.Decode(b)
+	record, err := admission.Decode(b)
 	if err != nil || record.Digest != digest {
 		return descriptor.Record{}, ErrInvalid
 	}
 	return record, nil
 }
 
-func (c *Client) Observed(ctx context.Context) ([]pluginruntime.Observed, error) {
+func (c *Client) Observed(ctx context.Context) ([]workercontract.Observed, error) {
 	b, err := c.call(ctx, http.MethodGet, ObservedPath, nil)
 	if err != nil {
 		return nil, err
 	}
-	var out []pluginruntime.Observed
-	if descriptor.StrictJSON(b, &out) != nil || out == nil || len(out) > 4096 {
+	var out []workercontract.Observed
+	if admission.StrictJSON(b, &out) != nil || out == nil || len(out) > 4096 {
 		return nil, ErrInvalid
 	}
 	seen := map[string]bool{}
@@ -142,18 +165,18 @@ func (c *Client) Observed(ctx context.Context) ([]pluginruntime.Observed, error)
 
 // Replace sends one CAS attempt and never retries. A timeout is ambiguous:
 // consult Observed before deciding whether to submit another desired revision.
-func (c *Client) Replace(ctx context.Context, name string, expected pluginruntime.Version, selection pluginruntime.Selection) (pluginruntime.Version, error) {
+func (c *Client) Replace(ctx context.Context, name string, expected workercontract.Version, selection workercontract.Selection) (workercontract.Version, error) {
 	request := ReplaceRequest{expected, selection}
 	if request.validate(name) != nil {
-		return pluginruntime.Version{}, ErrInvalid
+		return workercontract.Version{}, ErrInvalid
 	}
 	b, err := c.call(ctx, http.MethodPost, ClientPrefix+name, request)
 	if err != nil {
-		return pluginruntime.Version{}, err
+		return workercontract.Version{}, err
 	}
-	var out pluginruntime.Version
-	if descriptor.StrictJSON(b, &out) != nil || out.Incarnation != expected.Incarnation || out.Generation <= expected.Generation || out.DescriptorDigest != selection.DescriptorDigest || (out.ArtifactDigest != "" && !descriptor.ValidDigest(out.ArtifactDigest)) {
-		return pluginruntime.Version{}, ErrInvalid
+	var out workercontract.Version
+	if admission.StrictJSON(b, &out) != nil || out.Incarnation != expected.Incarnation || out.Generation <= expected.Generation || out.DescriptorDigest != selection.DescriptorDigest || (out.ArtifactDigest != "" && !descriptor.ValidDigest(out.ArtifactDigest)) {
+		return workercontract.Version{}, ErrInvalid
 	}
 	return out, nil
 }

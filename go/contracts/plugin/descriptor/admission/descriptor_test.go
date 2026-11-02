@@ -1,13 +1,32 @@
-package descriptor
+package admission
 
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/wignerStan/infra/go/code/schema"
+	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"testing"
 )
 
-func valid() Descriptor {
-	return Descriptor{Schema: Schema, PluginID: "test.client", PluginVersion: "1.0.0", Contract: "network-data-plane-worker/client/v1", Runtime: "go", BuildDigest: "sha256:" + string(bytes.Repeat([]byte("a"), 64)), Implementations: []Implementation{{ID: "adapter", ConfigSchema: ConfigSchema{Version: 1, Fields: []Field{{Path: "endpoint", Type: "string", Required: true}, {Path: "password", Type: "string", Secret: true, WriteOnly: true}}}, Capabilities: []string{"stat", "open", "put"}}}}
+type publicConfig struct {
+	Endpoint string `json:"endpoint"`
+	Password string `json:"password,omitempty" writeOnly:"true"`
+}
+
+func generatedConfig[T any]() descriptor.ConfigSchema {
+	doc, err := schema.Derive[T](schema.Identity{ID: "worker.test.config", Version: "1", Owner: "network-data-plane-worker"})
+	if err != nil {
+		panic(err)
+	}
+	b, err := json.Marshal(doc.Schema)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func valid() descriptor.Descriptor {
+	return descriptor.Descriptor{Schema: descriptor.Schema, PluginID: "test.client", PluginVersion: "1.0.0", Contract: "network-data-plane-worker/client/v1", Runtime: "go", BuildDigest: "sha256:" + string(bytes.Repeat([]byte("a"), 64)), Implementations: []descriptor.Implementation{{ID: "adapter", ConfigSchema: generatedConfig[publicConfig](), Capabilities: []string{"stat", "open", "put"}}}}
 }
 func TestExactDigestAndSchemaValidation(t *testing.T) {
 	d := valid()
@@ -33,7 +52,11 @@ func TestExactDigestAndSchemaValidation(t *testing.T) {
 			t.Fatal("malformed descriptor admitted")
 		}
 	}
-	d.Implementations[0].ConfigSchema.Fields[1].Default = json.RawMessage(`"plaintext"`)
+	legacy := bytes.Replace(again.Bytes, []byte(descriptor.Schema), []byte("network-data-plane-worker/plugin-descriptor/v1"), 1)
+	if _, err := Decode(legacy); err == nil {
+		t.Fatal("legacy envelope was accepted without reapproval")
+	}
+	d.Implementations[0].ConfigSchema = bytes.Replace(d.Implementations[0].ConfigSchema, []byte(`"writeOnly":true`), []byte(`"writeOnly":true,"default":"plaintext"`), 1)
 	if _, e := Encode(d); e == nil {
 		t.Fatal("secret default admitted")
 	}

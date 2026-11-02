@@ -5,12 +5,11 @@ package management
 
 import (
 	"errors"
-	"net/http"
 	"regexp"
 	"strings"
 
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
-	"github.com/wignerStan/network-data-plane-worker/go/pluginruntime"
+	workercontract "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 )
 
 const Contract = "network-data-plane-worker/management/v1"
@@ -18,6 +17,7 @@ const ManifestPath = "/v1/manifest"
 const DescriptorPrefix = "/v1/descriptors/"
 const ObservedPath = "/v1/state"
 const ClientPrefix = "/v1/clients/"
+const OpenAPIPath = "/v1/openapi.json"
 
 // Route describes a Worker-owned registration. Provider IDs and configuration
 // fields belong to exact plugin descriptors, not to the management router.
@@ -26,15 +26,6 @@ type Route struct {
 	Method   string `json:"method"`
 	Path     string `json:"path"`
 	Contract string `json:"contract"`
-}
-
-func RouteDefinitions() []Route {
-	return []Route{
-		{"worker.manifest", http.MethodGet, ManifestPath, Contract},
-		{"worker.descriptor", http.MethodGet, DescriptorPrefix + "{digest}", Contract},
-		{"worker.observed", http.MethodGet, ObservedPath, Contract},
-		{"worker.client.replace", http.MethodPost, ClientPrefix + "{name}", Contract},
-	}
 }
 
 // IsPath reserves the versioned control namespace, including unknown routes so
@@ -46,8 +37,8 @@ var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 func ValidName(name string) bool { return namePattern.MatchString(name) }
 
 type ReplaceRequest struct {
-	Expected  pluginruntime.Version   `json:"expected"`
-	Selection pluginruntime.Selection `json:"selection"`
+	Expected  workercontract.Version   `json:"expected"`
+	Selection workercontract.Selection `json:"selection"`
 }
 
 func (r ReplaceRequest) validate(name string) error {
