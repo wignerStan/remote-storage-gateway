@@ -16,6 +16,14 @@ regenerable; it is not a backup or a stable pathname API. Stream cancellation
 keeps peer reads alive and generation retirement settles owned handles before
 removing the cache directory.
 
+Cloud backend construction and object operations belong to Infra's
+`go/storage/cloud`; optional local materialization belongs to
+`go/storage/vfs`. This product keeps the Worker protocol adapter and plugin
+publication. The selected Infra `go/go.mod` supplies rclone's Go package version;
+its `go.sum` verifies integrity, and its ordered patches are applied to an
+external copy of that module. There is no rclone Gitlink or commit pin. Only
+OpenList and its frontend use the pristine Git source relationships here.
+
 Schemas are derived by each plugin entry from its implementation's typed config
 models. Runtime adapters receive frozen descriptor values. The existing Worker
 continues to own the versioned descriptor, client port and native lifecycle
@@ -38,8 +46,9 @@ native `.so` clients. `make test` exercises the derived source and real native
 artifacts. Images use native Buildbarn `rules_img` targets; image-input staging
 requires clean source commits and verified build receipts. No Dockerfile runner,
 BuildKit or Podman is involved. Source pins, patch hashes and resulting trees are
-recorded in `.git-source-relationships/`; see `build/README.md` for individual
-stages and execution settings.
+recorded in `.git-source-relationships/` for OpenList/UI, and in the selected
+Infra module requirements and patch inventory for rclone. See `build/README.md`
+for individual stages and execution settings.
 
 See [gateway operation](docs/gateway-runtime.md) for bootstrap, management,
 TLS and optional VFS configuration. Deployment templates live in `deploy/`;

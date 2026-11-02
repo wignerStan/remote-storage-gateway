@@ -150,6 +150,11 @@ the existing database PVC; executable/frontend host mounts are unnecessary.
 
 ## Source-built UI and optional local materialization
 
+Infra `storage/cloud` owns the backend and remote operations; `storage/vfs`
+owns optional cache handles and retirement. The product adapts their results to
+the Worker port. Infra's `go.mod` selects the rclone package version, and its
+ordered patch inventory supplies the VFS source profile during assembly.
+
 The control-plane binary embeds the pinned frontend built from source. Its
 deployment must omit `OPENLIST_DIST_DIR`, and an existing persisted config's
 `dist_dir` must be empty before selecting the embedded-UI candidate. The supplied
