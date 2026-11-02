@@ -12,7 +12,7 @@ fn artifact(dir: &Path) -> std::path::PathBuf {
     assert!(
         Command::new("cc")
             .args(["-shared", "-fPIC", "-std=c11", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
             .args([
                 "-DTEST_PLUGIN_KIND=INFRA_PLUGIN_OBJECT",
                 "-DTEST_HTTP_TO_WS"
@@ -31,7 +31,7 @@ fn artifact(dir: &Path) -> std::path::PathBuf {
     path
 }
 async fn proxy(origin: SocketAddr, dir: &Path) -> NativeProxy {
-    pingora_worker::assembly::assemble(serde_json::from_value(json!({
+    network_data_plane_worker::assembly::assemble(serde_json::from_value(json!({
         "upstream":format!("http://{origin}"),"inspection":{"max_message_bytes":6291456},"callbacks":[{"binding":"direct","path":artifact(dir),"package":"worker.metadata.test",
         "hooks":[],"message_codec":"codex.responses.v1","message_actions":true,"message_http_bridge":true,"message_responses":true,
         "patch_headers":["authorization","x-approved"],"config":{"version":1,"decision":"forward","upstream":"connect",
@@ -547,7 +547,7 @@ async fn http_to_ws_bridge_process_listener_accepts_h2_and_h1() {
             "patch_headers":["authorization","x-approved"],"config":{"version":1,"decision":"forward","upstream":"connect",
             "path":"/backend-api/codex/responses","set_headers":[["x-approved","yes"],["authorization","Bearer fixture"]]}}]}).to_string()).unwrap();
         let log=dir.path().join("worker.log");
-        let mut process=Process(Command::new(env!("CARGO_BIN_EXE_pingora-worker")).arg("--config").arg(&config)
+        let mut process=Process(Command::new(env!("CARGO_BIN_EXE_network-data-plane-worker")).arg("--config").arg(&config)
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::from(std::fs::File::create(&log).unwrap())).spawn().unwrap());
         let socket=loop {
             if let Ok(socket)=TcpStream::connect(address).await {break socket;}
@@ -579,7 +579,7 @@ async fn responses_without_a_matching_ws_grant_never_reach_the_http_upstream() {
         let library = artifact(dir.path());
         for codec in [None, Some("websocket.v1"), Some("codex.responses.v1"), Some("openai.responses.v1")] {
             let callbacks = codec.map(|id| vec![json!({"binding":"direct","path":library,"package":"worker.metadata.test","hooks":[],"message_codec":id})]).unwrap_or_default();
-            let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":callbacks})).unwrap()).await.unwrap();
+            let proxy = network_data_plane_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":callbacks})).unwrap()).await.unwrap();
             let worker = serve_engine(proxy.clone()).await;
             for path in ["/responses", "/v1/responses", "/backend-api/codex/responses", "/v1/response", "/responses/", "/v1/responses/", "/v1/%72esponses", "/v1/%2572esponses", "/v1//responses", "/v1/./responses", "/v1/x/../responses"] {
                 let mut client = TcpStream::connect(worker.address).await.unwrap();
@@ -621,9 +621,12 @@ async fn responses_bridge_requires_its_codec_to_match_the_path() {
     .await;
     let dir = tempfile::tempdir().unwrap();
     let config=serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"binding":"direct","path":artifact(dir.path()),"package":"worker.metadata.test","hooks":[],"message_codec":"codex.responses.v1","message_actions":true,"message_http_bridge":true}]})).unwrap();
-    let proxy = pingora_worker::assembly::assemble_with_codecs(config, vec![Arc::new(OtherPath)])
-        .await
-        .unwrap();
+    let proxy = network_data_plane_worker::assembly::assemble_with_codecs(
+        config,
+        vec![Arc::new(OtherPath)],
+    )
+    .await
+    .unwrap();
     let worker = serve_engine(proxy.clone()).await;
     let mut socket = post_path(worker.address, "/v1/responses", br#"{"input":[]}"#).await;
     let response = timeout(WAIT, head(&mut socket)).await.unwrap();
@@ -674,7 +677,7 @@ async fn responses_policy_paths_cannot_escape_the_ws_endpoint_before_dial() {
         let dir=tempfile::tempdir().unwrap();let library=artifact(dir.path());
         for path in ["/v1/response","/v1/responses/","/unrelated","/v1/%72esponses"] {
             let config=json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"binding":"direct","path":library,"package":"worker.metadata.test","hooks":[],"message_codec":"codex.responses.v1","message_actions":true,"message_http_bridge":true,"config":{"version":1,"decision":"forward","upstream":"connect","path":path}}]});
-            let proxy=pingora_worker::assembly::assemble(serde_json::from_value(config).unwrap()).await.unwrap();let worker=serve_engine(proxy.clone()).await;
+            let proxy=network_data_plane_worker::assembly::assemble(serde_json::from_value(config).unwrap()).await.unwrap();let worker=serve_engine(proxy.clone()).await;
             let mut client=post_path(worker.address,"/v1/responses",br#"{"input":[]}"#).await;
             let reply=timeout(WAIT,head(&mut client)).await.unwrap();
             assert!(reply.starts_with(b"HTTP/1.1 502"),"{}",String::from_utf8_lossy(&reply));

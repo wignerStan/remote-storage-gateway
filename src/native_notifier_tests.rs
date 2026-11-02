@@ -36,7 +36,7 @@ impl Fixture {
         assert!(
             Command::new("cc")
                 .args(["-shared", "-fPIC", "-std=c11", "-I"])
-                .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+                .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
                 .arg(format!("-DTEST_PLUGIN_KIND={}", kind as u32))
                 .arg(root.join("tests/fixtures/metadata_callback.c"))
                 .arg("-o")

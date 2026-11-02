@@ -1,4 +1,4 @@
-# Pingora worker
+# Network data-plane worker
 
 See the [security model](SECURITY.md) for trust boundaries, implemented controls and deployment responsibilities.
 
@@ -10,7 +10,60 @@ native `pingora-proxy::ProxyHttp` engine owns forwarding, streaming, upgrades an
 connection pooling. The library also exposes composition APIs for other selected
 applications. Business policy belongs to separately installed plugins.
 
-## Run the application
+The canonical repository and application identity is `network-data-plane-worker`.
+This repository owns the [versioned plugin contract](docs/network-data-plane-worker-spec.md),
+including descriptors, configuration/secret vocabulary, typed Client/Policy/Protocol
+ports and generation pinning. Concrete provider implementations publish their own
+values; control planes cache and approve exact descriptor bytes.
+
+The Go client runtime loads independently built, operator-installed `.so` artifacts
+through infra's canonical `InfraPluginV1`/`infra.async.v001` adapter. Artifact ELF
+SHA-256 and descriptor SHA-256 are separate approval bindings. Descriptor
+`build_digest` is a provenance/recipe digest, not a self-embedded ELF digest.
+There is no compiled-in provider inventory and desired state cannot install code.
+Go mappings use the declared Retain policy; instance resources and streams drain,
+but the Go runtime is never falsely `dlclose`d. Shared body frames are bounded to
+64 KiB, preserve backpressure, and retain the exact native client generation.
+
+## Go contracts and dynamic artifact tools
+
+The module is `github.com/wignerStan/network-data-plane-worker/go`. Exported owners
+are `contracts/plugin/{descriptor,client,policy,protocol}`, `nativeclient` and
+`pluginruntime`. The product composition owns ingress semantics and links these
+contracts without linking its concrete provider implementation into the host.
+
+From `go/`, use the existing external development workspace and mise toolchain:
+
+```sh
+mise exec -- env GOWORK=/develop/network/go.work CC=/usr/bin/gcc CXX=/usr/bin/g++ go test -race ./...
+mise exec -- env GOWORK=/develop/network/go.work CC=/usr/bin/gcc CXX=/usr/bin/g++ go build -tags dataplane_l7 -o /tmp/trade-storage-gateway-worker/network-data-plane-worker ./cmd/network-data-plane-worker
+```
+
+`--inspect-artifact <absolute-path> --artifact-sha256 <sha256> --plugin-id <id>
+--language go` emits a passive exact descriptor from hash-approved installed code.
+An operator then approves those bytes' digest before configuration is accepted.
+`--check-config <bootstrap.json>` checks that approval and structural assignments
+without reading secrets or constructing provider clients. `--print-capabilities`
+reports the selected lanes and approved artifact descriptors. Product-specific
+data listeners belong to their ingress composition, not to the inspection CLI.
+
+The Rust application preserves its existing native L7 proxy and adds an
+independently selectable static TCP L4 entry. Select `l4`, `l7`, or `l4,l7`
+explicitly; there is no default data lane. In a combined build, `--lane l4` selects
+the raw TCP configuration and `--lane l7` selects the existing HTTP composition.
+The existing Rust callback chain is not yet the new Go Client contract.
+
+The verified application matrix for this change is Go `dataplane_l4`,
+`dataplane_l7`, and both tags, plus Rust `--no-default-features --features l4`.
+Rust `cargo check --no-default-features --features l7` currently fails in the
+preserved semantic chain against current Infra APIs: its first errors include
+removed `plugin_loading::InstanceActions`, `network_actions::listener`, and
+`admission_gate::budget` imports. The combined Rust application shares that
+limitation. These legacy L7 consumers require a separate migration; the Go
+dynamic Client runtime does not depend on them.
+
+## Rust L7 application
+
 
 Save a JSON configuration, for example:
 
@@ -29,8 +82,8 @@ Save a JSON configuration, for example:
 ```
 
 ```sh
-cargo run --locked -- --config worker.json --check-config
-cargo run --locked -- --config worker.json
+cargo run --locked --features l7 -- --config worker.json --check-config
+cargo run --locked --features l7 -- --config worker.json
 ```
 
 Validation does not load plugins or bind listeners. The upstream is a fixed
@@ -63,7 +116,7 @@ On Linux, configure both worker generations with the same native transfer socket
 ```json
 {
   "upgrade": {
-    "socket": "/run/pingora-worker/upgrade.sock",
+    "socket": "/run/network-data-plane-worker/upgrade.sock",
     "grace_period_seconds": 1
   },
   "shutdown_seconds": 60
@@ -213,7 +266,7 @@ host boundary. Installing a Tool is not a blanket grant to every Object. This
 initial Wasm backend denies all Tool imports and introduces no native helper
 process or sidecar. Fuel bounds guest execution, including initialization and
 cleanup; it is not a wall-clock limit on compilation or native host code.
-See the [Wasm Object ABI](../infra/rust/crates/plugins/loading/README.md#optional-wasm-object-callbacks)
+See the [Wasm Object ABI](../../infra/rust/crates/plugins/loading/README.md#optional-wasm-object-callbacks)
 for the required exports and ownership rules.
 
 ## Native metadata callbacks
@@ -284,7 +337,7 @@ identity and configuration must match its callback entry. The runtime validates
 capabilities and dependency order before opening artifacts, injects scoped
 bindings, and retains providers through callback drain and reverse closure.
 Each affinity-pool member owns its own graph. Tools never become notifier
-participants. See the [graph callback configuration](../infra/rust/crates/plugins/loading/README.md).
+participants. See the [graph callback configuration](../../infra/rust/crates/plugins/loading/README.md).
 
 The native worker enforces this sequence:
 
@@ -745,7 +798,7 @@ listener or a non-socket path. Socket mode/group are deployment inputs.
 The worker notifier exposes typed socket decisions at ingress use/reuse
 boundaries. An application Handler projects those into its installed chain;
 infra applies closure without leaking raw descriptors to plugins. The same worker flow also exposes infra dial, keyed pool and byte-bridge controls;
-see [worker networking](../infra/rust/crates/networking/proxy/pingora/src/worker/README.md).
+see [worker networking](../../infra/rust/crates/networking/proxy/pingora/src/worker/README.md).
 These explicit operation hooks do not transfer ownership of a shared management listener to a business axis.
 
 Callback order is fixed at chain construction. Adapters can declare supported

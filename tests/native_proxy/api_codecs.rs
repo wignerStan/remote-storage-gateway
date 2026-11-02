@@ -26,7 +26,7 @@ fn artifact(dir: &Path, id: &str, action: &str) -> std::path::PathBuf {
     assert!(
         Command::new("cc")
             .args(["-shared", "-fPIC", "-std=c11", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
             .arg("-DTEST_PLUGIN_KIND=INFRA_PLUGIN_OBJECT")
             .arg(if action == "responses" {
                 "-DTEST_RESPONSES_REPLY=0".to_owned()
@@ -72,7 +72,7 @@ async fn api_routes_gate_http_bodies_and_refuse_ungranted_responses() {
         }}).await;
         let dir=tempfile::tempdir().unwrap();
         let callbacks=ROUTES.iter().map(|(id,_)|json!({"binding":"direct", "path":artifact(dir.path(),id,"0"),"package":"worker.metadata.test","message_codec":id})).collect::<Vec<_>>();
-        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":callbacks})).unwrap()).await.unwrap();
+        let proxy=network_data_plane_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":callbacks})).unwrap()).await.unwrap();
         let worker=serve_engine(proxy.clone()).await;
         let mut previous_bytes=0;
         let mut previous_connections=0;
@@ -113,7 +113,7 @@ async fn http_message_denial_forwards_no_body_bytes() {
             let mut byte=[0];if socket.read(&mut byte).await.unwrap_or(0)>0{observed.fetch_add(1,Ordering::SeqCst);}
         }}).await;
         let dir=tempfile::tempdir().unwrap();let id=ROUTES[0].0;
-        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"binding":"direct", "path":artifact(dir.path(),id,"1"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
+        let proxy=network_data_plane_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"binding":"direct", "path":artifact(dir.path(),id,"1"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
         let worker=serve_engine(proxy.clone()).await;let mut client=TcpStream::connect(worker.address).await.unwrap();
         client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: local\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",BODY.len()).as_bytes()).await.unwrap();client.write_all(BODY).await.unwrap();
         let mut response=Vec::new();let _=client.read_to_end(&mut response).await;
@@ -131,7 +131,7 @@ async fn early_upstream_success_cannot_bypass_http_message_inspection() {
                 socket.write_all(format!("HTTP/1.1 {status} Early\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
             }).await;
             let dir=tempfile::tempdir().unwrap();let id=ROUTES[0].0;
-            let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"binding":"direct", "path":artifact(dir.path(),id,"0"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
+            let proxy=network_data_plane_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"binding":"direct", "path":artifact(dir.path(),id,"0"),"package":"worker.metadata.test","message_codec":id}]})).unwrap()).await.unwrap();
             let worker=serve_engine(proxy.clone()).await;let mut client=TcpStream::connect(worker.address).await.unwrap();
             client.write_all(b"POST /v1/chat/completions HTTP/1.1\r\nHost: local\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{").await.unwrap();
             let response=head(&mut client).await;
@@ -188,7 +188,7 @@ async fn responses_ws_selects_lite_per_message_and_keeps_upstream_delta_opaque()
             }
         }).await;
         let dir=tempfile::tempdir().unwrap();let id="openai.responses.v1";
-        let proxy=pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"binding":"direct", "path":artifact(dir.path(),id,"responses"),"package":"worker.metadata.test","message_codec":id,"message_actions":true}]})).unwrap()).await.unwrap();
+        let proxy=network_data_plane_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"binding":"direct", "path":artifact(dir.path(),id,"responses"),"package":"worker.metadata.test","message_codec":id,"message_actions":true}]})).unwrap()).await.unwrap();
         let worker=serve_engine(proxy.clone()).await;let mut client=TcpStream::connect(worker.address).await.unwrap();
         client.write_all(b"GET /v1/responses HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\r\n").await.unwrap();
         assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));
@@ -222,7 +222,7 @@ fn responses_plugin(dir: &Path, mode: &str) -> std::path::PathBuf {
     let mut command = Command::new("cc");
     command
         .args(["-shared", "-fPIC", "-std=c11", "-I"])
-        .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+        .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
         .arg("-DTEST_PLUGIN_KIND=INFRA_PLUGIN_OBJECT")
         .arg(define)
         .arg("-DTEST_API_PREFIX=\"codex.responses.v1/\"");
@@ -237,10 +237,14 @@ fn responses_plugin(dir: &Path, mode: &str) -> std::path::PathBuf {
             serde_json::to_string(std::str::from_utf8(document).unwrap()).unwrap()
         ));
     }
-    let mut source = std::fs::read_to_string(root.join("tests/fixtures/metadata_callback.c")).unwrap();
+    let mut source =
+        std::fs::read_to_string(root.join("tests/fixtures/metadata_callback.c")).unwrap();
     if matches!(mode, "error" | "sdk_error" | "sdk_provider_error") {
         let start = source.find("#ifdef TEST_RESPONSES_ERROR\n").unwrap();
-        let end = source[start..].find("#ifdef TEST_RESPONSES_TERMINAL\n").unwrap() + start;
+        let end = source[start..]
+            .find("#ifdef TEST_RESPONSES_TERMINAL\n")
+            .unwrap()
+            + start;
         let section = source[start..end].replace("'0' + sequence", "'1' + sequence").replace(
             "        static size_t sequence;",
             "        static size_t sequence;\n        const char *prime = \"{\\\"type\\\":\\\"response.create\\\",\\\"input\\\":[]}\";\n        if (input.len == strlen(prime) && !memcmp(input.ptr, prime, input.len)) { const uint8_t allow[] = {0}; return copy_reply(allow,sizeof(allow),out); }");
@@ -320,7 +324,7 @@ async fn responses_error_document_is_written_and_the_socket_stays_open() {
             }
         }).await;
         let dir = tempfile::tempdir().unwrap();
-        let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({
+        let proxy = network_data_plane_worker::assembly::assemble(serde_json::from_value(json!({
             "upstream": format!("http://{}", origin.address),
             "callbacks": [{
                 "binding":"direct", "path": responses_plugin(dir.path(), mode),
@@ -377,7 +381,7 @@ async fn responses_non_error_reply_forwards_nothing() {
             }
         }).await;
         let dir = tempfile::tempdir().unwrap();
-        let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({
+        let proxy = network_data_plane_worker::assembly::assemble(serde_json::from_value(json!({
             "upstream": format!("http://{}", origin.address),
             "callbacks": [{
                 "binding":"direct", "path": responses_plugin(dir.path(), "bad"),
@@ -448,7 +452,7 @@ async fn responses_terminal_frame_can_replace_a_completion_without_gating_deltas
             }
         }).await;
         let dir = tempfile::tempdir().unwrap();
-        let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({
+        let proxy = network_data_plane_worker::assembly::assemble(serde_json::from_value(json!({
             "upstream": format!("http://{}", origin.address),
             "callbacks": [{
                 "binding":"direct", "path": responses_plugin(dir.path(), "terminal"),
@@ -517,7 +521,7 @@ async fn codex_0162_interrupt_relays_during_response_and_preserves_interrupted_b
                 }
             }).await;
             let dir = tempfile::tempdir().unwrap();
-            let proxy = pingora_worker::assembly::assemble(serde_json::from_value(json!({
+            let proxy = network_data_plane_worker::assembly::assemble(serde_json::from_value(json!({
                 "upstream":format!("http://{}",origin.address),
                 "callbacks":[{"binding":"direct", "path":responses_plugin(dir.path(),"steering"),"package":"worker.metadata.test",
                     "message_codec":"codex.responses.v1","message_actions":true,"message_responses":response_grant}]
@@ -541,7 +545,15 @@ async fn codex_0162_interrupt_relays_during_response_and_preserves_interrupted_b
 }
 
 async fn accept_upstream(socket: &mut TcpStream, request: &str) {
-    let key = request.lines().find_map(|line| line.split_once(':').filter(|(name,_)| name.eq_ignore_ascii_case("sec-websocket-key")).map(|(_,value)| value.trim())).unwrap();
-    let accept = proxy_pingora::connect_upstream::websocket_session::handshake::accept_key(key).unwrap();
+    let key = request
+        .lines()
+        .find_map(|line| {
+            line.split_once(':')
+                .filter(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-key"))
+                .map(|(_, value)| value.trim())
+        })
+        .unwrap();
+    let accept =
+        proxy_pingora::connect_upstream::websocket_session::handshake::accept_key(key).unwrap();
     socket.write_all(format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").as_bytes()).await.unwrap();
 }

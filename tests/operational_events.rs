@@ -1,8 +1,9 @@
+#![cfg(feature = "l7")]
 //! Operational streams share one passive source and never enter request callbacks.
 use diagnostic_output::operations::{Operations, Outcome};
 use network_actions::proto::{self, actions_client::ActionsClient};
+use network_data_plane_worker::assembly::control::{self as entry, Registration};
 use network_sockets::{LocalEndpoint, SocketPermissions};
-use pingora_worker::assembly::control::{self as entry, Registration};
 use plugin_lifecycle::{Composition, Resource, ResourceSchema};
 use proxy_pingora::worker::WorkerControl;
 use serde_json::{Value, json};
@@ -50,7 +51,7 @@ async fn grpc_and_sse_observe_coalesced_operations_and_close_without_notifiers()
         let control = Arc::new(WorkerControl::default());
         let mut composition = Composition::new(ResourceSchema::new(&[ENTRY]).unwrap());
         let entry = entry::install(&mut composition, ENTRY, Registration {
-            protocol: pingora_worker::config::ControlProtocol::Http,
+            protocol: network_data_plane_worker::config::ControlProtocol::Http,
             worker_control: Some(Arc::clone(&control)),
             logging_health: None,
             endpoint: LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
@@ -103,7 +104,7 @@ async fn observer_capacity_keeps_control_available_and_disconnect_returns_a_slot
         let control = Arc::new(WorkerControl::default());
         let mut composition = Composition::new(ResourceSchema::new(&[ENTRY]).unwrap());
         let entry = entry::install(&mut composition, ENTRY, Registration {
-            protocol: pingora_worker::config::ControlProtocol::Http,
+            protocol: network_data_plane_worker::config::ControlProtocol::Http,
             worker_control: Some(Arc::clone(&control)),
             logging_health: None,
             endpoint: LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
@@ -174,7 +175,7 @@ async fn short_grpc_deadline_and_sse_replay_rejection_keep_observations_live_onl
         let control = Arc::new(WorkerControl::default());
         let mut composition = Composition::new(ResourceSchema::new(&[ENTRY]).unwrap());
         let entry = entry::install(&mut composition, ENTRY, Registration {
-            protocol: pingora_worker::config::ControlProtocol::Http,
+            protocol: network_data_plane_worker::config::ControlProtocol::Http,
             worker_control: Some(control),
             logging_health: None,
             endpoint: LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
@@ -240,7 +241,7 @@ async fn logging_events_report_the_selected_owner_without_using_request_callback
         let control = Arc::new(WorkerControl::default());
         let mut composition = Composition::new(ResourceSchema::new(&[ENTRY]).unwrap());
         let entry = entry::install(&mut composition, ENTRY, Registration {
-            protocol: pingora_worker::config::ControlProtocol::Http,
+            protocol: network_data_plane_worker::config::ControlProtocol::Http,
             worker_control: Some(control), logging_health: Some(health.clone()),
             endpoint: LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
             permissions: SocketPermissions::default(),

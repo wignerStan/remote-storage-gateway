@@ -11,7 +11,7 @@ async fn notifier_initialization_and_dispatch_share_the_worker_process() {
     assert!(
         Command::new("cc")
             .args(["-shared", "-fPIC", "-std=c11", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
             .arg("-DTEST_PLUGIN_KIND=INFRA_PLUGIN_OBJECT")
             .arg(format!("-DTEST_EXPECT_PID={}", std::process::id()))
             .arg(root.join("tests/fixtures/metadata_callback.c"))
@@ -33,7 +33,9 @@ async fn notifier_initialization_and_dispatch_share_the_worker_process() {
             "callbacks":[callback]
         }))
         .unwrap();
-        let proxy = pingora_worker::assembly::assemble(config).await.unwrap();
+        let proxy = network_data_plane_worker::assembly::assemble(config)
+            .await
+            .unwrap();
         let worker = serve_engine(proxy.clone()).await;
         assert!(get(worker.address).await.ends_with(b"hello"));
         drop(worker);

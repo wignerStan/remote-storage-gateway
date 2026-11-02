@@ -21,7 +21,7 @@ fn artifact_for_codec(dir: &Path, mode: u8, codec: &str) -> PathBuf {
     assert!(
         Command::new("cc")
             .args(["-shared", "-fPIC", "-std=c11", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
             .arg(format!("-DTEST_MODE={mode}"))
             .arg(format!(
                 "-DTEST_CODEC_PREFIX={}",
@@ -46,7 +46,7 @@ fn artifact_for_codec(dir: &Path, mode: u8, codec: &str) -> PathBuf {
     );
     path
 }
-fn config(upstream: SocketAddr, path: PathBuf) -> pingora_worker::config::Config {
+fn config(upstream: SocketAddr, path: PathBuf) -> network_data_plane_worker::config::Config {
     serde_json::from_value(json!({
         "upstream":format!("http://{upstream}"),
         "callbacks":[{"binding":"direct", "path":path,"package":"worker.sessions.test", "message_codec":"openai.responses.v1",
@@ -119,7 +119,7 @@ async fn first_message_selects_and_rewrites_before_dial_then_replay_replaces_soc
             }
         }).await;
         let directory = tempfile::tempdir().unwrap();
-        let proxy = pingora_worker::assembly::assemble(config(origin.address, artifact(directory.path(), 0))).await.unwrap();
+        let proxy = network_data_plane_worker::assembly::assemble(config(origin.address, artifact(directory.path(), 0))).await.unwrap();
         let worker = serve_engine(proxy.clone()).await;
         let mut client = TcpStream::connect(worker.address).await.unwrap();
         client.write_all(REQUEST).await.unwrap();
@@ -160,7 +160,7 @@ async fn ungranted_metadata_is_rejected_before_dial_and_closes_websocket_without
         })
         .await;
         let directory = tempfile::tempdir().unwrap();
-        let proxy = pingora_worker::assembly::assemble(config(
+        let proxy = network_data_plane_worker::assembly::assemble(config(
             origin.address,
             artifact(directory.path(), 1),
         ))
@@ -213,7 +213,7 @@ async fn peer_heartbeat_progresses_while_native_message_policy_waits() {
         })
         .await;
         let directory = tempfile::tempdir().unwrap();
-        let proxy = pingora_worker::assembly::assemble(config(
+        let proxy = network_data_plane_worker::assembly::assemble(config(
             origin.address,
             artifact(directory.path(), 2),
         ))
@@ -274,7 +274,7 @@ async fn cleanup_case(mode: u8, exhaust_body_budget: bool) {
                 {"binding":"direct", "path":observer,"package":"worker.sessions.test","message_codec":"openai.responses.v1","message_actions":true}
             ]
         })).unwrap();
-        let proxy = pingora_worker::assembly::assemble(config).await.unwrap();
+        let proxy = network_data_plane_worker::assembly::assemble(config).await.unwrap();
         let worker = serve_engine(proxy.clone()).await;
         let mut idle = TcpStream::connect(worker.address).await.unwrap();
         idle.write_all(REQUEST).await.unwrap();
@@ -354,7 +354,9 @@ async fn codex_websocket_aliases_accept_locally_and_wait_for_an_admitted_create(
                 artifact_for_codec(directory.path(), 0, "codex.responses.v1"),
             );
             cfg.callbacks[0].message_codec = Some("codex.responses.v1".into());
-            let proxy = pingora_worker::assembly::assemble(cfg).await.unwrap();
+            let proxy = network_data_plane_worker::assembly::assemble(cfg)
+                .await
+                .unwrap();
             let worker = serve_engine(proxy.clone()).await;
             let mut client = TcpStream::connect(worker.address).await.unwrap();
             let request =
@@ -444,7 +446,7 @@ fn compile_session_source(dir: &Path, source: &str) -> PathBuf {
     assert!(
         Command::new("cc")
             .args(["-shared", "-fPIC", "-std=c11", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
             .arg(format!(
                 "-DTEST_MARKER_PATH={}",
                 serde_json::to_string(&dir.join("held").to_str().unwrap()).unwrap()
@@ -552,7 +554,9 @@ async fn held_response_keeps_body_reservation_across_peer_ping() {
         let mut cfg = config(origin.address, holding_artifact(directory.path()));
         cfg.inspection.max_message_bytes = 1024;
         cfg.inspection.max_buffered_bytes = 8 * 1024 + 8 * 1024 * 1024 + 512 * 1024;
-        let proxy = pingora_worker::assembly::assemble(cfg).await.unwrap();
+        let proxy = network_data_plane_worker::assembly::assemble(cfg)
+            .await
+            .unwrap();
         let mut engine = HttpProxy::new(
             proxy.clone(),
             Arc::new(ServerConf {
@@ -660,7 +664,9 @@ async fn repeated_held_responses_close_at_cumulative_wire_limit() {
         let directory = tempfile::tempdir().unwrap();
         let mut cfg = config(origin.address, holding_artifact(directory.path()));
         cfg.inspection.max_message_bytes = 1024;
-        let proxy = pingora_worker::assembly::assemble(cfg).await.unwrap();
+        let proxy = network_data_plane_worker::assembly::assemble(cfg)
+            .await
+            .unwrap();
         let worker = serve_engine(proxy.clone()).await;
         let mut client = TcpStream::connect(worker.address).await.unwrap();
         client.write_all(REQUEST).await.unwrap();
@@ -692,7 +698,7 @@ async fn callback_chain_uses_one_message_deadline_before_any_upstream_dial() {
         .await;
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
-        let mut cfg: pingora_worker::config::Config = serde_json::from_value(json!({
+        let mut cfg: network_data_plane_worker::config::Config = serde_json::from_value(json!({
             "upstream":format!("http://{}", origin.address),
             "callbacks":[
                 {"binding":"direct", "path":session_budget_artifact(first.path(), false),"package":"worker.sessions.test", "message_codec":"openai.responses.v1", "message_actions":true,"patch_headers":["cookie","x-request-id"]},
@@ -703,7 +709,7 @@ async fn callback_chain_uses_one_message_deadline_before_any_upstream_dial() {
         for callback in &mut cfg.callbacks {
             callback.timeout_ms = 1000;
         }
-        let proxy = pingora_worker::assembly::assemble(cfg).await.unwrap();
+        let proxy = network_data_plane_worker::assembly::assemble(cfg).await.unwrap();
         let worker = serve_engine(proxy.clone()).await;
         let mut client = TcpStream::connect(worker.address).await.unwrap();
         client.write_all(REQUEST).await.unwrap();
@@ -778,7 +784,7 @@ async fn buffered_response_releases_the_approved_replacement_before_the_next_mes
             serde_json::to_string(&metadata).unwrap(),
             serde_json::to_string(std::str::from_utf8(REDACTED).unwrap()).unwrap()
         );
-        let proxy = pingora_worker::assembly::assemble(config(
+        let proxy = network_data_plane_worker::assembly::assemble(config(
             origin.address,
             buffer_decision_artifact(directory.path(), &first),
         ))
@@ -829,7 +835,7 @@ async fn buffered_response_cannot_override_a_later_terminal_callback_decision() 
                 r#"return action("{\"version\":1,\"decision\":\"forward\",\"hold\":\"buffer\"}", "", out);"#));
             let mut next = config(origin.address, buffer_decision_artifact(second.path(), terminal));
             cfg.callbacks.append(&mut next.callbacks);
-            let proxy = pingora_worker::assembly::assemble(cfg).await.unwrap();
+            let proxy = network_data_plane_worker::assembly::assemble(cfg).await.unwrap();
             let worker = serve_engine(proxy.clone()).await;
             let mut client = TcpStream::connect(worker.address).await.unwrap();
             client.write_all(REQUEST).await.unwrap();
@@ -888,7 +894,7 @@ async fn buffered_request_releases_to_upstream_before_the_current_request() {
         })
         .await;
         let directory = tempfile::tempdir().unwrap();
-        let proxy = pingora_worker::assembly::assemble(config(
+        let proxy = network_data_plane_worker::assembly::assemble(config(
             origin.address,
             request_buffer_artifact(directory.path()),
         ))
@@ -963,7 +969,7 @@ async fn upstream_closed_action_replies_then_closes_downstream() {
     }
 "#,
         );
-        let proxy = pingora_worker::assembly::assemble(config(
+        let proxy = network_data_plane_worker::assembly::assemble(config(
             origin.address,
             compile_session_source(directory.path(), &source),
         ))
@@ -1019,7 +1025,7 @@ async fn buffered_request_release_cannot_dial_after_explicit_upstream_retirement
                 r#""{\"version\":1,\"decision\":\"forward\",\"hold\":\"release\"}""#,
                 &serde_json::to_string(&release).unwrap(),
             );
-            let proxy = pingora_worker::assembly::assemble(config(
+            let proxy = network_data_plane_worker::assembly::assemble(config(
                 origin.address,
                 compile_session_source(directory.path(), &source),
             ))
@@ -1113,7 +1119,7 @@ async fn response_release_stops_on_current_generation_downstream_write_failure()
                 "return action({}, \"\", out);",
                 serde_json::to_string(&metadata).unwrap()
             );
-            let proxy = pingora_worker::assembly::assemble(config(
+            let proxy = network_data_plane_worker::assembly::assemble(config(
                 origin.address,
                 buffer_decision_artifact(directory.path(), &action),
             ))
@@ -1189,7 +1195,7 @@ async fn response_release_skips_held_frames_from_a_retired_upstream() {
         let source = source.replace(
             r#"return action("{\"version\":1,\"decision\":\"forward\",\"hold\":\"release\"}", "", out);"#,
             replacement);
-        let proxy = pingora_worker::assembly::assemble(config(origin.address,
+        let proxy = network_data_plane_worker::assembly::assemble(config(origin.address,
             compile_session_source(directory.path(), &source))).await.unwrap();
         let worker = serve_engine(proxy.clone()).await;
         let mut client = TcpStream::connect(worker.address).await.unwrap();

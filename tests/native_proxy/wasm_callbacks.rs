@@ -45,7 +45,9 @@ async fn assembled_wasm_object_patches_only_explicitly_granted_headers() {
             }]
         }))
         .unwrap();
-        let proxy = pingora_worker::assembly::assemble(config).await.unwrap();
+        let proxy = network_data_plane_worker::assembly::assemble(config)
+            .await
+            .unwrap();
         let worker = serve_engine(proxy.clone()).await;
         let response = get(worker.address).await;
         assert_eq!(response.starts_with(b"HTTP/1.1 200"), succeeds);

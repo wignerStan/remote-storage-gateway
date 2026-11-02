@@ -1,10 +1,11 @@
+#![cfg(feature = "l7")]
 //! Explicit response capture observes the native stream without delaying delivery.
 use diagnostic_output::runtime::{FileLogConfig, LoggingConfig, build_logging};
+use network_data_plane_worker::proxy::{NativeProxy, ProxyConfig};
 use pingora_core::{
     apps::HttpServerApp, protocols::http::ServerSession, server::configuration::ServerConf,
 };
 use pingora_proxy::HttpProxy;
-use pingora_worker::proxy::{NativeProxy, ProxyConfig};
 use proxy_pingora::worker::WorkerControl;
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};

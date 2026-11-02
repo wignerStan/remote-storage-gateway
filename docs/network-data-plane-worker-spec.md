@@ -2,11 +2,12 @@
 
 ## Status
 
-This document defines the target architecture for the repository currently named
-`pingora-worker`. It is a design contract and migration plan. It does not claim
-that every item has already landed.
+This document defines the architecture and migration contract for
+`network-data-plane-worker`. The Go Client contract, dynamic native adapter and
+generation owner are implemented; the existing Rust L7 semantic chain remains a
+separate application migration. It does not claim that every target item landed.
 
-The canonical future repository and application name is:
+The canonical repository and application name is:
 
 ```text
 network-data-plane-worker
@@ -54,13 +55,15 @@ publishing a descriptor that conforms to this worker-owned contract.
    capability, lifecycle, and execution contracts.
 5. A product control plane consumes worker-published descriptors and desired
    state contracts. It cannot invent a plugin field, capability, or executable
-   implementation that is absent from the worker build.
+   implementation that is absent from the approved installed artifact set.
 6. L4 and L7 are peer facilities. They may share private mechanisms but never
    share one untyped protocol surface.
 7. Policy, protocol, and client plugins use separate typed contracts. There is no
    universal `OnStage(string, any)` interface.
-8. Compilation defines the maximum capability set. Runtime desired state may
-   select only a subset and must fail closed when it names an absent capability.
+8. Installed, operator-approved shared-library artifacts define the plugin
+   capability ceiling. Builds select lanes and native runtime mechanisms.
+   Desired state may select only approved exact artifacts/descriptors and must
+   fail closed when it names an absent capability. It cannot install code.
 9. The control plane is not synchronously consulted for ordinary data-path
    execution.
 10. Candidate replacement follows prepare, publish, pin, drain, and close. No
@@ -91,7 +94,7 @@ publishing a descriptor that conforms to this worker-owned contract.
 |                                                  |                  |
 |                                      worker-owned Client contract   |
 |                                                  |                  |
-|                                  compiled client plugin set         |
+|                                  approved native client artifacts         |
 +---------------------------------------------------------------------+
 ```
 
@@ -143,9 +146,11 @@ network-data-plane-worker/
 └── docs/
 ```
 
-Concrete product plugin packages may be linked by selected compositions. Their
-source location does not transfer contract ownership: every implementation must
-conform to the worker-owned plugin contract and publish a valid descriptor.
+Concrete product implementations are built as independent shared libraries and
+loaded through the common native ABI. Their source location does not transfer
+contract ownership: every implementation conforms to the worker-owned contract
+and publishes a valid descriptor. The current Rust source remains at the root;
+the illustrated `rust/` relocation is a separate source-layout migration.
 
 # Infra contract
 
@@ -278,7 +283,7 @@ must preserve the same ownership, versioning, and lifecycle meaning.
 
 ## Plugin descriptor
 
-Every compiled plugin publishes one passive descriptor. Reading the descriptor
+Every installed plugin artifact publishes one passive descriptor. Reading the descriptor
 must not open a socket, read a secret, authenticate to a provider, or construct a
 live client.
 
@@ -398,7 +403,7 @@ type Instance interface {
 Concrete typed contracts narrow `Instance`, for example to `Client`, `L4Policy`,
 `L7Policy`, or `Protocol`.
 
-A plugin cannot publish arbitrary capabilities that are absent from its compiled
+A plugin cannot publish arbitrary capabilities that are absent from its approved
 descriptor. Registration validates exact contract versions and typed ports before
 the instance is admitted.
 
@@ -450,11 +455,27 @@ one product's protocol IDs.
 
 # Plugin registration and capability reporting
 
-## Build-time registration
+## Installed-artifact registration
 
-A selected build statically or explicitly registers plugin factories. Dynamic
-loading is permitted only through an installed runtime that enforces the same
-contract, artifact identity, bounds, and lifecycle semantics.
+Provider implementations are independently built `.so` artifacts, not a static
+provider registry in the host executable. An operator installs an immutable
+artifact and approves its actual ELF SHA-256. Passive descriptor inspection uses
+that approved artifact without constructing provider clients or reading secrets.
+The exact returned descriptor bytes are approved separately by SHA-256.
+`build_digest` identifies build provenance; it is not falsely equated with a
+self-embedded ELF hash.
+
+The worker opens and hashes the artifact inode. Infra's native loader duplicates
+and pins its descriptor for the complete mapping lifetime, including retained or
+quarantined mappings. Immutable operator-governed installation remains a trust
+boundary; an open file descriptor alone does not stop privileged in-place writes.
+The worker's typed, bounded client wire reuses `InfraPluginV1` and the queried
+`infra.async.v001` interface, including C-owned input/reply custody.
+
+Go shared libraries declare Retain: instances drain and release owned resources,
+but mapped Go runtime code remains retained. Explicit Rust unload is permitted
+only after its runtime and callbacks are actually joined. Desired state can select
+approved artifacts; it cannot download, write or install executable code.
 
 The worker rejects:
 
@@ -475,7 +496,7 @@ Every worker binary emits a passive build manifest:
   "implementation": "go",
   "lanes": ["l7"],
   "controls": ["local"],
-  "plugin_runtimes": ["static", "native"],
+  "plugin_runtimes": ["native"],
   "plugin_descriptors": [
     {
       "plugin_id": "vendor.capability",
@@ -523,7 +544,7 @@ their pinned owners. No request or plugin call is replayed across generations.
 
 ```text
 1. Parse and validate bootstrap configuration.
-2. Load and validate compiled plugin descriptors.
+2. Load approved installed native artifacts and validate exact descriptors.
 3. Validate desired state against the pinned descriptor digests.
 4. Resolve and construct required plugin candidates.
 5. Prepare management publications.
@@ -651,8 +672,8 @@ plugins-wasm = ["plugin-loading/wasm", "dep:wasm-sandbox"]
 ```
 
 At least one of `l4` or `l7` is required for a runnable data-plane binary.
-Concrete product plugin features are declared by selected composition packages,
-not by infra.
+Concrete providers are independent approved shared libraries, not Cargo features
+in infra or a statically registered product inventory.
 
 ## Go build tags
 
@@ -666,9 +687,9 @@ control_http
 plugins_native
 ```
 
-A product composition may add tags that select concrete plugin packages. Those
-tags register implementations through this worker contract; they do not alter
-the contract itself.
+Product compositions select lanes/runtime facilities with tags. Concrete provider
+code is built into separate `.so` artifacts and loaded through this worker
+contract, not imported into the host executable to register provider factories.
 
 # Required validation
 
@@ -717,7 +738,7 @@ This architecture does not promise:
 - control-plane ownership of plugin schemas;
 - dynamic code installation through desired-state configuration;
 - automatic retry of consumed uploads or committed responses;
-- cross-language in-process plugin loading;
+- direct language-runtime ABI coupling instead of the versioned native C ABI;
 - identical Go and Rust APIs;
 - full object-store semantics from every client implementation.
 

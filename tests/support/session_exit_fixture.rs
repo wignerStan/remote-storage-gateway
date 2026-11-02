@@ -62,7 +62,7 @@ pub fn artifact_with_fault(dir: &Path, observer: bool, delay_ns: u64, fault: Fau
     assert!(
         Command::new("cc")
             .args(["-shared", "-fPIC", "-std=c11", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
             .arg("-DTEST_PLUGIN_KIND=INFRA_PLUGIN_OBJECT")
             .arg("-DTEST_HTTP_TO_WS")
             .arg(format!("-DTEST_OBSERVER={}", u8::from(observer)))

@@ -1,5 +1,5 @@
 [package]
-name = "pingora-worker"
+name = "network-data-plane-worker"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98.1"
@@ -11,48 +11,50 @@ resolver = "3"
 
 [features]
 default = []
-wasm = ["plugin-loading/wasm", "dep:wasm-sandbox"]
+l4 = ["proxy-pingora/l4"]
+l7 = ["proxy-pingora/l7", "proxy-pingora/native-proxy", "dep:event-stamp", "dep:admission-gate", "dep:llm-message-codec", "dep:text-processing", "dep:stream-transfer", "dep:network-sockets", "dep:action-router", "dep:action-execution", "dep:network-local-control", "dep:network-actions", "dep:plugin-registry", "dep:plugin-lifecycle", "dep:plugin-loading", "dep:proxy-protocols", "dep:configuration", "dep:diagnostic-output", "dep:plugin-abi", "dep:pingora-proxy", "dep:pingora-error", "dep:pingora-http", "dep:url", "dep:bytes", "dep:http", "dep:async-trait", "dep:pingora-core", "dep:futures-util", "dep:http-bridge", "dep:tracing"]
+wasm = ["l7", "plugin-loading/wasm", "dep:wasm-sandbox"]
 
 [dependencies]
-event-stamp = { path = "../infra/rust/crates/events/stamp" }
-wasm-sandbox = { path = "../infra/rust/crates/interop/wasm-sandbox", optional = true }
-admission-gate = { path = "../infra/rust/crates/processes/admission-gate" }
-llm-protocols = { path = "../infra/rust/crates/ai/llm-protocols", features = ["codec"] }
-text-processing = { path = "../infra/rust/crates/text/processing", features = ["json"] }
-stream-transfer = { path = "../infra/rust/crates/networking/stream/transfer" }
-network-sockets = { path = "../infra/rust/crates/networking/sockets" }
-action-router = { path = "../infra/rust/crates/networking/action-router" }
-action-execution = { path = "../infra/rust/crates/networking/action-execution" }
-network-local-control = { path = "../infra/rust/crates/networking/local-control" }
-network-actions = { path = "../infra/rust/crates/networking/actions" }
-plugin-registry = { path = "../infra/rust/crates/plugins/registry" }
-plugin-lifecycle = { path = "../infra/rust/crates/plugins/lifecycle" }
-plugin-loading = { path = "../infra/rust/crates/plugins/loading", features = ["async"] }
-proxy-protocols = { path = "../infra/rust/crates/networking/proxy/protocols", default-features = false }
-proxy-pingora = { path = "../infra/rust/crates/networking/proxy/pingora", features = ["native-proxy", "http-egress"] }
-configuration = { path = "../infra/rust/crates/configuration" }
-diagnostic-output = { path = "../infra/rust/crates/observability/diagnostic-output", features = ["runtime"] }
-plugin-abi = { path = "../infra/rust/crates/interop/plugin-abi" }
-pingora-proxy = { version = "=0.8.1", default-features = false, features = ["rustls"] }
-pingora-error = "=0.8.1"
-pingora-http = "=0.8.1"
-url = "2"
-bytes = "1"
-http = "1"
-async-trait = "0.1"
-pingora-core = { version = "=0.8.1", default-features = false, features = ["rustls"] }
+event-stamp = { path = "../../infra/rust/crates/events/stamp", optional = true }
+wasm-sandbox = { path = "../../infra/rust/crates/interop/wasm-sandbox", optional = true }
+admission-gate = { path = "../../infra/rust/crates/processes/admission-gate", optional = true }
+llm-message-codec = { path = "../../infra/rust/crates/ai/llm-message-codec", optional = true }
+text-processing = { path = "../../infra/rust/crates/text/processing", features = ["json"], optional = true }
+stream-transfer = { path = "../../infra/rust/crates/networking/stream/transfer", optional = true }
+network-sockets = { path = "../../infra/rust/crates/networking/sockets", optional = true }
+action-router = { path = "../../infra/rust/crates/networking/action-router", optional = true }
+action-execution = { path = "../../infra/rust/crates/networking/action-execution", optional = true }
+network-local-control = { path = "../../infra/rust/crates/networking/local-control", optional = true }
+network-actions = { path = "../../infra/rust/crates/networking/actions", optional = true }
+plugin-registry = { path = "../../infra/rust/crates/plugins/registry", optional = true }
+plugin-lifecycle = { path = "../../infra/rust/crates/plugins/lifecycle", optional = true }
+plugin-loading = { path = "../../infra/rust/crates/plugins/loading", features = ["async"], optional = true }
+proxy-protocols = { path = "../../infra/rust/crates/networking/proxy/protocols", default-features = false, optional = true }
+proxy-pingora = { path = "../../infra/rust/crates/networking/proxy/pingora", default-features = false }
+configuration = { path = "../../infra/rust/crates/configuration", optional = true }
+diagnostic-output = { path = "../../infra/rust/crates/observability/diagnostic-output", features = ["runtime"], optional = true }
+plugin-abi = { path = "../../infra/rust/crates/interop/plugin-abi", optional = true }
+pingora-proxy = { version = "=0.8.1", default-features = false, features = ["rustls"], optional = true }
+pingora-error = { version = "=0.8.1", optional = true }
+pingora-http = { version = "=0.8.1", optional = true }
+url = { version = "2", optional = true }
+bytes = { version = "1", optional = true }
+http = { version = "1", optional = true }
+async-trait = { version = "0.1", optional = true }
+pingora-core = { version = "=0.8.1", default-features = false, features = ["rustls"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
-futures-util = "0.3"
-http-bridge = { path = "../infra/rust/crates/networking/http/bridge" }
-tokio = { version = "1", features = ["net", "sync", "rt-multi-thread", "macros", "time"] }
-tracing = "0.1"
+futures-util = { version = "0.3", optional = true }
+http-bridge = { path = "../../infra/rust/crates/networking/http/bridge", optional = true }
+tokio = { version = "1", features = ["net", "sync", "rt-multi-thread", "macros", "time", "io-util", "signal"] }
+tracing = { version = "0.1", optional = true }
 
 [dev-dependencies]
 h2 = "0.4"
 wat = "1"
 zstd = "0.13"
-test-support = { path = "../infra/rust/crates/testing/support" }
+test-support = { path = "../../infra/rust/crates/testing/support" }
 tokio = { version = "1", features = ["io-util"] }
 tonic = { version = "0.14", features = ["transport"] }
 tower = { version = "0.5", features = ["util"] }
@@ -60,4 +62,4 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 tempfile = "3"
 
 [patch.crates-io]
-pingora-proxy = { path = "../infra/rust/.patched/pingora-proxy-0.8.1" }
+pingora-proxy = { path = "../../infra/rust/.patched/pingora-proxy-0.8.1" }

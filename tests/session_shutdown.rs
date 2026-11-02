@@ -1,3 +1,4 @@
+#![cfg(feature = "l7")]
 //! Real SIGTERM drains active WS and HTTP-to-WS turns and releases the listener.
 #![cfg(unix)]
 use serde_json::json;
@@ -94,7 +95,7 @@ async fn scenario(http: bool) {
     });
     let reserved=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let address=reserved.local_addr().unwrap();
     let config=dir.join("worker.json");fs::write(&config,serde_json::to_vec(&json!({"listen":address,"upstream":format!("http://{origin_addr}"),"threads":2,"shutdown_seconds":2,"io_timeout_ms":5000,"callbacks":[{"binding":"direct","path":fixture::artifact(dir,false,0),"package":"worker.metadata.test","hooks":[],"message_codec":"codex.responses.v1","message_actions":true,"message_http_bridge":true,"config":{"version":1,"decision":"forward","upstream":"connect","path":"/backend-api/codex/responses"}}]})).unwrap()).unwrap();drop(reserved);
-    let mut process=Process(Command::new(env!("CARGO_BIN_EXE_pingora-worker")).arg("--config").arg(config).stdout(Stdio::null()).stderr(Stdio::from(fs::File::create(dir.join("stderr")).unwrap())).spawn().unwrap());
+    let mut process=Process(Command::new(env!("CARGO_BIN_EXE_network-data-plane-worker")).arg("--config").arg(config).stdout(Stdio::null()).stderr(Stdio::from(fs::File::create(dir.join("stderr")).unwrap())).spawn().unwrap());
     let mut client=timeout(WAIT,async{loop{if let Ok(socket)=TcpStream::connect(address).await{return socket;}assert!(process.0.try_wait().unwrap().is_none(),"worker failed before admission");sleep(Duration::from_millis(10)).await;}}).await.unwrap();
     if http{let body=br#"{"input":[]}"#;client.write_all(format!("POST /v1/responses HTTP/1.1\r\nHost: local\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await.unwrap();client.write_all(body).await.unwrap();}
     else{client.write_all(b"GET /v1/responses HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));client.write_all(&proxy_protocols::websocket::encode_client(1,br#"{"type":"response.create","input":[]}"#).unwrap()).await.unwrap();assert_eq!(frame(&mut client,false).await.0,1);}

@@ -20,7 +20,7 @@ async fn go_object_webrtc_signaling_is_explicitly_published_and_revoked() {
         let cfg = json!({"upstream":"http://127.0.0.1:9",
             "management":{"listen":management},
             "callbacks":[{"binding":"direct", "path":artifact,"package":"example.go.llmcodec","language":"go","timeout_ms":10000,"actions":actions}]});
-        let proxy = pingora_worker::assembly::assemble(serde_json::from_value(cfg).unwrap()).await.unwrap();
+        let proxy = network_data_plane_worker::assembly::assemble(serde_json::from_value(cfg).unwrap()).await.unwrap();
         for method in methods {
             let mut socket = TcpStream::connect(management).await.unwrap();
             socket.write_all(format!("POST /{method} HTTP/1.1\r\nHost: local\r\nContent-Length: 2\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await.unwrap();

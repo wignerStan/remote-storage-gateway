@@ -1,3 +1,4 @@
+#![cfg(feature = "l7")]
 //! A retained active generation remains owned during real process SIGTERM.
 #![cfg(target_os = "linux")]
 use serde_json::json;
@@ -120,7 +121,7 @@ async fn shutdown_case(detach: bool) {
     // The child binds its own port. A parent bind/drop can be reclaimed by another fixture.
     let listen="127.0.0.1:0";
     let config=dir.join("worker.json");fs::write(&config,serde_json::to_vec(&json!({"listen":listen,"upstream":format!("http://{origin_addr}"),"threads":2,"shutdown_seconds":3,"io_timeout_ms":5000,"callbacks":[{"binding":"direct","path":fixture::artifact(dir,3540000,3600000,true),"package":"worker.sessions.test","message_codec":"openai.responses.v1","message_actions":true}]})).unwrap()).unwrap();
-    let mut process=Process(Command::new(env!("CARGO_BIN_EXE_pingora-worker")).arg("--config").arg(config).stdout(Stdio::null()).stderr(Stdio::from(fs::File::create(dir.join("stderr")).unwrap())).spawn().unwrap());
+    let mut process=Process(Command::new(env!("CARGO_BIN_EXE_network-data-plane-worker")).arg("--config").arg(config).stdout(Stdio::null()).stderr(Stdio::from(fs::File::create(dir.join("stderr")).unwrap())).spawn().unwrap());
     let address=timeout(WAIT,async{loop{assert!(process.0.try_wait().unwrap().is_none(),"worker failed before admission");if let Some(address)=owned_listener(&process){return address;}sleep(Duration::from_millis(10)).await;}}).await.unwrap();
     let mut client=TcpStream::connect(address).await.unwrap();
     client.write_all(b"GET /v1/responses HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));

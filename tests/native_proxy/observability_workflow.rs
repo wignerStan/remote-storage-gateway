@@ -2,11 +2,11 @@
 use super::*;
 use diagnostic_output::operations::Operations;
 use network_actions::proto::{CallRequest, actions_client::ActionsClient};
-use network_sockets::{LocalEndpoint, SocketPermissions};
-use pingora_worker::{
+use network_data_plane_worker::{
     assembly::control as entry,
     proxy::{ProxyContract, RequestFacts},
 };
+use network_sockets::{LocalEndpoint, SocketPermissions};
 use plugin_lifecycle::{Composition, Resource, ResourceSchema};
 use proxy_pingora::worker::surface::Callbacks;
 use serde_json::{Value, json};
@@ -71,7 +71,7 @@ async fn stream_delivery_completion_and_reconnect_have_independent_observers() {
         let worker = serve_engine(native).await;
         let mut composition = Composition::new(ResourceSchema::new(&[ENTRY]).unwrap());
         let entry = entry::install(&mut composition, ENTRY, entry::Registration {
-            protocol: pingora_worker::config::ControlProtocol::Http,
+            protocol: network_data_plane_worker::config::ControlProtocol::Http,
             worker_control: Some(Arc::clone(&control)),
             logging_health: None,
             endpoint: LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
@@ -142,7 +142,9 @@ async fn grpc_worker_control_live_mutates_admission_and_controls_proxy_traffic()
                 let _ = head(&mut socket).await;
                 counter.fetch_add(1, Ordering::SeqCst);
                 socket
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
                     .await
                     .unwrap();
             }
@@ -163,7 +165,7 @@ async fn grpc_worker_control_live_mutates_admission_and_controls_proxy_traffic()
             &mut composition,
             ENTRY,
             entry::Registration {
-                protocol: pingora_worker::config::ControlProtocol::Http,
+                protocol: network_data_plane_worker::config::ControlProtocol::Http,
                 worker_control: Some(Arc::clone(&control)),
                 logging_health: None,
                 endpoint: LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
@@ -176,9 +178,10 @@ async fn grpc_worker_control_live_mutates_admission_and_controls_proxy_traffic()
         let runtime = composition.commit().await.unwrap();
         entry.activate().unwrap();
 
-        let mut client = ActionsClient::connect(format!("http://{}", entry.local_address().unwrap()))
-            .await
-            .unwrap();
+        let mut client =
+            ActionsClient::connect(format!("http://{}", entry.local_address().unwrap()))
+                .await
+                .unwrap();
 
         // 1. Initial state inspection via gRPC
         let initial: Value = serde_json::from_slice(
@@ -207,7 +210,10 @@ async fn grpc_worker_control_live_mutates_admission_and_controls_proxy_traffic()
         // 3. Live in-memory mutation: close admission via gRPC worker.apply
         let updated: Value = serde_json::from_slice(
             &client
-                .call(call("worker.apply", br#"{"expected_revision":1,"accepting":false}"#))
+                .call(call(
+                    "worker.apply",
+                    br#"{"expected_revision":1,"accepting":false}"#,
+                ))
                 .await
                 .unwrap()
                 .into_inner()
@@ -226,13 +232,19 @@ async fn grpc_worker_control_live_mutates_admission_and_controls_proxy_traffic()
             .unwrap();
         let mut resp2 = Vec::new();
         conn2.read_to_end(&mut resp2).await.unwrap();
-        assert!(resp2.starts_with(b"HTTP/1.1 503 Service Unavailable"), "{resp2:?}");
+        assert!(
+            resp2.starts_with(b"HTTP/1.1 503 Service Unavailable"),
+            "{resp2:?}"
+        );
         // Upstream was never contacted for the rejected request
         assert_eq!(upstream_handled.load(Ordering::SeqCst), 1);
 
         // 5. Stale revision CAS conflict rejected over gRPC
         let conflict = client
-            .call(call("worker.apply", br#"{"expected_revision":1,"accepting":true}"#))
+            .call(call(
+                "worker.apply",
+                br#"{"expected_revision":1,"accepting":true}"#,
+            ))
             .await
             .unwrap_err();
         assert_eq!(conflict.code(), tonic::Code::Aborted);
@@ -242,7 +254,10 @@ async fn grpc_worker_control_live_mutates_admission_and_controls_proxy_traffic()
         // 6. Live in-memory mutation: restore admission via gRPC worker.apply with current revision
         let restored: Value = serde_json::from_slice(
             &client
-                .call(call("worker.apply", br#"{"expected_revision":2,"accepting":true}"#))
+                .call(call(
+                    "worker.apply",
+                    br#"{"expected_revision":2,"accepting":true}"#,
+                ))
                 .await
                 .unwrap()
                 .into_inner()

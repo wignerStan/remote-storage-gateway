@@ -34,7 +34,7 @@ async fn proxy_with_io(
     capacity: usize,
     io_timeout_ms: u64,
 ) -> NativeProxy {
-    pingora_worker::assembly::assemble(serde_json::from_value(json!({
+    network_data_plane_worker::assembly::assemble(serde_json::from_value(json!({
         "upstream":format!("http://{origin}"), "shutdown_seconds":1,"io_timeout_ms":io_timeout_ms,
         "inspection":{"max_requests":capacity},
         "callbacks":[{"binding":"direct","path":artifact,"kind":if artifact.file_name().unwrap()=="lifetime-function.so" {"function"}else{"object"},"package":"worker.sessions.test",
