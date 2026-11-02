@@ -18,5 +18,5 @@ func NewFactory(buildDigest string) (*reapi.Factory, error) {
 	if e != nil {
 		return nil, e
 	}
-	return reapi.NewFactory(descriptor.Descriptor{Schema: descriptor.Schema, PluginID: reapi.PluginID, PluginVersion: "0.1.0-alpha.1", Contract: encoded.Contract, Runtime: "go", BuildDigest: buildDigest, Implementations: []descriptor.Implementation{{ID: "grpc", ConfigSchema: raw, Capabilities: []string{"encoded-grpc", "bidi-streaming", "half-close", "opaque-frame-leases"}}}})
+	return reapi.NewFactory(descriptor.Descriptor{Schema: descriptor.Schema, PluginID: reapi.PluginID, PluginVersion: "0.2.0-alpha.1", Contract: encoded.Contract, Runtime: "go", BuildDigest: buildDigest, Implementations: []descriptor.Implementation{{ID: "grpc", ConfigSchema: raw, Capabilities: []string{"encoded-grpc", "bidi-streaming", "half-close", "opaque-frame-leases", "early-response-headers"}}}})
 }

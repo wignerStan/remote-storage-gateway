@@ -17,11 +17,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 )
 
 var ErrUnavailable = errors.New("materializer unavailable")
 
 type Service struct {
+	requests                               *semaphore.Weighted
 	store                                  *cloud.Store
 	observe                                func(context.Context) (broker.InstanceInfo, error)
 	workerID, origin, username, dataSocket string
@@ -35,12 +38,40 @@ func New(c config.ProcessConfig, store *cloud.Store, observe func(context.Contex
 	if store == nil || observe == nil || c.InstanceID == "" || c.WorkerInstanceID == "" || c.LocalUsername == "" || len(password) < 16 {
 		return nil, broker.ErrInvalid
 	}
+	if c.MaxConcurrentRequests == 0 {
+		c.MaxConcurrentRequests = config.DefaultMaxConcurrentRequests
+	}
+	if c.MaxConcurrentRequests < 1 || c.MaxConcurrentRequests > config.MaxConcurrentRequests {
+		return nil, broker.ErrInvalid
+	}
+	// An admitted DAV request owns at most one payload handle at a time.
+	// Keep frontend admission within the independent cache handle budget.
+	maxOpenFiles := c.MaxOpenFiles
+	if maxOpenFiles == 0 {
+		maxOpenFiles = 128
+	}
+	if maxOpenFiles < 1 || maxOpenFiles > 4096 {
+		return nil, broker.ErrInvalid
+	}
+	if c.MaxConcurrentRequests > maxOpenFiles {
+		c.MaxConcurrentRequests = maxOpenFiles
+	}
 	u, err := url.Parse(c.DataEndpoint)
 	if err != nil {
 		return nil, broker.ErrInvalid
 	}
-	return &Service{store: store, observe: observe, workerID: c.WorkerInstanceID, dataSocket: c.WorkerLocalDataSocket, origin: u.Scheme + "://" + strings.ToLower(u.Host), username: c.LocalUsername, password: append([]byte(nil), password...)}, nil
+	return &Service{requests: semaphore.NewWeighted(int64(c.MaxConcurrentRequests)), store: store, observe: observe, workerID: c.WorkerInstanceID, dataSocket: c.WorkerLocalDataSocket, origin: u.Scheme + "://" + strings.ToLower(u.Host), username: c.LocalUsername, password: append([]byte(nil), password...)}, nil
 }
+
+// AdmitRequest bounds simultaneous authentication, metadata and payload work.
+// Busy requests fail immediately rather than growing an in-process wait queue.
+func (s *Service) AdmitRequest(ctx context.Context) (func(), bool) {
+	if ctx == nil || ctx.Err() != nil || s.closing.Load() || !s.requests.TryAcquire(1) {
+		return nil, false
+	}
+	return sync.OnceFunc(func() { s.requests.Release(1) }), true
+}
+
 func (s *Service) CheckOrigin(ctx context.Context) error {
 	if s.closing.Load() {
 		return ErrUnavailable
@@ -95,15 +126,8 @@ func (s *Service) OpenFile(ctx context.Context, name string, flags int, _ os.Fil
 		return nil, err
 	}
 	lifetime, cancel := context.WithCancel(ctx)
-	var body io.ReadCloser
-	if !entry.IsDir {
-		body, entry, err = s.store.Open(lifetime, name, 0, -1)
-		if err != nil {
-			cancel()
-			return nil, err
-		}
-	}
-	return &File{service: s, ctx: lifetime, cancel: cancel, name: name, entry: entry, body: body}, nil
+	// Metadata requests and HTTP size/range seeks never open a payload stream.
+	return &File{service: s, ctx: lifetime, cancel: cancel, name: name, entry: entry}, nil
 }
 func (s *Service) Stat(ctx context.Context, name string) (os.FileInfo, error) {
 	if s.closing.Load() {
@@ -137,6 +161,7 @@ type File struct {
 	body            io.ReadCloser
 	offset          int64
 	closed          bool
+	listed          bool
 	entries         []os.FileInfo
 	directoryOffset int
 }
@@ -149,6 +174,15 @@ func (f *File) Read(data []byte) (int, error) {
 	}
 	if f.entry.IsDir {
 		return 0, os.ErrInvalid
+	}
+	if err := f.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if len(data) == 0 {
+		return 0, nil
+	}
+	if f.entry.Size >= 0 && f.offset >= f.entry.Size {
+		return 0, io.EOF
 	}
 	if f.body == nil {
 		body, _, err := f.service.store.Open(f.ctx, f.name, f.offset, -1)
@@ -190,14 +224,6 @@ func (f *File) Seek(offset int64, whence int) (int64, error) {
 			_ = f.body.Close()
 			f.body = nil
 		}
-		// End/zero seeks used by HTTP metadata framing do not prefetch data.
-		if position > 0 && position < f.entry.Size {
-			body, _, err := f.service.store.Open(f.ctx, f.name, position, -1)
-			if err != nil {
-				return f.offset, err
-			}
-			f.body = body
-		}
 	}
 	f.offset = position
 	return position, nil
@@ -215,7 +241,14 @@ func (f *File) Close() error {
 	}
 	return nil
 }
-func (f *File) Stat() (os.FileInfo, error) { return fileInfo{f.entry}, nil }
+func (f *File) Stat() (os.FileInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return nil, net.ErrClosed
+	}
+	return fileInfo{f.entry}, nil
+}
 func (f *File) Readdir(count int) ([]os.FileInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -225,11 +258,12 @@ func (f *File) Readdir(count int) ([]os.FileInfo, error) {
 	if !f.entry.IsDir {
 		return nil, os.ErrInvalid
 	}
-	if f.entries == nil {
+	if !f.listed {
 		entries, err := f.service.store.List(f.ctx, f.name)
 		if err != nil {
 			return nil, err
 		}
+		f.listed = true
 		f.entries = make([]os.FileInfo, 0, len(entries))
 		for _, entry := range entries {
 			f.entries = append(f.entries, fileInfo{entry})

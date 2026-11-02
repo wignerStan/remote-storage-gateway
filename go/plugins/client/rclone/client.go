@@ -15,7 +15,10 @@ import (
 	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 )
 
-type Client struct{ store *cloud.Store }
+type Client struct {
+	store    *cloud.Store
+	readOnly bool
+}
 
 func failure(err error) error {
 	switch {
@@ -100,11 +103,17 @@ func (r readBody) Read(buffer []byte) (int, error) {
 func (r readBody) Close() error { return failure(r.body.Close()) }
 
 func (c *Client) Put(ctx context.Context, request port.PutRequest) (port.PutResult, error) {
+	if c.readOnly {
+		return port.PutResult{}, port.ErrUnsupported
+	}
 	entry, err := c.store.Put(ctx, request.Path, request.Body, request.Size, request.ContentType, request.Metadata)
 	return port.PutResult{Info: info(entry)}, failure(err)
 }
 
 func (c *Client) Delete(ctx context.Context, ref port.ObjectRef) error {
+	if c.readOnly {
+		return port.ErrUnsupported
+	}
 	return failure(c.store.Delete(ctx, ref.Path))
 }
 func (c *Client) Close(ctx context.Context) error { return failure(c.store.Close(ctx)) }

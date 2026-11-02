@@ -125,3 +125,5 @@ assembly. No Dockerfile builder daemon is used.
 Validation receipts under `docs/validation` describe their exact revisions.
 Older receipts and image candidates are historical evidence; they do not imply
 that the current three-process architecture has been deployed.
+
+Small-file admission, packed ZIP namespaces and independent cache placement are documented in [Small files](docs/small-files.md).

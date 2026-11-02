@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,9 @@ const dataPassword = "data-plane-only-password-1234"
 const localPassword = "local-cache-only-password-5678"
 
 type originFixture struct {
+	pack                                   []byte
+	itemOpens                              atomic.Int32
+	smallFiles                             int
 	started, canceled, release             chan struct{}
 	startedOnce, canceledOnce, releaseOnce sync.Once
 	opens, remoteGets, publicRequests      atomic.Int32
@@ -49,17 +53,39 @@ func (f *originFixture) Stat(_ context.Context, r port.ObjectRef) (port.ObjectIn
 		return port.ObjectInfo{Path: "/", IsDir: true}, nil
 	}
 	size := int64(len("materialized-through-data-plane"))
-	if name == "stalled" {
+	if name == "pack.zip" && f.pack != nil {
+		size = int64(len(f.pack))
+	} else if name == "stalled" {
 		size = 65536
+	} else if strings.HasPrefix(name, "small-") && strings.HasSuffix(name, ".bin") {
+		index, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(name, "small-"), ".bin"))
+		if err != nil || index < 0 || index >= f.smallFiles {
+			return port.ObjectInfo{}, port.ErrNotFound
+		}
+		size = int64(len("tiny"))
+	} else if name == "empty" && f.smallFiles > 0 {
+		return port.ObjectInfo{Path: "/empty", IsDir: true}, nil
 	} else if name != "item" {
 		return port.ObjectInfo{}, port.ErrNotFound
 	}
 	return port.ObjectInfo{Path: "/" + name, Size: size, ModTime: time.Unix(1700000000, 0), ContentType: "application/octet-stream"}, nil
 }
-func (f *originFixture) List(ctx context.Context, _ port.ListRequest) (port.ListResult, error) {
+func (f *originFixture) List(ctx context.Context, req port.ListRequest) (port.ListResult, error) {
+	if strings.Trim(req.Path, "/") == "empty" {
+		return port.ListResult{}, nil
+	}
 	a, _ := f.Stat(ctx, port.ObjectRef{Path: "item"})
 	b, _ := f.Stat(ctx, port.ObjectRef{Path: "stalled"})
-	return port.ListResult{Objects: []port.ObjectInfo{a, b}}, nil
+	objects := []port.ObjectInfo{a, b}
+	if f.pack != nil {
+		p, _ := f.Stat(ctx, port.ObjectRef{Path: "pack.zip"})
+		objects = append(objects, p)
+	}
+	for i := 0; i < f.smallFiles; i++ {
+		v, _ := f.Stat(ctx, port.ObjectRef{Path: fmt.Sprintf("small-%d.bin", i)})
+		objects = append(objects, v)
+	}
+	return port.ListResult{Objects: objects}, nil
 }
 func (f *originFixture) Open(ctx context.Context, r port.OpenRequest) (port.ReadPlan, error) {
 	info, err := f.Stat(ctx, port.ObjectRef{Path: r.Path})
@@ -67,6 +93,9 @@ func (f *originFixture) Open(ctx context.Context, r port.OpenRequest) (port.Read
 		return port.ReadPlan{}, err
 	}
 	f.opens.Add(1)
+	if strings.Trim(r.Path, "/") == "item" {
+		f.itemOpens.Add(1)
+	}
 	if strings.Trim(r.Path, "/") == "stalled" {
 		f.startedOnce.Do(func() { close(f.started) })
 		remaining := info.Size - r.Offset
@@ -76,6 +105,12 @@ func (f *originFixture) Open(ctx context.Context, r port.OpenRequest) (port.Read
 		return port.ReadPlan{Info: info, Body: &stalledBody{ctx: ctx, fixture: f, remaining: remaining}}, nil
 	}
 	data := []byte("materialized-through-data-plane")
+	if strings.Trim(r.Path, "/") == "pack.zip" {
+		data = f.pack
+	}
+	if strings.HasPrefix(strings.Trim(r.Path, "/"), "small-") {
+		data = []byte("tiny")
+	}
 	if r.Offset > int64(len(data)) {
 		return port.ReadPlan{}, port.ErrInvalid
 	}
@@ -155,7 +190,7 @@ func (fixtureControl) Replace(context.Context, string, dp.Version, dp.Selection)
 func setup(t *testing.T) (config.ProcessConfig, *originFixture) { return setupTransport(t, false) }
 func setupTransport(t *testing.T, unix bool) (config.ProcessConfig, *originFixture) {
 	t.Helper()
-	directory, err := os.MkdirTemp("/tmp/trade-vfs-component", "instance-")
+	directory, err := os.MkdirTemp("/tmp", "trade-vfs-component-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +319,7 @@ func TestReadOnlyMaterializerAuthenticationAndDataPlaneOriginBinding(t *testing.
 	}
 	for _, change := range []func(*config.ProcessConfig){func(c *config.ProcessConfig) {
 		c.DataEndpoint = strings.Replace(c.DataEndpoint, "/remote-dav/", "/dav/", 1)
-	}, func(c *config.ProcessConfig) { c.WorkerInstanceID = "other-worker" }, func(c *config.ProcessConfig) { c.DataEndpoint = "http://127.0.0.1:1/remote-dav/bucket/" }, func(c *config.ProcessConfig) { c.Listen = "0.0.0.0:0" }, func(c *config.ProcessConfig) { c.LocalPasswordFile = c.DataPasswordFile }} {
+	}, func(c *config.ProcessConfig) { c.WorkerInstanceID = "other-worker" }, func(c *config.ProcessConfig) { c.DataEndpoint = "http://127.0.0.1:1/remote-dav/bucket/" }, func(c *config.ProcessConfig) { c.Listen = "0.0.0.0:0" }, func(c *config.ProcessConfig) { c.LocalPasswordFile = c.DataPasswordFile }, func(c *config.ProcessConfig) { c.MaxConcurrentRequests = 1025 }, func(c *config.ProcessConfig) { c.MaxOpenFiles = -1 }, func(c *config.ProcessConfig) { c.MaxCacheEntries = -1 }, func(c *config.ProcessConfig) { c.MaxDirectoryEntries = -1 }} {
 		invalid := c
 		change(&invalid)
 		bad, err := New(context.Background(), invalid)

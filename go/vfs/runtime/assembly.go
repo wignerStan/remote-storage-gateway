@@ -59,7 +59,10 @@ func validate(c config.ProcessConfig) error {
 	if !filepath.IsAbs(c.LocalPasswordFile) || !filepath.IsAbs(c.DataPasswordFile) || filepath.Clean(c.LocalPasswordFile) == filepath.Clean(c.DataPasswordFile) || c.MaxAgeSeconds < 1 || c.MaxAgeSeconds > 31536000 {
 		return broker.ErrInvalid
 	}
-	if materialization.ValidateOptions(&materialization.Options{Directory: c.Directory, MaxBytes: c.MaxBytes, MaxAge: time.Duration(c.MaxAgeSeconds) * time.Second}) != nil {
+	if c.MaxConcurrentRequests < 0 || c.MaxConcurrentRequests > config.MaxConcurrentRequests || c.MaxDirectoryEntries > 10000 {
+		return broker.ErrInvalid
+	}
+	if materialization.ValidateOptions(&materialization.Options{Directory: c.Directory, MaxBytes: c.MaxBytes, MaxAge: time.Duration(c.MaxAgeSeconds) * time.Second, MaxOpenFiles: c.MaxOpenFiles, MaxEntries: c.MaxCacheEntries, MaxDirectoryEntries: c.MaxDirectoryEntries}) != nil {
 		return broker.ErrInvalid
 	}
 	target, err := url.Parse(c.DataEndpoint)
@@ -114,7 +117,7 @@ func New(ctx context.Context, c config.ProcessConfig) (*Runtime, error) {
 		parameters["url"] = "http://localhost" + target.Path
 		parameters["unix_socket"] = c.WorkerLocalDataSocket
 	}
-	store, err := cloud.New(ctx, cloud.Config{Backend: "webdav", Parameters: parameters, Materialization: &materialization.Options{Directory: c.Directory, MaxBytes: c.MaxBytes, MaxAge: time.Duration(c.MaxAgeSeconds) * time.Second}})
+	store, err := cloud.New(ctx, cloud.Config{Backend: "webdav", Parameters: parameters, Materialization: &materialization.Options{Directory: c.Directory, MaxBytes: c.MaxBytes, MaxAge: time.Duration(c.MaxAgeSeconds) * time.Second, MaxOpenFiles: c.MaxOpenFiles, MaxEntries: c.MaxCacheEntries, MaxDirectoryEntries: c.MaxDirectoryEntries}})
 	if err != nil {
 		return nil, service.ErrUnavailable
 	}
