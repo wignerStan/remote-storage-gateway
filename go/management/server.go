@@ -9,14 +9,14 @@ import (
 	"strings"
 
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+	workercontract "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"github.com/wignerStan/network-data-plane-worker/go/pluginruntime"
-	"github.com/wignerStan/network-data-plane-worker/go/worker"
 )
 
 type Options struct {
 	Registry    *pluginruntime.Registry
 	Manager     *pluginruntime.Manager
-	Manifest    worker.Manifest
+	Manifest    workercontract.Manifest
 	ClientNames []string
 }
 
@@ -31,7 +31,7 @@ type Handler struct {
 // manifest. The caller MUST authenticate and authorize all management routes.
 // No handler in this package resolves credentials or proxies object payloads.
 func NewHandler(o Options) (*Handler, error) {
-	if o.Registry == nil || o.Manager == nil || o.Manifest.Schema != worker.CapabilitySchema || !descriptor.ValidDigest(o.Manifest.BuildDigest) || len(o.ClientNames) > 64 {
+	if o.Registry == nil || o.Manager == nil || o.Manifest.Schema != workercontract.CapabilitySchema || !descriptor.ValidDigest(o.Manifest.BuildDigest) || len(o.ClientNames) > 64 {
 		return nil, errors.New("invalid management registration")
 	}
 	h := &Handler{records: map[string][]byte{}, manager: o.Manager, names: map[string]bool{}}

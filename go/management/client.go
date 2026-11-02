@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+	workercontract "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"github.com/wignerStan/network-data-plane-worker/go/pluginruntime"
-	"github.com/wignerStan/network-data-plane-worker/go/worker"
 )
 
 type Client struct {
@@ -80,25 +80,25 @@ func (c *Client) call(ctx context.Context, method, path string, input any) ([]by
 	return b, nil
 }
 
-func (c *Client) Manifest(ctx context.Context) (worker.Manifest, error) {
-	var out worker.Manifest
+func (c *Client) Manifest(ctx context.Context) (workercontract.Manifest, error) {
+	var out workercontract.Manifest
 	b, err := c.call(ctx, http.MethodGet, ManifestPath, nil)
 	if err != nil {
 		return out, err
 	}
-	if descriptor.StrictJSON(b, &out) != nil || out.Schema != worker.CapabilitySchema || !descriptor.ValidDigest(out.BuildDigest) || len(out.PluginDescriptors) > 64 {
-		return worker.Manifest{}, ErrInvalid
+	if descriptor.StrictJSON(b, &out) != nil || out.Schema != workercontract.CapabilitySchema || !descriptor.ValidDigest(out.BuildDigest) || len(out.PluginDescriptors) > 64 {
+		return workercontract.Manifest{}, ErrInvalid
 	}
 	supported := false
 	for _, control := range out.Controls {
 		supported = supported || control == Contract
 	}
 	if !supported {
-		return worker.Manifest{}, ErrInvalid
+		return workercontract.Manifest{}, ErrInvalid
 	}
 	for _, p := range out.PluginDescriptors {
 		if !ValidName(p.PluginID) || !descriptor.ValidDigest(p.DescriptorDigest) {
-			return worker.Manifest{}, ErrInvalid
+			return workercontract.Manifest{}, ErrInvalid
 		}
 	}
 	return out, nil
