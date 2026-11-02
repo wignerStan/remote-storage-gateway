@@ -8,10 +8,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+	workercontract "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"github.com/wignerStan/network-data-plane-worker/go/nativeclient"
 	"github.com/wignerStan/network-data-plane-worker/go/pluginruntime"
+	"github.com/wignerStan/network-data-plane-worker/go/secrets"
 	"io"
 	"os"
 	"path/filepath"
@@ -19,7 +20,7 @@ import (
 )
 
 const BootstrapSchema = "network-data-plane-worker/bootstrap/v1"
-const CapabilitySchema = "network-data-plane-worker/capabilities/v1"
+const CapabilitySchema = workercontract.CapabilitySchema
 
 type Bootstrap struct {
 	Schema      string                    `json:"schema"`
@@ -99,21 +100,8 @@ func Validate(c Bootstrap, r *pluginruntime.Registry) error {
 	return nil
 }
 
-type PluginCapability struct {
-	PluginID         string `json:"plugin_id"`
-	Contract         string `json:"contract"`
-	PluginVersion    string `json:"plugin_version"`
-	DescriptorDigest string `json:"descriptor_digest"`
-}
-type Manifest struct {
-	Schema            string             `json:"schema"`
-	Implementation    string             `json:"implementation"`
-	Lanes             []string           `json:"lanes"`
-	Controls          []string           `json:"controls"`
-	PluginRuntimes    []string           `json:"plugin_runtimes"`
-	PluginDescriptors []PluginCapability `json:"plugin_descriptors"`
-	BuildDigest       string             `json:"build_digest"`
-}
+type PluginCapability = workercontract.PluginCapability
+type Manifest = workercontract.Manifest
 
 func Capabilities(r *pluginruntime.Registry) (Manifest, error) {
 	lanes := []string{}
@@ -147,39 +135,8 @@ func Capabilities(r *pluginruntime.Registry) (Manifest, error) {
 	return m, nil
 }
 
-// FileSecrets is an operator-local resolver; desired state contains only its
-// declared references. Ordinary management reads never expose these bytes.
-type FileSecrets map[string]string
+type FileSecrets = secrets.FileResolver
 
-func (s FileSecrets) Resolve(ctx context.Context, ref string) (client.Secret, error) {
-	if e := ctx.Err(); e != nil {
-		return nil, e
-	}
-	path, ok := s[ref]
-	if !ok {
-		return nil, client.ErrNotFound
-	}
-	f, e := os.Open(path)
-	if e != nil {
-		return nil, client.ErrInvalid
-	}
-	defer f.Close()
-	info, e := f.Stat()
-	if e != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
-		return nil, client.ErrInvalid
-	}
-	b, e := io.ReadAll(io.LimitReader(f, 65537))
-	if e != nil || len(b) > 65536 {
-		clear(b)
-		return nil, client.ErrInvalid
-	}
-	return &secret{b}, nil
-}
-
-type secret struct{ b []byte }
-
-func (s *secret) Bytes() []byte { return s.b }
-func (s *secret) Close()        { clear(s.b); s.b = nil }
 func WriteJSON(w io.Writer, v any) error {
 	e := json.NewEncoder(w)
 	e.SetIndent("", "  ")
