@@ -1,0 +1,43 @@
+{
+  "schema_version": "git-branch-policy/v1",
+  "domains": [
+    "storage/remote-gateway",
+    "storage/local-materialization",
+    "plugins/storage-client",
+    "code/upstream-extraction",
+    "build/images"
+  ],
+  "types": [
+    "build",
+    "chore",
+    "ci",
+    "docs",
+    "feat",
+    "fix",
+    "migrate",
+    "perf",
+    "refactor",
+    "revert",
+    "style",
+    "test"
+  ],
+  "release_lanes": {
+    "testing": {
+      "stage": "alpha",
+      "channel": "alpha"
+    },
+    "develop": {
+      "stage": "beta",
+      "channel": "project-latest"
+    },
+    "main": {
+      "stage": "stable",
+      "channel": "stable"
+    }
+  },
+  "promotion_order": [
+    "testing",
+    "develop",
+    "main"
+  ]
+}

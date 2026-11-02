@@ -1,18 +1,319 @@
 {
   "schema_version": 10,
   "units": [
-    {"path":"contracts/plugin/descriptor","names":["worker_plugin_descriptor"],"role":"protocol_spec"},
-    {"path":"contracts/worker","names":["worker_control_values"],"role":"protocol_spec"},
-    {"path":"contracts/plugin/descriptor/admission","names":["worker_descriptor_admission"],"role":"effect_tool","role_stratum":"handler_adapter","effect_family":"configuration","effect_operation":{"name":"plugin_descriptor_admission","mechanisms":["codec"],"controls":[]}},
-    {"path":"contracts/plugin/client","names":["worker_storage_client_port"],"role":"effect_tool","internal_port_kind":"effect","effect_family":"storage","port_name":"storage_client","port_operations":["Stat","List","Open","Put","Delete","Close","Descriptor","Prepare","Validate","Publish","Abort","Resolve","Bytes","Pin","Version","Release"]},
-    {"path":"contracts/plugin/policy","names":["worker_admission_policy_port"],"role":"effect_tool","internal_port_kind":"effect","effect_family":"network","port_name":"proxy_admission_policy","port_operations":["Admit","Close"]},
-    {"path":"contracts/plugin/protocol","names":["worker_protocol_port"],"role":"effect_tool","internal_port_kind":"effect","effect_family":"network","port_name":"streaming_protocol","port_operations":["Handle","Close"]},
-    {"path":"nativeclient","names":["worker_native_storage_streams"],"role":"effect_facility","effect_family":"storage","effect_operation":{"name":"native_client_stream_lifecycle","mechanisms":["runtime"],"controls":["backpressure","cancellation","drain","lifecycle","shutdown"]}},
-    {"path":"pluginruntime","names":["worker_client_generations"],"role":"effect_facility","effect_family":"storage","effect_operation":{"name":"typed_client_generation_lifecycle","mechanisms":["runtime"],"controls":["drain","lifecycle","shutdown"]}},
-    {"path":"management","names":["worker_control_sdk"],"role":"effect_tool","role_stratum":"application_support","effect_family":"network","effect_operation":{"name":"worker_management_request","mechanisms":["network","codec"],"controls":["cancellation"]}},
-    {"path":"management/httpapi","names":["worker_management_http"],"role":"front_door","role_stratum":"entry","entry_type":["server"],"sources":[{"path":"binding.go","role_stratum":"entry"},{"path":"entry.go","role_stratum":"entry"},{"path":"interface.go","role_stratum":"entry"},{"path":"routes.go","role_stratum":"entry"}]},
-    {"path":"secrets","names":["worker_operator_secrets"],"role":"effect_tool","role_stratum":"primitive_wrapper","effect_family":"storage","effect_operation":{"name":"private_operator_secret_read","mechanisms":["file"],"controls":[]}},
-    {"path":"worker","names":["worker_bootstrap"],"role":"front_door","role_stratum":"assembly","subsystem":"worker_runtime_bootstrap"},
-    {"path":"cmd/network-data-plane-worker","names":["worker_cli"],"role":"front_door","role_stratum":"assembly","subsystem":"worker_cli"}
+    {
+      "path": "contracts/plugin/descriptor",
+      "names": [
+        "worker_plugin_descriptor"
+      ],
+      "role": "protocol_spec"
+    },
+    {
+      "path": "contracts/worker",
+      "names": [
+        "worker_control_values"
+      ],
+      "role": "protocol_spec"
+    },
+    {
+      "path": "contracts/plugin/descriptor/admission",
+      "names": [
+        "worker_descriptor_admission"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "handler_adapter",
+      "effect_family": "configuration",
+      "effect_operation": {
+        "name": "plugin_descriptor_admission",
+        "mechanisms": [
+          "codec"
+        ],
+        "controls": []
+      }
+    },
+    {
+      "path": "contracts/plugin/client",
+      "names": [
+        "worker_storage_client_port"
+      ],
+      "role": "effect_tool",
+      "internal_port_kind": "effect",
+      "effect_family": "storage",
+      "port_name": "storage_client",
+      "port_operations": [
+        "Stat",
+        "List",
+        "Open",
+        "Put",
+        "Delete",
+        "Close",
+        "Descriptor",
+        "Prepare",
+        "Validate",
+        "Publish",
+        "Abort",
+        "Resolve",
+        "Bytes",
+        "Pin",
+        "Version",
+        "Release"
+      ]
+    },
+    {
+      "path": "contracts/plugin/policy",
+      "names": [
+        "worker_admission_policy_port"
+      ],
+      "role": "effect_tool",
+      "internal_port_kind": "effect",
+      "effect_family": "network",
+      "port_name": "proxy_admission_policy",
+      "port_operations": [
+        "Admit",
+        "Close"
+      ]
+    },
+    {
+      "path": "contracts/plugin/protocol",
+      "names": [
+        "worker_protocol_port"
+      ],
+      "role": "effect_tool",
+      "internal_port_kind": "effect",
+      "effect_family": "network",
+      "port_name": "streaming_protocol",
+      "port_operations": [
+        "Handle",
+        "Close"
+      ]
+    },
+    {
+      "path": "nativeclient",
+      "names": [
+        "worker_native_storage_streams"
+      ],
+      "role": "effect_facility",
+      "effect_family": "storage",
+      "effect_operation": {
+        "name": "native_client_stream_lifecycle",
+        "mechanisms": [
+          "runtime"
+        ],
+        "controls": [
+          "backpressure",
+          "cancellation",
+          "drain",
+          "lifecycle",
+          "shutdown"
+        ]
+      }
+    },
+    {
+      "path": "pluginruntime",
+      "names": [
+        "worker_client_generations"
+      ],
+      "role": "effect_facility",
+      "effect_family": "storage",
+      "effect_operation": {
+        "name": "typed_client_generation_lifecycle",
+        "mechanisms": [
+          "runtime"
+        ],
+        "controls": [
+          "drain",
+          "lifecycle",
+          "shutdown"
+        ]
+      }
+    },
+    {
+      "path": "management",
+      "names": [
+        "worker_control_sdk"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "application_support",
+      "effect_family": "network",
+      "effect_operation": {
+        "name": "worker_management_request",
+        "mechanisms": [
+          "network",
+          "codec"
+        ],
+        "controls": [
+          "cancellation"
+        ]
+      }
+    },
+    {
+      "path": "management/httpapi",
+      "names": [
+        "worker_management_http"
+      ],
+      "role": "front_door",
+      "role_stratum": "entry",
+      "entry_type": [
+        "server"
+      ],
+      "sources": [
+        {
+          "path": "binding.go",
+          "role_stratum": "entry"
+        },
+        {
+          "path": "entry.go",
+          "role_stratum": "entry"
+        },
+        {
+          "path": "interface.go",
+          "role_stratum": "entry"
+        },
+        {
+          "path": "routes.go",
+          "role_stratum": "entry"
+        }
+      ]
+    },
+    {
+      "path": "secrets",
+      "names": [
+        "worker_operator_secrets"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "primitive_wrapper",
+      "effect_family": "storage",
+      "effect_operation": {
+        "name": "private_operator_secret_read",
+        "mechanisms": [
+          "file"
+        ],
+        "controls": []
+      }
+    },
+    {
+      "path": "worker",
+      "names": [
+        "worker_bootstrap"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "subsystem": "worker_runtime_bootstrap"
+    },
+    {
+      "path": "cmd/network-data-plane-worker",
+      "names": [
+        "worker_cli"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "subsystem": "worker_cli"
+    },
+    {
+      "path": "gateway",
+      "names": [
+        "storage_gateway_access"
+      ],
+      "role": "use_flow",
+      "axis": "remote_storage_access"
+    },
+    {
+      "path": "gateway/httpapi",
+      "names": [
+        "storage_gateway_http_entry"
+      ],
+      "role": "front_door",
+      "role_stratum": "entry",
+      "entry_type": [
+        "server"
+      ],
+      "route_axes": [
+        "remote_storage_access"
+      ],
+      "externals": [
+        "github.com/gin-gonic/gin",
+        "golang.org/x/net/webdav"
+      ]
+    },
+    {
+      "path": "cmd/remote-storage-gateway",
+      "names": [
+        "storage_gateway_assembly"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "subsystem": "storage_gateway",
+      "entry_type": [
+        "direct"
+      ],
+      "sources": [
+        {
+          "path": "main.go",
+          "role_stratum": "assembly"
+        },
+        {
+          "path": "assembly.go",
+          "role_stratum": "assembly"
+        },
+        {
+          "path": "runtime.go",
+          "role_stratum": "entry"
+        }
+      ]
+    },
+    {
+      "path": "storage/rcloneclient",
+      "names": [
+        "rclone_storage_client_preparation"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "application_support",
+      "effect_family": "storage",
+      "effect_operation": {
+        "name": "prepare_rclone_storage_client",
+        "mechanisms": [
+          "network",
+          "file",
+          "codec"
+        ],
+        "controls": [
+          "cancellation",
+          "backpressure",
+          "drain",
+          "lifecycle",
+          "shutdown"
+        ]
+      },
+      "sources": [
+        {
+          "path": "client.go",
+          "role_stratum": "handler_adapter"
+        },
+        {
+          "path": "factory.go",
+          "role_stratum": "application_support"
+        }
+      ]
+    },
+    {
+      "path": "plugins/rclone",
+      "names": [
+        "rclone_plugin_publication_entry"
+      ],
+      "role": "front_door",
+      "role_stratum": "entry",
+      "entry_type": [
+        "direct"
+      ]
+    },
+    {
+      "path": "cmd/plugin-rclone",
+      "names": [
+        "rclone_native_plugin_assembly"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "subsystem": "rclone_native_plugin"
+    }
   ]
 }

@@ -135,6 +135,9 @@ func (f *Factory) Prepare(ctx context.Context, cfg client.PluginConfig) (client.
 			continue
 		}
 		secret, e := cfg.Secrets.Resolve(ctx, field.Name)
+		if e != nil && secret != nil {
+			secret.Close()
+		}
 		if errors.Is(e, client.ErrNotFound) && !field.Required {
 			continue
 		}

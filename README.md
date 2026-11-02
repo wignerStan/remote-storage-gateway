@@ -1,4 +1,47 @@
-# Network data-plane worker
+# Remote storage gateway
+
+This is one product monorepo: Worker contracts/runtime, gateway ingress, embedded
+control plane, dynamically loaded OpenList and rclone clients, and their source
+and OCI builds. The upstream trees in `third_party/` stay pristine. Ordered,
+hashed patches are replayed into disposable build trees; the runtime never uses
+the old editable OpenList/control-plane/client-plugin forks as dependencies.
+
+`client.rclone` is the remote object transport. Its S3, Drive and conservative
+WebDAV implementations stream through rclone; the explicit `webdav-streaming`
+implementation additionally supports unknown-size uploads on compatible servers.
+Local materialization is optional and off by default. Enabling `materialization`
+selects a private, generation-owned VFS read cache. Writes still commit directly
+to the remote. The cache budget is an eviction target, and cache data is
+regenerable; it is not a backup or a stable pathname API. Stream cancellation
+keeps peer reads alive and generation retirement settles owned handles before
+removing the cache directory.
+
+Schemas are derived by each plugin entry from its implementation's typed config
+models. Runtime adapters receive frozen descriptor values. The existing Worker
+continues to own the versioned descriptor, client port and native lifecycle
+contracts, including their `network-data-plane-worker` protocol identity.
+
+## Product build
+
+Development tools are managed by mise. Select a reviewed Infra checkout and keep
+build output outside the repository:
+
+```sh
+make INFRA_ROOT=/path/to/reviewed/infra BUILD_DIR=/tmp/trade-remote-gateway-build
+make INFRA_ROOT=/path/to/reviewed/infra BUILD_DIR=/tmp/trade-remote-gateway-build test
+make INFRA_ROOT=/path/to/reviewed/infra BUILD_DIR=/tmp/trade-remote-gateway-build images
+```
+
+The first command builds pinned frontend source, embeds its output into the
+control-plane executable, and builds the gateway, admin CLI and two independent
+native `.so` clients. `make test` exercises the derived source and real native
+artifacts. Images use native Buildbarn `rules_img` targets; image-input staging
+requires clean source commits and verified build receipts. No Dockerfile runner,
+BuildKit or Podman is involved. Source pins, patch hashes and resulting trees are
+recorded in `.git-source-relationships/`; see `build/README.md` for individual
+stages and execution settings.
+
+## Worker implementation
 
 See the [security model](SECURITY.md) for trust boundaries, implemented controls and deployment responsibilities.
 
@@ -10,7 +53,7 @@ native `pingora-proxy::ProxyHttp` engine owns forwarding, streaming, upgrades an
 connection pooling. The library also exposes composition APIs for other selected
 applications. Business policy belongs to separately installed plugins.
 
-The canonical repository and application identity is `network-data-plane-worker`.
+The Worker component and its public contract retain the identity `network-data-plane-worker`.
 This repository owns the [versioned plugin contract](docs/network-data-plane-worker-spec.md),
 including descriptors, configuration/secret vocabulary, typed Client/Policy/Protocol
 ports and generation pinning. Concrete provider implementations publish their own
@@ -35,8 +78,8 @@ contracts without linking its concrete provider implementation into the host.
 From `go/`, use the existing external development workspace and mise toolchain:
 
 ```sh
-mise exec -- env GOWORK=/develop/network/go.work CC=/usr/bin/gcc CXX=/usr/bin/g++ go test -race ./...
-mise exec -- env GOWORK=/develop/network/go.work CC=/usr/bin/gcc CXX=/usr/bin/g++ go build -tags dataplane_l7 -o /tmp/trade-storage-gateway-worker/network-data-plane-worker ./cmd/network-data-plane-worker
+GOWORK=/tmp/trade-remote-gateway-build/go.work mise exec -- go test -race -tags dataplane_l7 ./...
+GOWORK=/tmp/trade-remote-gateway-build/go.work mise exec -- go build -tags dataplane_l7 -o /tmp/trade-remote-gateway-build/bin/network-data-plane-worker ./cmd/network-data-plane-worker
 ```
 
 `--inspect-artifact <absolute-path> --artifact-sha256 <sha256> --plugin-id <id>

@@ -1,0 +1,389 @@
+diff --git a/vfs/read_write.go b/vfs/read_write.go
+index 56b9c46..8a5dfd7 100644
+--- a/vfs/read_write.go
++++ b/vfs/read_write.go
+@@ -1,6 +1,7 @@
+ package vfs
+ 
+ import (
++	"context"
+ 	"fmt"
+ 	"io"
+ 	"os"
+@@ -254,7 +255,10 @@ func (fh *RWFileHandle) Stat() (os.FileInfo, error) {
+ // if release is set then it releases the mutex just before doing the IO
+ //
+ // call with lock held
+-func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool) (n int, err error) {
++func (fh *RWFileHandle) _readAt(ctx context.Context, b []byte, off int64, release bool) (n int, err error) {
++	if err := ctx.Err(); err != nil {
++		return 0, err
++	}
+ 	defer log.Trace(fh.logPrefix(), "size=%d, off=%d", len(b), off)("n=%d, err=%v", &n, &err)
+ 	if fh.closed {
+ 		return n, ECLOSED
+@@ -273,7 +277,7 @@ func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool) (n int, err e
+ 		fh.mu.Unlock()
+ 	}
+ 
+-	n, err = fh.item.ReadAt(b, off)
++	n, err = fh.item.ReadAtContext(ctx, b, off)
+ 
+ 	if release {
+ 		fh.mu.Lock()
+@@ -283,16 +287,27 @@ func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool) (n int, err e
+ 
+ // ReadAt bytes from the file at off
+ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
++	return fh.ReadAtContext(context.Background(), b, off)
++}
++
++// ReadAtContext reads bytes while allowing this caller to stop waiting for a
++// shared cache download. Cancellation does not cancel other readers' downloads.
++func (fh *RWFileHandle) ReadAtContext(ctx context.Context, b []byte, off int64) (n int, err error) {
+ 	fh.mu.Lock()
+ 	defer fh.mu.Unlock()
+-	return fh._readAt(b, off, true)
++	return fh._readAt(ctx, b, off, true)
+ }
+ 
+ // Read bytes from the file
+ func (fh *RWFileHandle) Read(b []byte) (n int, err error) {
++	return fh.ReadContext(context.Background(), b)
++}
++
++// ReadContext is Read with cancellation of this caller's cache-download wait.
++func (fh *RWFileHandle) ReadContext(ctx context.Context, b []byte) (n int, err error) {
+ 	fh.mu.Lock()
+ 	defer fh.mu.Unlock()
+-	n, err = fh._readAt(b, fh.offset, false)
++	n, err = fh._readAt(ctx, b, fh.offset, false)
+ 	fh.offset += int64(n)
+ 	return n, err
+ }
+diff --git a/vfs/read_write_test.go b/vfs/read_write_test.go
+index b0e05a8..15110e9 100644
+--- a/vfs/read_write_test.go
++++ b/vfs/read_write_test.go
+@@ -114,6 +114,24 @@ func TestRWFileHandleMethodsRead(t *testing.T) {
+ 	assert.Equal(t, ECLOSED, fh.Close())
+ }
+ 
++func TestRWFileHandleReadContext(t *testing.T) {
++	_, _, fh := rwHandleCreateReadOnly(t)
++	defer fh.Close()
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	buffer := make([]byte, 1)
++	n, err := fh.ReadContext(ctx, buffer)
++	require.Zero(t, n)
++	require.ErrorIs(t, err, context.Canceled)
++	n, err = fh.ReadAtContext(ctx, buffer, 0)
++	require.Zero(t, n)
++	require.ErrorIs(t, err, context.Canceled)
++	n, err = fh.Read(buffer)
++	require.NoError(t, err)
++	require.Equal(t, 1, n)
++	require.Equal(t, byte('0'), buffer[0], "canceled sequential read must not advance offset")
++}
++
+ func TestRWFileHandleSeek(t *testing.T) {
+ 	_, _, fh := rwHandleCreateReadOnly(t)
+ 
+diff --git a/vfs/vfscache/downloaders/downloaders.go b/vfs/vfscache/downloaders/downloaders.go
+index 6e37adf..4c239da 100644
+--- a/vfs/vfscache/downloaders/downloaders.go
++++ b/vfs/vfscache/downloaders/downloaders.go
+@@ -221,6 +221,9 @@ func (dls *Downloaders) _removeClosed() {
+ // Close all running downloaders and return any unfulfilled waiters
+ // with inErr
+ func (dls *Downloaders) Close(inErr error) (err error) {
++	// Cancel blocked backend reads before StopBuffering joins their goroutines.
++	// This closes the cache item's downloader owner, not an individual waiter.
++	dls.cancel()
+ 	dls.mu.Lock()
+ 	defer dls.mu.Unlock()
+ 	dls._removeClosed()
+@@ -232,7 +235,6 @@ func (dls *Downloaders) Close(inErr error) (err error) {
+ 			err = closeErr
+ 		}
+ 	}
+-	dls.cancel()
+ 	// dls may have entered the periodical (every 5 seconds) kickWaiters() call
+ 	// unlock the mutex to allow it to finish so that we can get its dls.wg.Done()
+ 	dls.mu.Unlock()
+@@ -247,12 +249,23 @@ func (dls *Downloaders) Close(inErr error) (err error) {
+ // Download the range passed in returning when it has been downloaded
+ // with an error from the downloading go routine.
+ func (dls *Downloaders) Download(r ranges.Range) (err error) {
++	return dls.DownloadContext(context.Background(), r)
++}
++
++// DownloadContext waits for a shared download on behalf of one caller. On
++// cancellation it unregisters that waiter; other waiters and the cache-owned
++// download continue. Buffered completion prevents dispatcher/cancel races from
++// blocking the downloader while its mutex is held.
++func (dls *Downloaders) DownloadContext(ctx context.Context, r ranges.Range) (err error) {
++	if err := ctx.Err(); err != nil {
++		return err
++	}
+ 	// defer log.Trace(dls.src, "r=%+v", r)("err=%v", &err)
+ 
+ 	dls.mu.Lock()
+ 
+-	errChan := make(chan error)
+-	waiter := waiter{
++	errChan := make(chan error, 1)
++	queued := waiter{
+ 		r:       r,
+ 		errChan: errChan,
+ 	}
+@@ -263,9 +276,24 @@ func (dls *Downloaders) Download(r ranges.Range) (err error) {
+ 		return err
+ 	}
+ 
+-	dls.waiters = append(dls.waiters, waiter)
++	dls.waiters = append(dls.waiters, queued)
+ 	dls.mu.Unlock()
+-	return <-errChan
++	select {
++	case err := <-errChan:
++		return err
++	case <-ctx.Done():
++		dls.mu.Lock()
++		for i, pending := range dls.waiters {
++			if pending.errChan == errChan {
++				copy(dls.waiters[i:], dls.waiters[i+1:])
++				dls.waiters[len(dls.waiters)-1] = waiter{}
++				dls.waiters = dls.waiters[:len(dls.waiters)-1]
++				break
++			}
++		}
++		dls.mu.Unlock()
++		return ctx.Err()
++	}
+ }
+ 
+ // close any waiters with the error passed in
+diff --git a/vfs/vfscache/downloaders/downloaders_test.go b/vfs/vfscache/downloaders/downloaders_test.go
+index 7ad6269..4562ac3 100644
+--- a/vfs/vfscache/downloaders/downloaders_test.go
++++ b/vfs/vfscache/downloaders/downloaders_test.go
+@@ -10,6 +10,7 @@ import (
+ 	"time"
+ 
+ 	_ "github.com/rclone/rclone/backend/local"
++	"github.com/rclone/rclone/fs"
+ 	"github.com/rclone/rclone/fs/operations"
+ 	"github.com/rclone/rclone/fstest"
+ 	"github.com/rclone/rclone/lib/ranges"
+@@ -19,6 +20,126 @@ import (
+ 	"github.com/stretchr/testify/require"
+ )
+ 
++type gatedObject struct {
++	fs.Object
++	gate    <-chan struct{}
++	started chan struct{}
++	once    sync.Once
++}
++
++func (o *gatedObject) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadCloser, error) {
++	body, err := o.Object.Open(ctx, options...)
++	if err != nil {
++		return nil, err
++	}
++	return &gatedReadCloser{ReadCloser: body, ctx: ctx, owner: o}, nil
++}
++
++type gatedReadCloser struct {
++	io.ReadCloser
++	ctx   context.Context
++	owner *gatedObject
++}
++
++func (r *gatedReadCloser) Read(p []byte) (int, error) {
++	r.owner.once.Do(func() { close(r.owner.started) })
++	select {
++	case <-r.owner.gate:
++		return r.ReadCloser.Read(p)
++	case <-r.ctx.Done():
++		return 0, r.ctx.Err()
++	}
++}
++
++func TestDownloadContextDoesNotCancelPeer(t *testing.T) {
++	r := fstest.NewRun(t)
++	ctx := context.Background()
++	const size = int64(1024 * 1024)
++	src, err := operations.RcatSize(ctx, r.Fremote, "context.txt", io.NopCloser(readers.NewPatternReader(size)), size, time.Now(), nil)
++	require.NoError(t, err)
++	gate, started := make(chan struct{}), make(chan struct{})
++	var release sync.Once
++	item := &testItem{t: t, size: size}
++	opt := vfscommon.Opt
++	dls := New(ctx, item, &opt, "context.txt", &gatedObject{Object: src, gate: gate, started: started})
++	t.Cleanup(func() { release.Do(func() { close(gate) }); assert.NoError(t, dls.Close(nil)) })
++	firstCtx, cancel := context.WithCancel(ctx)
++	defer cancel()
++	first, peer := make(chan error, 1), make(chan error, 1)
++	rangeWanted := ranges.Range{Pos: 0, Size: 100}
++	go func() { first <- dls.DownloadContext(firstCtx, rangeWanted) }()
++	go func() { peer <- dls.DownloadContext(ctx, rangeWanted) }()
++	select {
++	case <-started:
++	case <-time.After(3 * time.Second):
++		t.Fatal("shared downloader did not start")
++	}
++	require.Eventually(t, func() bool { dls.mu.Lock(); defer dls.mu.Unlock(); return len(dls.waiters) == 2 }, 3*time.Second, time.Millisecond)
++	cancel()
++	select {
++	case err := <-first:
++		require.ErrorIs(t, err, context.Canceled)
++	case <-time.After(time.Second):
++		t.Fatal("canceled waiter blocked")
++	}
++	dls.mu.Lock()
++	waiterCount := len(dls.waiters)
++	dls.mu.Unlock()
++	require.Equal(t, 1, waiterCount)
++	require.NoError(t, dls.ctx.Err())
++	select {
++	case err := <-peer:
++		t.Fatalf("peer stopped with canceled caller: %v", err)
++	default:
++	}
++	release.Do(func() { close(gate) })
++	select {
++	case err := <-peer:
++		require.NoError(t, err)
++	case <-time.After(3 * time.Second):
++		t.Fatal("peer did not receive shared download")
++	}
++	dls.mu.Lock()
++	waiterCount = len(dls.waiters)
++	dls.mu.Unlock()
++	require.Zero(t, waiterCount)
++}
++
++func TestDownloadersCloseCancelsBlockedInput(t *testing.T) {
++	r := fstest.NewRun(t)
++	ctx := context.Background()
++	const size = int64(1024 * 1024)
++	src, err := operations.RcatSize(ctx, r.Fremote, "close-context.txt", io.NopCloser(readers.NewPatternReader(size)), size, time.Now(), nil)
++	require.NoError(t, err)
++	gate, started := make(chan struct{}), make(chan struct{})
++	var release sync.Once
++	opt := vfscommon.Opt
++	dls := New(ctx, &testItem{t: t, size: size}, &opt, "close-context.txt", &gatedObject{Object: src, gate: gate, started: started})
++	t.Cleanup(func() { release.Do(func() { close(gate) }); _ = dls.Close(context.Canceled) })
++	readDone := make(chan error, 1)
++	go func() { readDone <- dls.DownloadContext(ctx, ranges.Range{Pos: 0, Size: 1}) }()
++	select {
++	case <-started:
++	case <-time.After(3 * time.Second):
++		t.Fatal("download did not block in backend input")
++	}
++	closed := make(chan error, 1)
++	go func() { closed <- dls.Close(context.Canceled) }()
++	select {
++	case <-closed:
++	case <-time.After(time.Second):
++		release.Do(func() { close(gate) })
++		t.Fatal("Close joined blocked input before canceling it")
++	}
++	select {
++	case err := <-readDone:
++		require.ErrorIs(t, err, context.Canceled)
++	case <-time.After(time.Second):
++		t.Fatal("Close retained download waiter")
++	}
++	require.ErrorIs(t, dls.ctx.Err(), context.Canceled)
++}
++
+ // TestMain drives the tests
+ func TestMain(m *testing.M) {
+ 	fstest.TestMain(m)
+diff --git a/vfs/vfscache/item.go b/vfs/vfscache/item.go
+index f25f907..8ffc0f4 100644
+--- a/vfs/vfscache/item.go
++++ b/vfs/vfscache/item.go
+@@ -1243,6 +1243,15 @@ func (item *Item) FindMissing(r ranges.Range) (outr ranges.Range) {
+ //
+ // call with the item lock held
+ func (item *Item) _ensure(offset, size int64) (err error) {
++	return item._ensureContext(context.Background(), offset, size)
++}
++
++// _ensureContext is _ensure with a caller-owned wait context. The cache and its
++// shared background download retain their independent generation lifetime.
++func (item *Item) _ensureContext(ctx context.Context, offset, size int64) (err error) {
++	if err := ctx.Err(); err != nil {
++		return err
++	}
+ 	// defer log.Trace(item.name, "offset=%d, size=%d", offset, size)("err=%v", &err)
+ 	if offset+size > item.info.Size {
+ 		size = item.info.Size - offset
+@@ -1296,7 +1305,7 @@ func (item *Item) _ensure(offset, size int64) (err error) {
+ 		}
+ 		item.downloaders = downloaders.New(item.c.ctx, item, item.c.opt, item.name, item.o)
+ 	}
+-	return item.downloaders.Download(r)
++	return item.downloaders.DownloadContext(ctx, r)
+ }
+ 
+ // _written marks the (offset, size) as present in the backing file
+@@ -1368,11 +1377,17 @@ func (item *Item) GetModTime() (modTime time.Time, err error) {
+ 
+ // ReadAt bytes from the file at off
+ func (item *Item) ReadAt(b []byte, off int64) (n int, err error) {
++	return item.ReadAtContext(context.Background(), b, off)
++}
++
++// ReadAtContext reads cached data, allowing this caller to cancel a shared
++// download wait without changing the cache's background work ownership.
++func (item *Item) ReadAtContext(ctx context.Context, b []byte, off int64) (n int, err error) {
+ 	n = 0
+ 	var expBackOff int
+ 	for retries := range fs.GetConfig(item.c.ctx).LowLevelRetries {
+ 		item.preAccess()
+-		n, err = item.readAt(b, off)
++		n, err = item.readAtContext(ctx, b, off)
+ 		item.postAccess()
+ 		if err == nil || err == io.EOF {
+ 			break
+@@ -1384,7 +1399,13 @@ func (item *Item) ReadAt(b []byte, off int64) (n int, err error) {
+ 		}
+ 		item.c.KickCleaner()
+ 		expBackOff = 2 << uint(retries)
+-		time.Sleep(time.Duration(expBackOff) * time.Millisecond) // Exponential back-off the retries
++		timer := time.NewTimer(time.Duration(expBackOff) * time.Millisecond)
++		select {
++		case <-ctx.Done():
++			timer.Stop()
++			return n, ctx.Err()
++		case <-timer.C:
++		}
+ 	}
+ 
+ 	if fserrors.IsErrNoSpace(err) {
+@@ -1396,6 +1417,10 @@ func (item *Item) ReadAt(b []byte, off int64) (n int, err error) {
+ 
+ // ReadAt bytes from the file at off
+ func (item *Item) readAt(b []byte, off int64) (n int, err error) {
++	return item.readAtContext(context.Background(), b, off)
++}
++
++func (item *Item) readAtContext(ctx context.Context, b []byte, off int64) (n int, err error) {
+ 	item.mu.Lock()
+ 	if item.fd == nil {
+ 		item.mu.Unlock()
+@@ -1407,7 +1432,7 @@ func (item *Item) readAt(b []byte, off int64) (n int, err error) {
+ 	}
+ 	defer item.mu.Unlock()
+ 
+-	err = item._ensure(off, int64(len(b)))
++	err = item._ensureContext(ctx, off, int64(len(b)))
+ 	if err != nil {
+ 		return 0, err
+ 	}
