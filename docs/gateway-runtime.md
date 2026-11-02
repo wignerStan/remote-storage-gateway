@@ -123,7 +123,10 @@ native loader. Existing OpenList legacy WebDAV/S3 addresses remain available
 for clients whose storage plugins have not yet migrated; this is the staged
 management integration, not completion of every legacy provider migration.
 
-`make admin` builds the native operator. The supplied systemd service/timer
+`make admin` builds the standalone-Worker operator. Its Secret allowlist and
+supplied systemd unit target that standalone profile; they must not be pointed at
+the managed CP Secret containing processes/targets configuration. Managed profile
+Secret publication and rollout stay an explicit deployment operation. The timer
 runs `gateway-admin tls-sync` every12hours: obtain/check the Tailscale certificate,
 validate its key/domain/validity, publish only allowlisted configuration/secrets,
 then roll the Deployment. The successful payload fingerprint is committed after
