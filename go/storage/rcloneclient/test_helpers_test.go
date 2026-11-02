@@ -3,7 +3,6 @@ package rcloneclient
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,9 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rclone/rclone/backend/local"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/wignerStan/infra/go/code/schema"
 	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
@@ -72,14 +68,6 @@ func passwordResolver() port.SecretResolver {
 	})
 }
 
-func localRemote(t *testing.T, root string) fs.Fs {
-	t.Helper()
-	remote, err := local.NewFs(context.Background(), "local-fixture", root, configmap.Simple{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return remote
-}
 func closeClient(t *testing.T, c port.Client) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -177,10 +165,10 @@ func (f *davFixture) write(t *testing.T, name string, data []byte) {
 type zeroReader struct{}
 
 func (zeroReader) Read(p []byte) (int, error) { clear(p); return len(p), nil }
-func davClient(t *testing.T, f *davFixture, m *Materialization) *Client {
+func davClient(t *testing.T, f *davFixture, m *MaterializationConfig) *Client {
 	return davClientAs(t, f, m, "webdav")
 }
-func davClientAs(t *testing.T, f *davFixture, m *Materialization, implementation string) *Client {
+func davClientAs(t *testing.T, f *davFixture, m *MaterializationConfig, implementation string) *Client {
 	t.Helper()
 	input := WebDAVPublicConfig{URL: f.URL(), Username: "fixture", Materialization: m}
 	raw := mustJSON(t, input)
@@ -202,37 +190,4 @@ func davClientAs(t *testing.T, f *davFixture, m *Materialization, implementation
 	}
 	t.Cleanup(func() { f.unblock(); closeClient(t, c) })
 	return c
-}
-
-type failBody struct{ err error }
-
-func (b failBody) Read([]byte) (int, error) {
-	if b.err != nil {
-		return 0, b.err
-	}
-	return 0, errors.New("raw-reader-private-secret")
-}
-func (failBody) Close() error { return errors.New("raw-close-private-secret") }
-
-type bodyObject struct {
-	fs.Object
-	body io.ReadCloser
-}
-
-func (o *bodyObject) Open(context.Context, ...fs.OpenOption) (io.ReadCloser, error) {
-	return o.body, nil
-}
-
-type wrappedRemote struct {
-	fs.Fs
-	features *fs.Features
-	object   fs.Object
-}
-
-func (f *wrappedRemote) Features() *fs.Features { return f.features }
-func (f *wrappedRemote) NewObject(ctx context.Context, name string) (fs.Object, error) {
-	if f.object != nil {
-		return f.object, nil
-	}
-	return f.Fs.NewObject(ctx, name)
 }

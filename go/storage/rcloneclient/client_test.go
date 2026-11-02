@@ -7,18 +7,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/rclone/rclone/fs/config"
 	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
 	"github.com/wignerStan/network-data-plane-worker/go/nativeclient"
@@ -81,41 +78,6 @@ func TestFactoryInjectedDescriptorAndStrictSecrets(t *testing.T) {
 	_, err = factory.Prepare(context.Background(), port.PluginConfig{ImplementationID: "s3", Public: []byte(`{"region":"test","bucket":"bucket"}`), Secrets: secrets})
 	if !errors.Is(err, port.ErrInvalid) {
 		t.Fatal("missing required credentials accepted", err)
-	}
-}
-
-func TestExplicitWebDAVUnknownSizeUploadStreamsBeforeEOF(t *testing.T) {
-	f := newDAV(t)
-	c := davClientAs(t, f, nil, "webdav-streaming")
-	input, producer := io.Pipe()
-	defer input.Close()
-	defer producer.Close()
-	result := make(chan error, 1)
-	go func() {
-		_, err := c.Put(context.Background(), port.PutRequest{Path: "unknown", Size: -1, Body: input})
-		result <- err
-	}()
-	if _, err := producer.Write([]byte("prefix-")); err != nil {
-		t.Fatal(err)
-	}
-	waitSignal(t, f.putBytes, "unknown-size remote bytes before producer EOF")
-	select {
-	case err := <-result:
-		t.Fatalf("unknown-size upload completed before producer EOF: %v", err)
-	default:
-	}
-	if _, err := producer.Write([]byte("suffix")); err != nil {
-		t.Fatal(err)
-	}
-	if err := producer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-result; err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(filepath.Join(f.root, "unknown"))
-	if err != nil || string(data) != "prefix-suffix" {
-		t.Fatalf("unknown-size remote commit: %q %v", data, err)
 	}
 }
 
@@ -244,7 +206,7 @@ func TestActualRcloneNativePluginLifecycle(t *testing.T) {
 		cachedRemote := newDAV(t)
 		cachedRemote.write(t, "stalled", make([]byte, 65536))
 		cacheRoot := t.TempDir()
-		configuration := WebDAVPublicConfig{URL: cachedRemote.URL(), Username: "fixture", Materialization: &Materialization{Directory: cacheRoot, MaxBytes: 1 << 20, MaxAgeSeconds: 60}}
+		configuration := WebDAVPublicConfig{URL: cachedRemote.URL(), Username: "fixture", Materialization: &MaterializationConfig{Directory: cacheRoot, MaxBytes: 1 << 20, MaxAgeSeconds: 60}}
 		candidate, err := factory.Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: mustJSON(t, configuration), Secrets: passwordResolver()})
 		if err != nil {
 			t.Fatal(err)
@@ -295,7 +257,7 @@ func TestActualRcloneNativePluginLifecycle(t *testing.T) {
 	t.Run("materialized-request-cancel-keeps-peer", func(t *testing.T) {
 		f := newDAV(t)
 		f.write(t, "stalled", make([]byte, 65536))
-		configuration := WebDAVPublicConfig{URL: f.URL(), Username: "fixture", Materialization: &Materialization{Directory: t.TempDir(), MaxBytes: 1 << 20, MaxAgeSeconds: 60}}
+		configuration := WebDAVPublicConfig{URL: f.URL(), Username: "fixture", Materialization: &MaterializationConfig{Directory: t.TempDir(), MaxBytes: 1 << 20, MaxAgeSeconds: 60}}
 		candidate, err := factory.Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: mustJSON(t, configuration), Secrets: passwordResolver()})
 		if err != nil {
 			t.Fatal(err)
@@ -314,7 +276,7 @@ func TestActualRcloneNativePluginLifecycle(t *testing.T) {
 	t.Run("materialized-cancel-last-handle", func(t *testing.T) {
 		f := newDAV(t)
 		f.write(t, "stalled", make([]byte, 65536))
-		configuration := WebDAVPublicConfig{URL: f.URL(), Username: "fixture", Materialization: &Materialization{Directory: t.TempDir(), MaxBytes: 1 << 20, MaxAgeSeconds: 60}}
+		configuration := WebDAVPublicConfig{URL: f.URL(), Username: "fixture", Materialization: &MaterializationConfig{Directory: t.TempDir(), MaxBytes: 1 << 20, MaxAgeSeconds: 60}}
 		candidate, err := factory.Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: mustJSON(t, configuration), Secrets: passwordResolver()})
 		if err != nil {
 			t.Fatal(err)
@@ -332,299 +294,58 @@ func TestActualRcloneNativePluginLifecycle(t *testing.T) {
 	})
 }
 
-func TestWebDAVStreamingRangePaginationAndErrors(t *testing.T) {
+func TestWorkerPagingAndErrorMapping(t *testing.T) {
 	f := newDAV(t)
-	f.write(t, "alpha", []byte("alpha"))
-	f.write(t, "beta", []byte("beta"))
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		f.write(t, name, []byte(name))
+	}
 	c := davClient(t, f, nil)
-	pipe, producer := io.Pipe()
-	putResult := make(chan error, 1)
-	go func() {
-		_, err := c.Put(context.Background(), port.PutRequest{Path: "/upload", Body: pipe, Size: 12})
-		putResult <- err
-	}()
-	defer producer.Close()
-	defer pipe.Close()
-	if _, err := producer.Write([]byte("first-")); err != nil {
-		t.Fatal(err)
-	}
-	waitSignal(t, f.putBytes, "remote upload before producer EOF")
-	select {
-	case err := <-putResult:
-		t.Fatalf("upload finished before producer EOF: %v", err)
-	default:
-	}
-	if _, err := producer.Write([]byte("second")); err != nil {
-		t.Fatal(err)
-	}
-	if err := producer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-putResult; err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(filepath.Join(f.root, "upload"))
-	if err != nil || string(raw) != "first-second" {
-		t.Fatalf("remote upload %q: %v", raw, err)
-	}
-	plan, err := c.Open(context.Background(), port.OpenRequest{Path: "upload", Offset: 6, Length: 3})
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := io.ReadAll(plan.Body)
-	_ = plan.Body.Close()
-	if err != nil || string(data) != "sec" {
-		t.Fatalf("range %q: %v", data, err)
-	}
-	var paths []string
 	cursor := ""
-	for {
+	for _, expected := range []string{"/alpha", "/beta", "/gamma"} {
 		page, err := c.List(context.Background(), port.ListRequest{Path: "/", Limit: 1, Cursor: cursor})
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, entry := range page.Objects {
-			paths = append(paths, entry.Path)
-		}
-		if page.NextCursor == "" {
-			break
-		}
-		if page.NextCursor == cursor {
-			t.Fatal("cursor did not advance")
+		if err != nil || len(page.Objects) != 1 || page.Objects[0].Path != expected {
+			t.Fatalf("Worker page %q: %+v %v", expected, page, err)
 		}
 		cursor = page.NextCursor
 	}
-	if strings.Join(paths, ",") != "/alpha,/beta,/upload" {
-		t.Fatalf("pagination %v", paths)
+	if cursor != "" {
+		t.Fatal("last Worker page retained cursor")
 	}
-	if _, err = c.Stat(context.Background(), port.ObjectRef{Path: "missing"}); !errors.Is(err, port.ErrNotFound) {
-		t.Fatal("missing object error", err)
-	}
-	if _, err = c.Stat(context.Background(), port.ObjectRef{Path: "provider-error"}); !errors.Is(err, port.ErrProvider) || strings.Contains(err.Error(), "private") {
-		t.Fatal("provider diagnostic escaped", err)
-	}
-	for _, path := range []string{"../escape", "a/../escape", "a\\b", "a\x00b"} {
-		if _, err = c.Stat(context.Background(), port.ObjectRef{Path: path}); !errors.Is(err, port.ErrInvalid) {
-			t.Fatalf("unsafe path %q: %v", path, err)
+	before := f.requests.Load()
+	for _, request := range []port.ListRequest{{Limit: -1}, {Limit: 1001}, {Cursor: "invalid!"}} {
+		if _, err := c.List(context.Background(), request); !errors.Is(err, port.ErrInvalid) {
+			t.Fatalf("invalid Worker page admitted: %+v %v", request, err)
 		}
 	}
-	if err = c.Delete(context.Background(), port.ObjectRef{Path: "upload"}); err != nil {
-		t.Fatal(err)
+	if f.requests.Load() != before {
+		t.Fatal("invalid Worker cursor/limit contacted provider")
 	}
-	if _, err = os.Stat(filepath.Join(f.root, "upload")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("remote delete failed", err)
+	if _, err := c.Stat(context.Background(), port.ObjectRef{Path: "missing"}); !errors.Is(err, port.ErrNotFound) {
+		t.Fatalf("storage not-found was not mapped to Worker error: %v", err)
+	}
+	if _, err := c.Stat(context.Background(), port.ObjectRef{Path: "provider-error"}); !errors.Is(err, port.ErrProvider) || strings.Contains(err.Error(), "private") {
+		t.Fatalf("provider error escaped Worker boundary: %v", err)
+	}
+	for _, invalid := range []string{"../outside", "/a/../b", "a\\b", "a\x00b"} {
+		if _, err := c.Stat(context.Background(), port.ObjectRef{Path: invalid}); !errors.Is(err, port.ErrInvalid) {
+			t.Fatalf("invalid storage key lost Worker classification: %q %v", invalid, err)
+		}
 	}
 }
 
-func TestDefaultRemoteAndUnknownSize(t *testing.T) {
-	root := t.TempDir()
-	remote := localRemote(t, root)
-	c, err := New(context.Background(), remote, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeClient(t, c)
-	if c.view != nil || c.cacheDirectory != "" {
-		t.Fatal("default remote storage enabled local VFS materialization")
-	}
-	_, err = c.Put(context.Background(), port.PutRequest{Path: "unknown", Body: strings.NewReader("stream-without-size"), Size: -1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(filepath.Join(root, "unknown"))
-	if err != nil || string(data) != "stream-without-size" {
-		t.Fatal("unknown-size commit", err)
-	}
+func TestFactoryConservativeWebDAVRejectsUnknownSize(t *testing.T) {
 	f := newDAV(t)
-	dav := davClient(t, f, nil)
+	c := davClient(t, f, nil)
 	body := &countReader{}
-	_, err = dav.Put(context.Background(), port.PutRequest{Path: "unknown", Body: body, Size: -1})
+	_, err := c.Put(context.Background(), port.PutRequest{Path: "unknown", Body: body, Size: -1})
 	if !errors.Is(err, port.ErrUnsupported) || body.reads.Load() != 0 {
-		t.Fatalf("unsupported unknown-size upload consumed input: %v", err)
+		t.Fatalf("conservative implementation consumed unsupported body: %v", err)
 	}
 }
 
 type countReader struct{ reads atomic.Int32 }
 
 func (r *countReader) Read([]byte) (int, error) { r.reads.Add(1); return 0, io.EOF }
-
-func TestReadErrorsAndCloseErrorsArePrivate(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "item"), []byte("x"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	base := localRemote(t, root)
-	object, err := base.NewObject(context.Background(), "item")
-	if err != nil {
-		t.Fatal(err)
-	}
-	remote := &wrappedRemote{Fs: base, features: base.Features(), object: &bodyObject{Object: object, body: failBody{}}}
-	c, err := New(context.Background(), remote, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeClient(t, c)
-	plan, err := c.Open(context.Background(), port.OpenRequest{Path: "item", Length: -1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = plan.Body.Read(make([]byte, 1))
-	if !errors.Is(err, port.ErrProvider) || strings.Contains(err.Error(), "private") {
-		t.Fatal("read error leaked", err)
-	}
-	for range 2 {
-		if err = plan.Body.Close(); !errors.Is(err, port.ErrProvider) || strings.Contains(err.Error(), "private") {
-			t.Fatal("close error leaked or was forgotten", err)
-		}
-	}
-	for _, sentinel := range []error{context.Canceled, context.DeadlineExceeded} {
-		t.Run(sentinel.Error(), func(t *testing.T) {
-			remote := &wrappedRemote{Fs: base, features: base.Features(), object: &bodyObject{Object: object, body: failBody{err: fmt.Errorf("private-signed-provider-url: %w", sentinel)}}}
-			c, err := New(context.Background(), remote, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer closeClient(t, c)
-			plan, err := c.Open(context.Background(), port.OpenRequest{Path: "item", Length: -1})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer plan.Body.Close()
-			_, err = plan.Body.Read(make([]byte, 1))
-			if !errors.Is(err, sentinel) || strings.Contains(err.Error(), "private") {
-				t.Fatalf("cancellation lost classification or leaked provider details: %v", err)
-			}
-		})
-	}
-}
-
-func TestGenerationVFSIsolationAndDirectWrites(t *testing.T) {
-	remoteRoot, cacheRoot := t.TempDir(), t.TempDir()
-	if err := os.WriteFile(filepath.Join(remoteRoot, "item"), []byte("payload"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	remote := localRemote(t, remoteRoot)
-	globalCache := config.GetCacheDir()
-	m := &Materialization{Directory: cacheRoot, MaxBytes: 1 << 20, MaxAgeSeconds: 60}
-	first, err := New(context.Background(), remote, m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeClient(t, first)
-	second, err := New(context.Background(), remote, m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeClient(t, second)
-	if first.view == second.view || first.cacheDirectory == second.cacheDirectory {
-		t.Fatal("generations shared VFS or cache directory")
-	}
-	if config.GetCacheDir() != globalCache {
-		t.Fatal("generation changed process-global cache directory")
-	}
-	for _, c := range []*Client{first, second} {
-		stat, err := os.Stat(c.cacheDirectory)
-		if err != nil || stat.Mode().Perm() != 0700 {
-			t.Fatalf("private cache permissions: %v %v", stat, err)
-		}
-		plan, err := c.Open(context.Background(), port.OpenRequest{Path: "item", Length: -1})
-		if err != nil {
-			t.Fatal(err)
-		}
-		data, err := io.ReadAll(plan.Body)
-		if err != nil || !bytes.Equal(data, []byte("payload")) {
-			t.Fatal("materialized read", err)
-		}
-		if err = plan.Body.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	_, err = first.Put(context.Background(), port.PutRequest{Path: "written", Body: strings.NewReader("remote-now"), Size: 10})
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(filepath.Join(remoteRoot, "written"))
-	if err != nil || string(data) != "remote-now" {
-		t.Fatal("write completion was delayed behind VFS writeback", err)
-	}
-	owned := first.cacheDirectory
-	if err = first.Close(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = os.Stat(owned); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("owned cache survived Close", err)
-	}
-	if _, err = os.Stat(second.cacheDirectory); err != nil {
-		t.Fatal("one generation removed peer cache", err)
-	}
-}
-
-func TestCloseCancelsAndSettlesStalledVFSRead(t *testing.T) {
-	f := newDAV(t)
-	f.write(t, "stalled", make([]byte, 65536))
-	c := davClient(t, f, &Materialization{Directory: t.TempDir(), MaxBytes: 1 << 20, MaxAgeSeconds: 60})
-	plan, err := c.Open(context.Background(), port.OpenRequest{Path: "stalled", Length: -1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	readDone := make(chan error, 1)
-	go func() { _, err := plan.Body.Read(make([]byte, 1)); readDone <- err }()
-	waitSignal(t, f.blocked, "stalled cached remote GET")
-	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	err = c.Close(closeCtx)
-	if err != nil {
-		f.unblock()
-		t.Errorf("Close did not cancel/settle cached reader: %v", err)
-	} else {
-		select {
-		case <-f.canceled:
-		case <-time.After(time.Second):
-			t.Error("Close completed without canceling the owned remote request")
-		}
-	}
-	f.unblock()
-	select {
-	case <-readDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("owned read never settled after close")
-	}
-	_ = plan.Body.Close()
-}
-
-func TestRemoteReadCancellation(t *testing.T) {
-	f := newDAV(t)
-	f.write(t, "stalled", make([]byte, 65536))
-	c := davClient(t, f, nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	plan, err := c.Open(ctx, port.OpenRequest{Path: "stalled", Length: -1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer plan.Body.Close()
-	readDone := make(chan error, 1)
-	go func() { _, err := plan.Body.Read(make([]byte, 1)); readDone <- err }()
-	waitSignal(t, f.blocked, "owned remote read")
-	cancel()
-	waitSignal(t, f.canceled, "remote request cancellation")
-	select {
-	case err = <-readDone:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("read lost cancellation: %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		f.unblock()
-		t.Fatal("canceled read retained remote operation")
-	}
-}
-
-func TestCachedRequestCancellationKeepsPeerRead(t *testing.T) {
-	f := newDAV(t)
-	f.write(t, "stalled", make([]byte, 65536))
-	c := davClient(t, f, &Materialization{Directory: t.TempDir(), MaxBytes: 1 << 20, MaxAgeSeconds: 60})
-	assertCachedRequestCancellationKeepsPeer(t, c, f)
-}
 
 func assertCachedRequestCancellationKeepsPeer(t *testing.T, c port.Client, f *davFixture) {
 	t.Helper()
@@ -700,13 +421,6 @@ func assertCachedRequestCancellationKeepsPeer(t *testing.T, c port.Client, f *da
 	}
 }
 
-func TestCachedRequestCancellationClosesLastHandle(t *testing.T) {
-	f := newDAV(t)
-	f.write(t, "stalled", make([]byte, 65536))
-	c := davClient(t, f, &Materialization{Directory: t.TempDir(), MaxBytes: 1 << 20, MaxAgeSeconds: 60})
-	assertCachedLastHandleCancellation(t, c, f)
-}
-
 func assertCachedLastHandleCancellation(t *testing.T, c port.Client, f *davFixture) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -754,43 +468,11 @@ func assertCachedLastHandleCancellation(t *testing.T, c port.Client, f *davFixtu
 	waitSignal(t, f.canceled, "generation canceled retained cache input")
 }
 
-func TestCloseWaiterCancellationDoesNotAbandonBackend(t *testing.T) {
-	remote := localRemote(t, t.TempDir())
-	entered, release := make(chan struct{}), make(chan struct{})
-	var releaseOnce sync.Once
-	var calls atomic.Int32
-	features := *remote.Features()
-	features.Shutdown = func(context.Context) error {
-		calls.Add(1)
-		close(entered)
-		<-release
-		return nil
-	}
-	c, err := New(context.Background(), &wrappedRemote{Fs: remote, features: &features}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }); closeClient(t, c) })
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	if err = c.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("waiter cancellation: %v", err)
-	}
-	waitSignal(t, entered, "backend shutdown")
-	if _, err = c.Stat(context.Background(), port.ObjectRef{Path: "/"}); err == nil {
-		t.Error("closing generation admitted operation")
-	}
-	releaseOnce.Do(func() { close(release) })
-	if err = c.Close(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if calls.Load() != 1 {
-		t.Fatalf("backend shutdown called %d times", calls.Load())
-	}
-}
-
 func TestNoDeferredCacheWorkAfterGenerationClose(t *testing.T) {
 	const helper = "REMOTE_GATEWAY_CACHE_CLOSE_PROBE"
+	if os.Getenv("REMOTE_GATEWAY_RCLONE_PLUGIN") == "" {
+		t.Skip("set REMOTE_GATEWAY_RCLONE_PLUGIN to validate native generation teardown")
+	}
 	if os.Getenv(helper) != "1" {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -807,7 +489,7 @@ func TestNoDeferredCacheWorkAfterGenerationClose(t *testing.T) {
 		}
 		return
 	}
-	factories := map[string]port.Factory{"source": testFactory(t)}
+	factories := map[string]port.Factory{}
 	if artifactPath := os.Getenv("REMOTE_GATEWAY_RCLONE_PLUGIN"); artifactPath != "" {
 		artifact, err := os.Open(artifactPath)
 		if err != nil {
@@ -841,7 +523,7 @@ func TestNoDeferredCacheWorkAfterGenerationClose(t *testing.T) {
 				t.Fatal(err)
 			}
 			roots = append(roots, root)
-			configuration := WebDAVPublicConfig{URL: f.URL(), Username: "fixture", Materialization: &Materialization{Directory: root, MaxBytes: 1 << 20, MaxAgeSeconds: 60}}
+			configuration := WebDAVPublicConfig{URL: f.URL(), Username: "fixture", Materialization: &MaterializationConfig{Directory: root, MaxBytes: 1 << 20, MaxAgeSeconds: 60}}
 			candidate, err := factory.Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: mustJSON(t, configuration), Secrets: passwordResolver()})
 			if err != nil {
 				t.Fatal(err)

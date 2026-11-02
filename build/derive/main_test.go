@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"golang.org/x/mod/sumdb/dirhash"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,6 +54,14 @@ func fixture(t *testing.T) (*builder, relationship) {
 		t.Fatal(e)
 	}
 	if _, e := b.git(root, "update-index", "--add", "--cacheinfo", "160000,"+commit+",third_party/fixture"); e != nil {
+		t.Fatal(e)
+	}
+	for _, pair := range [][2]string{{"user.name", "Fixture"}, {"user.email", "fixture@example.invalid"}} {
+		if _, e := b.git(root, "config", pair[0], pair[1]); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, e := b.git(root, "commit", "-m", "own exact source pin"); e != nil {
 		t.Fatal(e)
 	}
 	hash, e := hashFile(p)
@@ -250,24 +260,247 @@ func TestImageCompositionsContainEmbeddedCPAndIndependentPlugins(t *testing.T) {
 	}
 }
 
-func TestNativeBuildIdentityTracksBackendPatchesAndRecipe(t *testing.T) {
-	b, _ := fixture(t)
-	b.infra = filepath.Join(b.root, "third_party/fixture")
-	inputs := map[string]string{
-		"go/client.go":                          "package client\n",
-		".git-source-relationships/rclone.json": "pinned upstream and result tree\n",
-		"patches/rclone/0001.patch":             "original backend patch\n",
-		"build/toolchain.json":                  "pinned tools\n",
-		"Makefile":                              "native build flags\n",
+func moduleFixture(t *testing.T) (*builder, string, modulePatchSeries) {
+	t.Helper()
+	b := &builder{root: t.TempDir(), infra: t.TempDir(), output: t.TempDir()}
+	cache := t.TempDir()
+	for name, value := range map[string]string{"go.mod": "module github.com/rclone/rclone\n\ngo 1.27.3\n", "provider.txt": "upstream\n"} {
+		if e := os.WriteFile(filepath.Join(cache, name), []byte(value), 0644); e != nil {
+			t.Fatal(e)
+		}
 	}
-	for name, content := range inputs {
-		path := filepath.Join(b.root, name)
-		if e := os.MkdirAll(filepath.Dir(path), 0755); e != nil {
+	for _, root := range []string{filepath.Join(b.infra, "go/storage/cloud"), filepath.Join(b.infra, "go/storage/vfs"), filepath.Join(b.infra, "patches/rclone")} {
+		if e := os.MkdirAll(root, 0755); e != nil {
 			t.Fatal(e)
 		}
-		if e := os.WriteFile(path, []byte(content), 0644); e != nil {
+	}
+	body := "diff --git a/provider.txt b/provider.txt\n--- a/provider.txt\n+++ b/provider.txt\n@@ -1 +1 @@\n-upstream\n+patched\n"
+	patchPath := filepath.Join(b.infra, "patches/rclone/0001.patch")
+	if e := os.WriteFile(patchPath, []byte(body), 0644); e != nil {
+		t.Fatal(e)
+	}
+	hash, e := hashFile(patchPath)
+	if e != nil {
+		t.Fatal(e)
+	}
+	series := modulePatchSeries{Schema: "go-module-patch-series/v1", Module: rcloneModule, Patches: []patch{{Order: 1, Path: "patches/rclone/0001.patch", SHA256: hash}}}
+	if e = writeJSON(filepath.Join(b.infra, "patches/rclone/series.json"), series); e != nil {
+		t.Fatal(e)
+	}
+	selectVersion(t, b, cache, "v1.75.2")
+	b.downloadModule = func(module, version string) (moduleDownload, error) {
+		sum, e := dirhash.HashDir(cache, module+"@"+version, dirhash.Hash1)
+		if e != nil {
+			return moduleDownload{}, e
+		}
+		modSum, e := dirhash.Hash1([]string{"go.mod"}, func(name string) (io.ReadCloser, error) { return os.Open(filepath.Join(cache, name)) })
+		return moduleDownload{Path: module, Version: version, Dir: cache, Sum: sum, GoModSum: modSum}, e
+	}
+	return b, cache, series
+}
+func selectVersion(t *testing.T, b *builder, cache, version string) {
+	t.Helper()
+	body := "module example.invalid/infra\n\ngo 1.27.3\n\nrequire github.com/rclone/rclone " + version + "\n"
+	if e := os.WriteFile(filepath.Join(b.infra, "go/go.mod"), []byte(body), 0644); e != nil {
+		t.Fatal(e)
+	}
+	sum, e := dirhash.HashDir(cache, rcloneModule+"@"+version, dirhash.Hash1)
+	if e != nil {
+		t.Fatal(e)
+	}
+	modSum, e := dirhash.Hash1([]string{"go.mod"}, func(name string) (io.ReadCloser, error) { return os.Open(filepath.Join(cache, name)) })
+	if e != nil {
+		t.Fatal(e)
+	}
+	sums := rcloneModule + " " + version + " " + sum + "\n" + rcloneModule + " " + version + "/go.mod " + modSum + "\n"
+	if e = os.WriteFile(filepath.Join(b.infra, "go/go.sum"), []byte(sums), 0644); e != nil {
+		t.Fatal(e)
+	}
+}
+
+func TestModuleVersionComesOnlyFromSelectedInfraGoMod(t *testing.T) {
+	b, cache, _ := moduleFixture(t)
+	selectVersion(t, b, cache, "v1.75.3")
+	requested := ""
+	download := b.downloadModule
+	b.downloadModule = func(module, version string) (moduleDownload, error) {
+		requested = module + "@" + version
+		return download(module, version)
+	}
+	if e := b.materializeRcloneModule(); e != nil {
+		t.Fatal(e)
+	}
+	if requested != rcloneModule+"@v1.75.3" {
+		t.Fatalf("wrong module selection: %s", requested)
+	}
+	var receipt moduleSourceReceipt
+	if e := readJSON(b.moduleReceiptPath(), &receipt); e != nil {
+		t.Fatal(e)
+	}
+	if receipt.Version != "v1.75.3" || receipt.Module != rcloneModule || receipt.DerivedContentHash == "" {
+		t.Fatal("version/measurement missing")
+	}
+	if _, e := os.Lstat(filepath.Join(b.rcloneModulePath(), ".git")); !os.IsNotExist(e) {
+		t.Fatal("Git version authority introduced")
+	}
+	if _, e := b.load("rclone"); e == nil {
+		t.Fatal("Go module accepted as Git relationship")
+	}
+}
+
+func TestModuleCacheRemainsReadOnlyAndPatchesStayExternal(t *testing.T) {
+	b, cache, _ := moduleFixture(t)
+	before, e := dirhash.HashDir(cache, rcloneModule+"@v1.75.2", dirhash.Hash1)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, name := range []string{"go.mod", "provider.txt"} {
+		if e = os.Chmod(filepath.Join(cache, name), 0444); e != nil {
 			t.Fatal(e)
 		}
+	}
+	if e = os.Chmod(cache, 0555); e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { os.Chmod(cache, 0755) })
+	if e = b.materializeRcloneModule(); e != nil {
+		t.Fatal(e)
+	}
+	after, e := dirhash.HashDir(cache, rcloneModule+"@v1.75.2", dirhash.Hash1)
+	if e != nil || before != after {
+		t.Fatal("canonical cache changed")
+	}
+	body, e := os.ReadFile(filepath.Join(b.rcloneModulePath(), "provider.txt"))
+	if e != nil || string(body) != "patched\n" {
+		t.Fatal("external patch was not applied")
+	}
+}
+
+func TestModuleAndPatchTamperingFailBeforeMaterialization(t *testing.T) {
+	for _, kind := range []string{"cache", "download-version", "checksum", "patch", "order", "path", "version-in-series"} {
+		t.Run(kind, func(t *testing.T) {
+			b, cache, series := moduleFixture(t)
+			switch kind {
+			case "cache":
+				if e := os.WriteFile(filepath.Join(cache, "provider.txt"), []byte("corrupt"), 0644); e != nil {
+					t.Fatal(e)
+				}
+				b.downloadModule = func(module, version string) (moduleDownload, error) {
+					sum, modSum, e := b.moduleChecksums(version)
+					return moduleDownload{Path: module, Version: version, Dir: cache, Sum: sum, GoModSum: modSum}, e
+				}
+			case "download-version":
+				download := b.downloadModule
+				b.downloadModule = func(module, version string) (moduleDownload, error) {
+					info, e := download(module, version)
+					info.Version = "v0.0.1"
+					return info, e
+				}
+			case "checksum":
+				path := filepath.Join(b.infra, "go/go.sum")
+				body, _ := os.ReadFile(path)
+				if e := os.WriteFile(path, []byte(strings.Replace(string(body), "h1:", "h1:wrong", 1)), 0644); e != nil {
+					t.Fatal(e)
+				}
+			case "patch":
+				if e := os.WriteFile(filepath.Join(b.infra, series.Patches[0].Path), []byte("unreviewed"), 0644); e != nil {
+					t.Fatal(e)
+				}
+			case "order":
+				series.Patches[0].Order = 2
+				if e := writeJSON(filepath.Join(b.infra, "patches/rclone/series.json"), series); e != nil {
+					t.Fatal(e)
+				}
+			case "path":
+				series.Patches[0].Path = "patches/../escape.patch"
+				if e := writeJSON(filepath.Join(b.infra, "patches/rclone/series.json"), series); e != nil {
+					t.Fatal(e)
+				}
+			case "version-in-series":
+				data, _ := json.Marshal(series)
+				var raw map[string]any
+				json.Unmarshal(data, &raw)
+				raw["version"] = "v9.9.9"
+				if e := writeJSON(filepath.Join(b.infra, "patches/rclone/series.json"), raw); e != nil {
+					t.Fatal(e)
+				}
+			}
+			if e := b.materializeRcloneModule(); e == nil {
+				t.Fatal("unadmitted input accepted")
+			}
+			if _, e := os.Lstat(b.rcloneModulePath()); !os.IsNotExist(e) {
+				t.Fatal("invalid source was materialized")
+			}
+		})
+	}
+}
+
+func TestModuleSnapshotTamperingIsNotSilentlyReset(t *testing.T) {
+	b, _, _ := moduleFixture(t)
+	if e := b.materializeRcloneModule(); e != nil {
+		t.Fatal(e)
+	}
+	path := filepath.Join(b.rcloneModulePath(), "provider.txt")
+	if e := os.WriteFile(path, []byte("local edit"), 0644); e != nil {
+		t.Fatal(e)
+	}
+	if e := b.materializeRcloneModule(); e == nil {
+		t.Fatal("changed snapshot accepted")
+	}
+	body, _ := os.ReadFile(path)
+	if string(body) != "local edit" {
+		t.Fatal("changed snapshot silently reset")
+	}
+}
+
+func TestProductCannotShadowInfraModulePatchAuthority(t *testing.T) {
+	b, _, _ := moduleFixture(t)
+	if e := writeJSON(filepath.Join(b.root, ".git-source-relationships/rclone.json"), map[string]string{"module": rcloneModule}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := b.rcloneSeries(); e == nil {
+		t.Fatal("legacy Git relationship accepted")
+	}
+	if e := os.Remove(filepath.Join(b.root, ".git-source-relationships/rclone.json")); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.MkdirAll(filepath.Join(b.root, "patches/rclone"), 0755); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := b.rcloneSeries(); e == nil {
+		t.Fatal("duplicate product patch owner accepted")
+	}
+}
+
+func TestNativeBuildIdentityTracksBackendPatchesAndRecipe(t *testing.T) {
+	b, _, _ := moduleFixture(t)
+	for _, args := range [][]string{{"init"}, {"config", "user.name", "Fixture"}, {"config", "user.email", "fixture@example.invalid"}, {"commit", "--allow-empty", "-m", "Infra fixture"}} {
+		if _, e := b.git(b.infra, args...); e != nil {
+			t.Fatal(e)
+		}
+	}
+	productInputs := map[string]string{"go/client.go": "package client\n", ".git-source-relationships/openlist.json": "product source\n", "patches/openlist/0001.patch": "OpenList patch\n", "build/toolchain.json": "tools\n", "Makefile": "flags\n"}
+	infraInputs := map[string]string{"go/storage/cloud/backend.go": "package cloud\n", "go/storage/vfs/cache.go": "package vfs\n"}
+	for _, input := range []struct {
+		root   string
+		values map[string]string
+	}{{b.root, productInputs}, {b.infra, infraInputs}} {
+		for name, content := range input.values {
+			path := filepath.Join(input.root, name)
+			if e := os.MkdirAll(filepath.Dir(path), 0755); e != nil {
+				t.Fatal(e)
+			}
+			if e := os.WriteFile(path, []byte(content), 0644); e != nil {
+				t.Fatal(e)
+			}
+		}
+	}
+	for _, name := range []string{"go/go.mod", "go/go.sum", "patches/rclone/series.json", "patches/rclone/0001.patch"} {
+		data, e := os.ReadFile(filepath.Join(b.infra, name))
+		if e != nil {
+			t.Fatal(e)
+		}
+		infraInputs[name] = string(data)
 	}
 	baseline, e := b.provenanceDigest()
 	if e != nil {
@@ -275,21 +508,26 @@ func TestNativeBuildIdentityTracksBackendPatchesAndRecipe(t *testing.T) {
 	}
 	again, e := b.provenanceDigest()
 	if e != nil || again != baseline {
-		t.Fatalf("unstable build identity: %q %v", again, e)
+		t.Fatal("unstable fingerprint")
 	}
-	for name, original := range inputs {
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(b.root, name)
-			if e := os.WriteFile(path, []byte(original+"changed\n"), 0644); e != nil {
-				t.Fatal(e)
-			}
-			changed, e := b.provenanceDigest()
-			if e != nil || changed == baseline {
-				t.Fatalf("changed build input kept identity: %q %v", changed, e)
-			}
-			if e := os.WriteFile(path, []byte(original), 0644); e != nil {
-				t.Fatal(e)
-			}
-		})
+	for _, input := range []struct {
+		label, root string
+		values      map[string]string
+	}{{"product", b.root, productInputs}, {"infra", b.infra, infraInputs}} {
+		for name, original := range input.values {
+			t.Run(input.label+"/"+name, func(t *testing.T) {
+				path := filepath.Join(input.root, name)
+				if e := os.WriteFile(path, []byte(original+"\n"), 0644); e != nil {
+					t.Fatal(e)
+				}
+				changed, e := b.provenanceDigest()
+				if e != nil || changed == baseline {
+					t.Fatalf("changed source kept identity: %v", e)
+				}
+				if e := os.WriteFile(path, []byte(original), 0644); e != nil {
+					t.Fatal(e)
+				}
+			})
+		}
 	}
 }

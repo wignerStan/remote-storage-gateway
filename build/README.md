@@ -1,14 +1,17 @@
 # Reproducible product derivation
 
-This monorepo owns the Worker, gateway composition, rclone client and the
-OpenList patch stack. There is one editable product source. Official OpenList,
-its frontend and rclone are pristine exact submodules below `third_party/`;
-their parent-owned changes live in ordered `patches/` inventories. The former
-whole OpenList client fork is not a build dependency.
+This monorepo owns the Worker, gateway composition, concrete client plugin
+entries and the OpenList patch stack. Official OpenList and its frontend are
+pristine exact submodules below the product's `third_party/` directory. Infra
+owns the cloud filesystem and optional VFS adapters, the required rclone Go
+package version and its ordered patch stack. The product consumes that selected
+Infra input read-only; neither repository pins a rclone Git commit or submodule,
+and the product has no second rclone patch stack. The
+former whole OpenList client fork is not a build dependency.
 
 `SOURCE_RELATIONSHIPS.md` in the Git skill defines this relationship. The
-machine-readable records are `.git-source-relationships/*.json` and
-`build/source-history.json`. A record binds the official URL, exact gitlink,
+product records are `.git-source-relationships/{openlist,openlist-ui}.json`
+and `build/source-history.json`. OpenList records bind the official URL, exact gitlink,
 ordered patch SHA-256 values and resulting Git tree. The source tool rejects a
 dirty upstream, mismatched pin, patch hash, patch order or resulting tree. It
 uses reference clones with dissociation in an external build directory. Git
@@ -67,11 +70,41 @@ make MISE=mise INFRA_ROOT=/path/to/reviewed/infra \
   BUILD_DIR=/tmp/trade-remote-gateway-build control-plane test-derived
 ```
 
+OpenList source selection is closed to the two product-owned Git records.
+Rclone is selected exclusively from the package version required by
+`<INFRA_ROOT>/go/go.mod`. The version-free
+`<INFRA_ROOT>/patches/rclone/series.json` records only the module name and
+ordered patch checksums. Legacy rclone Git relationships, competing product
+patches, patch path escapes and checksum mismatches fail admission.
+
+`go mod download -json module@version` resolves that package outside either
+owner's repository. The tool verifies the canonical module directory using
+Go's `dirhash.HashDir` against the stock module checksums in Infra `go.sum`.
+It copies verified files into external `source/rclone-module` before applying
+patches. The global module cache remains untouched. The module-source receipt
+records the selected version, integrity sums and measured derived content hash;
+there is no expected Git commit or result-tree gate. Changed snapshots fail
+integrity checks rather than being silently reset. Historical Git-derived
+snapshots and receipts are not reused as module-version authority.
+
+The native fingerprint binds Infra's own commit for library provenance plus its
+actual Go module inputs, cloud/VFS storage sources, patch inventory and patch
+bytes, together with product sources and recipe. Checksums protect integrity;
+they do not select a competing package version.
+
 The bootstrap script binds only enough existing first-party modules to run the
 Go build tool. The tool then discovers actual module declarations using
 `go mod edit -json`, resolves the required reviewed Infra modules and derived
 third-party modules, and writes an isolated `go.work`. It never binds the old
 standalone CP or client-fork workspaces or edits a global module cache.
+
+For Infra validation with `GOWORK=off`, use an external `-modfile` derived from
+the same reviewed module graph with only the admitted rclone source replacement.
+Do not commit an absolute replacement. Go ignores replacement directives from
+dependency modules, so this workflow does not claim that a plain downstream
+module download automatically includes Infra's upstream patches. See the
+[Go module replacement rules](https://go.dev/ref/mod#go-mod-file-replace). The owning
+source assembly and the selected module version are distinct inputs.
 
 `build/toolchain.json` pins development tools managed by mise. Install those
 versions before building. Frontend dependencies use the pinned source's
@@ -129,3 +162,10 @@ record. Preserve the recorded old/new source tips. Run the source admission
 tests, selected-provider streaming/native tests, typed management/auth tests,
 source frontend build, embedded CP build and native OCI assembly. Publication
 belongs to the product's reviewed PR, not an upstream fork release workflow.
+
+Rclone updates follow the package lane: change the required module version in
+Infra `go/go.mod`, let Go maintain stock checksum integrity, review/rebase the
+ordered patches and update only their inventory checksums. Re-materialize in a
+fresh external module snapshot and measure its resulting bytes. Do not add a
+Git pin, hard-coded expected tree, modified global module cache or committed
+absolute replacement.

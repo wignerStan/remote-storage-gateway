@@ -4,20 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
+	"time"
 
-	_ "github.com/rclone/rclone/backend/drive"
-	_ "github.com/rclone/rclone/backend/local" // VFS cache storage, not an advertised client backend.
-	_ "github.com/rclone/rclone/backend/s3"
-	_ "github.com/rclone/rclone/backend/webdav"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/config/configmap"
-	"github.com/rclone/rclone/fs/config/obscure"
+	"github.com/wignerStan/infra/go/storage/cloud"
+	"github.com/wignerStan/infra/go/storage/vfs"
 	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
@@ -25,13 +19,31 @@ import (
 
 const PluginID = "client.rclone"
 
+// MaterializationConfig is the plugin's public configuration. Infra owns the
+// duration-based cache mechanism; this model preserves the published wire units.
+type MaterializationConfig struct {
+	Directory     string `json:"directory" minLength:"1"`
+	MaxBytes      int64  `json:"max_bytes" minimum:"1048576" doc:"VFS eviction target; active file ranges can temporarily exceed it."`
+	MaxAgeSeconds int    `json:"max_age_seconds" minimum:"1" maximum:"31536000"`
+}
+
+func cacheConfiguration(value *MaterializationConfig) (*vfs.Options, error) {
+	if value == nil {
+		return nil, nil
+	}
+	if value.MaxAgeSeconds < 1 || value.MaxAgeSeconds > 31536000 {
+		return nil, port.ErrInvalid
+	}
+	return &vfs.Options{Directory: value.Directory, MaxBytes: value.MaxBytes, MaxAge: time.Duration(value.MaxAgeSeconds) * time.Second}, nil
+}
+
 type S3PublicConfig struct {
-	Endpoint        string           `json:"endpoint,omitempty"`
-	Region          string           `json:"region" minLength:"1"`
-	Bucket          string           `json:"bucket" minLength:"1"`
-	Root            string           `json:"root,omitempty"`
-	ForcePathStyle  bool             `json:"force_path_style,omitempty"`
-	Materialization *Materialization `json:"materialization,omitempty"`
+	Endpoint        string                 `json:"endpoint,omitempty"`
+	Region          string                 `json:"region" minLength:"1"`
+	Bucket          string                 `json:"bucket" minLength:"1"`
+	Root            string                 `json:"root,omitempty"`
+	ForcePathStyle  bool                   `json:"force_path_style,omitempty"`
+	Materialization *MaterializationConfig `json:"materialization,omitempty"`
 }
 type S3Configuration struct {
 	S3PublicConfig
@@ -40,20 +52,20 @@ type S3Configuration struct {
 	SessionToken    string `json:"session_token,omitempty" writeOnly:"true"`
 }
 type WebDAVPublicConfig struct {
-	URL             string           `json:"url" minLength:"1"`
-	Root            string           `json:"root,omitempty"`
-	Username        string           `json:"username,omitempty"`
-	Materialization *Materialization `json:"materialization,omitempty"`
+	URL             string                 `json:"url" minLength:"1"`
+	Root            string                 `json:"root,omitempty"`
+	Username        string                 `json:"username,omitempty"`
+	Materialization *MaterializationConfig `json:"materialization,omitempty"`
 }
 type WebDAVConfiguration struct {
 	WebDAVPublicConfig
 	Password string `json:"password,omitempty" writeOnly:"true"`
 }
 type DrivePublicConfig struct {
-	RootFolderID    string           `json:"root_folder_id,omitempty"`
-	Root            string           `json:"root,omitempty"`
-	ClientID        string           `json:"client_id,omitempty"`
-	Materialization *Materialization `json:"materialization,omitempty"`
+	RootFolderID    string                 `json:"root_folder_id,omitempty"`
+	Root            string                 `json:"root,omitempty"`
+	ClientID        string                 `json:"client_id,omitempty"`
+	Materialization *MaterializationConfig `json:"materialization,omitempty"`
 }
 type DriveConfiguration struct {
 	DrivePublicConfig
@@ -112,34 +124,13 @@ func endpoint(value string) bool {
 	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https") && u.User == nil && u.RawQuery == "" && u.Fragment == ""
 }
 
-// isolatedConfig receives refreshes only for this generation, never the process
-// global rclone config file. The operator owns the persisted secret references.
-type isolatedConfig struct {
-	mu     sync.Mutex
-	values configmap.Simple
-}
-
-func (m *isolatedConfig) Get(name string) (string, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	value, ok := m.values[name]
-	return value, ok
-}
-func (m *isolatedConfig) Set(name, value string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.values[name] = value
-}
-
-var nextGeneration atomic.Uint64
-
 func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Candidate, error) {
 	if err := admission.Validate(f.Descriptor()); err != nil {
 		return nil, port.ErrInvalid
 	}
-	values := configmap.Simple{}
+	values := map[string]string{}
 	var root string
-	var materialization *Materialization
+	var materialization *MaterializationConfig
 	backend := input.ImplementationID
 	switch input.ImplementationID {
 	case "s3":
@@ -159,7 +150,7 @@ func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Ca
 		if err != nil {
 			return nil, err
 		}
-		values = configmap.Simple{"provider": "Other", "env_auth": "false", "access_key_id": access, "secret_access_key": secret, "session_token": token, "region": config.Region, "endpoint": config.Endpoint, "force_path_style": strconv.FormatBool(config.ForcePathStyle), "upload_concurrency": "1", "chunk_size": "5Mi"}
+		values = map[string]string{"provider": "Other", "env_auth": "false", "access_key_id": access, "secret_access_key": secret, "session_token": token, "region": config.Region, "endpoint": config.Endpoint, "force_path_style": strconv.FormatBool(config.ForcePathStyle), "upload_concurrency": "1", "chunk_size": "5Mi"}
 		root = config.Bucket
 		if config.Root != "" {
 			root += "/" + config.Root
@@ -175,17 +166,11 @@ func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Ca
 		if err != nil {
 			return nil, err
 		}
-		if password != "" {
-			password, err = obscure.Obscure(password)
-			if err != nil {
-				return nil, port.ErrProvider
-			}
-		}
 		vendor := "other"
 		if input.ImplementationID == "webdav-streaming" {
 			vendor = "rclone"
 		}
-		values = configmap.Simple{"url": config.URL, "user": config.Username, "pass": password, "vendor": vendor}
+		values = map[string]string{"url": config.URL, "user": config.Username, "pass": password, "vendor": vendor}
 		root = config.Root
 		materialization = config.Materialization
 	case "drive":
@@ -201,54 +186,21 @@ func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Ca
 		if err != nil {
 			return nil, err
 		}
-		values = configmap.Simple{"root_folder_id": config.RootFolderID, "client_id": config.ClientID, "client_secret": secret, "token": token}
+		values = map[string]string{"root_folder_id": config.RootFolderID, "client_id": config.ClientID, "client_secret": secret, "token": token}
 		root = config.Root
 		materialization = config.Materialization
 	default:
 		return nil, port.ErrUnsupported
 	}
-	if _, err := key(root); err != nil {
+	cache, err := cacheConfiguration(materialization)
+	if err != nil {
 		return nil, err
 	}
-	registration, err := fs.Find(backend)
+	store, err := cloud.New(ctx, cloud.Config{Backend: backend, Root: root, Parameters: values, Materialization: cache})
 	if err != nil {
-		return nil, port.ErrUnsupported
-	}
-	for _, option := range registration.Options {
-		if _, exists := values[option.Name]; !exists {
-			option.Value = nil
-			values[option.Name] = option.String()
-		}
-	}
-	configuration := &isolatedConfig{values: values}
-	// Different generations never share rclone's VFS active cache identity.
-	name := fmt.Sprintf("worker-rclone-%d", nextGeneration.Add(1))
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	backendContext, cancelBackend := context.WithCancel(context.WithoutCancel(ctx))
-	stopPreparation := context.AfterFunc(ctx, cancelBackend)
-	remote, err := registration.NewFs(backendContext, name, root, configuration)
-	stopPreparation()
-	if err != nil {
-		cancelBackend()
 		return nil, failure(err)
 	}
-	client, err := New(backendContext, remote, materialization)
-	if err != nil {
-		cancelBackend()
-		if close := remote.Features().Shutdown; close != nil {
-			_ = close(context.Background())
-		}
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		cancelBackend()
-		_ = client.Close(context.Background())
-		return nil, err
-	}
-	client.backendCancel = cancelBackend
-	return &candidate{client: client}, nil
+	return &candidate{client: &Client{store: store}}, nil
 }
 
 type candidate struct {

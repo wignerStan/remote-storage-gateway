@@ -19,6 +19,9 @@ import (
 	"time"
 
 	processexec "github.com/wignerStan/infra/go/process/exec"
+	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/semver"
+	"golang.org/x/mod/sumdb/dirhash"
 )
 
 type patch struct {
@@ -52,6 +55,258 @@ type builder struct {
 	ca                        string
 	release                   bool
 	tools                     toolchain
+	downloadModule            func(string, string) (moduleDownload, error)
+}
+
+const rcloneModule = "github.com/rclone/rclone"
+
+type modulePatchSeries struct {
+	Schema  string  `json:"schema"`
+	Module  string  `json:"module"`
+	Patches []patch `json:"patches"`
+}
+type moduleDownload struct {
+	Path, Version, Dir, Sum, GoModSum string
+	Error                             string
+}
+type moduleSourceReceipt struct {
+	Schema               string  `json:"schema"`
+	Module               string  `json:"module"`
+	Version              string  `json:"version"`
+	ModuleSum            string  `json:"module_sum"`
+	GoModSum             string  `json:"go_mod_sum"`
+	CanonicalDirectory   string  `json:"canonical_directory"`
+	OwnerRepository      string  `json:"owner_repository"`
+	OwnerGoModSHA256     string  `json:"owner_go_mod_sha256"`
+	PatchInventorySHA256 string  `json:"patch_inventory_sha256"`
+	Patches              []patch `json:"patches"`
+	DerivedDirectory     string  `json:"derived_directory"`
+	DerivedContentHash   string  `json:"derived_content_hash"`
+}
+
+func (b *builder) rcloneVersion() (string, error) {
+	path := filepath.Join(b.infra, "go/go.mod")
+	body, e := os.ReadFile(path)
+	if e != nil {
+		return "", e
+	}
+	file, e := modfile.Parse(path, body, nil)
+	if e != nil {
+		return "", e
+	}
+	for _, require := range file.Require {
+		if require.Mod.Path == rcloneModule {
+			if !semver.IsValid(require.Mod.Version) {
+				return "", errors.New("Infra must require a concrete rclone package version")
+			}
+			return require.Mod.Version, nil
+		}
+	}
+	return "", errors.New("selected Infra go/go.mod must require the rclone module")
+}
+func (b *builder) rcloneSeries() (modulePatchSeries, error) {
+	var series modulePatchSeries
+	for _, root := range []string{b.root, b.infra} {
+		if _, e := os.Lstat(filepath.Join(root, ".git-source-relationships/rclone.json")); e == nil {
+			return series, errors.New("rclone is a Go module dependency, not a Git source relationship")
+		} else if !errors.Is(e, fs.ErrNotExist) {
+			return series, e
+		}
+	}
+	if _, e := os.Lstat(filepath.Join(b.root, "patches/rclone")); e == nil {
+		return series, errors.New("rclone patches belong to Infra, not the product")
+	} else if !errors.Is(e, fs.ErrNotExist) {
+		return series, e
+	}
+	if e := readJSON(filepath.Join(b.infra, "patches/rclone/series.json"), &series); e != nil {
+		return series, e
+	}
+	if series.Schema != "go-module-patch-series/v1" || series.Module != rcloneModule || len(series.Patches) == 0 {
+		return series, errors.New("invalid Infra rclone patch inventory")
+	}
+	for i, p := range series.Patches {
+		if p.Order != i+1 || !safeRelative(p.Path) || !strings.HasPrefix(p.Path, "patches/rclone/") || len(p.SHA256) != 64 {
+			return series, errors.New("invalid ordered rclone patch")
+		}
+	}
+	return series, nil
+}
+func (b *builder) moduleChecksums(version string) (string, string, error) {
+	body, e := os.ReadFile(filepath.Join(b.infra, "go/go.sum"))
+	if e != nil {
+		return "", "", e
+	}
+	var sum, modSum string
+	for _, line := range strings.Split(string(body), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 || fields[0] != rcloneModule {
+			continue
+		}
+		if fields[1] == version {
+			sum = fields[2]
+		}
+		if fields[1] == version+"/go.mod" {
+			modSum = fields[2]
+		}
+	}
+	if !strings.HasPrefix(sum, "h1:") || !strings.HasPrefix(modSum, "h1:") {
+		return "", "", errors.New("selected Infra go.sum must contain rclone package integrity checksums")
+	}
+	return sum, modSum, nil
+}
+func (b *builder) fetchModule(version string) (moduleDownload, error) {
+	if b.downloadModule != nil {
+		return b.downloadModule(rcloneModule, version)
+	}
+	if e := os.MkdirAll(b.output, 0755); e != nil {
+		return moduleDownload{}, e
+	}
+	// Explicit module@version works outside a main module. Downloads cannot
+	// update the selected Infra or product go.mod/go.sum files.
+	raw, e := b.command(b.output, b.mise, "exec", "go@"+b.tools.Go, "--", "go", "mod", "download", "-json", rcloneModule+"@"+version)
+	if e != nil {
+		return moduleDownload{}, e
+	}
+	var info moduleDownload
+	if e = json.Unmarshal([]byte(raw), &info); e != nil {
+		return info, e
+	}
+	if info.Error != "" {
+		return info, errors.New("Go module download failed")
+	}
+	return info, nil
+}
+func verifyModuleCache(info moduleDownload, module, version, sum, modSum string) error {
+	if info.Path != module || info.Version != version || !filepath.IsAbs(info.Dir) || info.Sum != sum || info.GoModSum != modSum {
+		return errors.New("downloaded module identity/checksum differs from Infra dependency")
+	}
+	actual, e := dirhash.HashDir(info.Dir, module+"@"+version, dirhash.Hash1)
+	if e != nil {
+		return e
+	}
+	if actual != sum {
+		return errors.New("canonical Go module cache integrity mismatch")
+	}
+	actual, e = dirhash.Hash1([]string{"go.mod"}, func(name string) (io.ReadCloser, error) { return os.Open(filepath.Join(info.Dir, name)) })
+	if e != nil {
+		return e
+	}
+	if actual != modSum {
+		return errors.New("canonical module go.mod integrity mismatch")
+	}
+	return nil
+}
+func (b *builder) rcloneModulePath() string { return b.sourcePath("rclone-module") }
+func (b *builder) moduleReceiptPath() string {
+	return filepath.Join(b.output, "receipts/rclone-module-source.json")
+}
+func (b *builder) verifyModuleSnapshot(version string, series modulePatchSeries) (moduleSourceReceipt, error) {
+	var receipt moduleSourceReceipt
+	if e := readJSON(b.moduleReceiptPath(), &receipt); e != nil {
+		return receipt, e
+	}
+	sum, modSum, e := b.moduleChecksums(version)
+	if e != nil {
+		return receipt, e
+	}
+	inventory, e := hashFile(filepath.Join(b.infra, "patches/rclone/series.json"))
+	if e != nil {
+		return receipt, e
+	}
+	if receipt.Schema != "go-module-derived-source/v1" || receipt.Module != rcloneModule || receipt.Version != version || receipt.ModuleSum != sum || receipt.GoModSum != modSum || receipt.PatchInventorySHA256 != inventory || receipt.DerivedDirectory != b.rcloneModulePath() {
+		return receipt, errors.New("module snapshot inputs changed; select a fresh build directory")
+	}
+	a, _ := json.Marshal(receipt.Patches)
+	c, _ := json.Marshal(series.Patches)
+	if string(a) != string(c) {
+		return receipt, errors.New("module snapshot patch inventory changed")
+	}
+	actual, e := treeDigest(receipt.DerivedDirectory)
+	if e != nil {
+		return receipt, e
+	}
+	if "sha256:"+actual != receipt.DerivedContentHash {
+		return receipt, errors.New("derived module snapshot integrity changed")
+	}
+	return receipt, nil
+}
+func (b *builder) materializeRcloneModule() error {
+	version, e := b.rcloneVersion()
+	if e != nil {
+		return e
+	}
+	series, e := b.rcloneSeries()
+	if e != nil {
+		return e
+	}
+	sum, modSum, e := b.moduleChecksums(version)
+	if e != nil {
+		return e
+	}
+	for _, patch := range series.Patches {
+		actual, e := hashFile(filepath.Join(b.infra, patch.Path))
+		if e != nil {
+			return e
+		}
+		if actual != patch.SHA256 {
+			return errors.New("Infra rclone patch checksum mismatch")
+		}
+	}
+	info, e := b.fetchModule(version)
+	if e != nil {
+		return e
+	}
+	if e = verifyModuleCache(info, rcloneModule, version, sum, modSum); e != nil {
+		return e
+	}
+	destination := b.rcloneModulePath()
+	var receipt moduleSourceReceipt
+	if _, e = os.Lstat(destination); e == nil {
+		receipt, e = b.verifyModuleSnapshot(version, series)
+		if e != nil {
+			return e
+		}
+	} else if !errors.Is(e, fs.ErrNotExist) {
+		return e
+	} else {
+		if e = copyTree(info.Dir, destination); e != nil {
+			return e
+		}
+		if e = verifyModuleCache(moduleDownload{Path: rcloneModule, Version: version, Dir: destination, Sum: sum, GoModSum: modSum}, rcloneModule, version, sum, modSum); e != nil {
+			return e
+		}
+		for _, patch := range series.Patches {
+			path := filepath.Join(b.infra, patch.Path)
+			if _, e = b.git(destination, "apply", "--check", path); e != nil {
+				return e
+			}
+			if _, e = b.git(destination, "apply", path); e != nil {
+				return e
+			}
+		}
+		actual, e := treeDigest(destination)
+		if e != nil {
+			return e
+		}
+		inventory, e := hashFile(filepath.Join(b.infra, "patches/rclone/series.json"))
+		if e != nil {
+			return e
+		}
+		receipt = moduleSourceReceipt{Schema: "go-module-derived-source/v1", Module: rcloneModule, Version: version, ModuleSum: sum, GoModSum: modSum, PatchInventorySHA256: inventory, Patches: series.Patches, DerivedDirectory: destination, DerivedContentHash: "sha256:" + actual}
+	}
+	// This hash measures the derived bytes; it is never a package-version or
+	// predeclared Git result-tree acceptance gate.
+	if e = verifyModuleCache(info, rcloneModule, version, sum, modSum); e != nil {
+		return e
+	}
+	ownerHash, e := hashFile(filepath.Join(b.infra, "go/go.mod"))
+	if e != nil {
+		return e
+	}
+	receipt.OwnerRepository = b.infra
+	receipt.OwnerGoModSHA256 = ownerHash
+	receipt.CanonicalDirectory = info.Dir
+	return writeJSON(b.moduleReceiptPath(), receipt)
 }
 
 func main() {
@@ -136,7 +391,8 @@ func buildEnvironment(overrides map[string]string) processexec.EnvPolicy {
 func (b *builder) command(dir, program string, args ...string) (string, error) {
 	s := processexec.NewSpec(program, args...).WithTimeout(30 * time.Minute).WithEnv(buildEnvironment(map[string]string{
 		"GOWORK": "off", "GOCACHE": filepath.Join(b.output, "go-cache"),
-		"XDG_CACHE_HOME": filepath.Join(b.output, "cache"), "npm_config_cache": filepath.Join(b.output, "npm-cache"),
+		"GIT_OPTIONAL_LOCKS": "0",
+		"XDG_CACHE_HOME":     filepath.Join(b.output, "cache"), "npm_config_cache": filepath.Join(b.output, "npm-cache"),
 		"HUSKY": "0", "CI": "true",
 	}))
 	s.Dir = dir
@@ -158,8 +414,9 @@ func (b *builder) verify(r relationship) error {
 	if r.Schema != "git-source-relationship/v1" || r.Integration != "submodule" || !safeRelative(r.Path) || !strings.HasPrefix(r.Path, "third_party/") {
 		return errors.New("invalid source relationship")
 	}
-	source := filepath.Join(b.root, r.Path)
-	entry, e := b.git(b.root, "ls-files", "--stage", "--", r.Path)
+	owner := b.root
+	source := filepath.Join(owner, r.Path)
+	entry, e := b.git(owner, "ls-files", "--stage", "--", r.Path)
 	if e != nil {
 		return e
 	}
@@ -192,7 +449,7 @@ func (b *builder) verify(r relationship) error {
 		if p.Order != i+1 || !safeRelative(p.Path) || !strings.HasPrefix(p.Path, "patches/") {
 			return errors.New("invalid ordered patch path")
 		}
-		actual, e := hashFile(filepath.Join(b.root, p.Path))
+		actual, e := hashFile(filepath.Join(owner, p.Path))
 		if e != nil {
 			return e
 		}
@@ -263,17 +520,50 @@ func (b *builder) materialize(r relationship, destination string) error {
 }
 
 func (b *builder) recordSource(r relationship, tree, cloneMode string) error {
+	owner := b.root
+	commit, e := b.git(owner, "rev-parse", "HEAD")
+	if e != nil {
+		return e
+	}
+	status, e := b.git(owner, "status", "--porcelain", "--untracked-files=all")
+	if e != nil {
+		return e
+	}
 	return writeJSON(filepath.Join(b.output, "receipts", filepath.Base(r.Path)+"-source.json"), struct {
-		Relationship relationship `json:"relationship"`
-		Tree         string       `json:"tree"`
-		CloneMode    string       `json:"clone_mode"`
-	}{r, tree, cloneMode})
+		Relationship     relationship `json:"relationship"`
+		Tree             string       `json:"tree"`
+		CloneMode        string       `json:"clone_mode"`
+		SourceRepository string       `json:"source_repository"`
+		SourceCommit     string       `json:"source_commit"`
+		SourceDirty      bool         `json:"source_dirty"`
+	}{r, tree, cloneMode, owner, commit, status != ""})
 }
 func (b *builder) sourcePath(name string) string { return filepath.Join(b.output, "source", name) }
 func (b *builder) load(name string) (relationship, error) {
 	var r relationship
-	e := readJSON(filepath.Join(b.root, ".git-source-relationships", name+".json"), &r)
-	return r, e
+	switch name {
+	case "openlist", "openlist-ui":
+	default:
+		return r, fmt.Errorf("unknown admitted source %q", name)
+	}
+	if e := readJSON(filepath.Join(b.root, ".git-source-relationships", name+".json"), &r); e != nil {
+		return r, e
+	}
+	if r.Path != "third_party/"+name {
+		return r, fmt.Errorf("unexpected canonical path for %s", name)
+	}
+	return r, nil
+}
+func (b *builder) sources() ([]relationship, error) {
+	var result []relationship
+	for _, name := range []string{"openlist", "openlist-ui"} {
+		r, e := b.load(name)
+		if e != nil {
+			return nil, e
+		}
+		result = append(result, r)
+	}
+	return result, nil
 }
 func (b *builder) verifyDerived(r relationship) error {
 	dir := b.sourcePath(filepath.Base(r.Path))
@@ -331,17 +621,11 @@ func (b *builder) run(stage string) error {
 	}
 	switch stage {
 	case "source":
-		manifests, e := filepath.Glob(filepath.Join(b.root, ".git-source-relationships", "*.json"))
+		admitted, e := b.sources()
 		if e != nil {
 			return e
 		}
-		sort.Strings(manifests)
-		for _, manifest := range manifests {
-			var r relationship
-			e := readJSON(manifest, &r)
-			if e != nil {
-				return e
-			}
+		for _, r := range admitted {
 			name := filepath.Base(r.Path)
 			if _, e = os.Stat(b.sourcePath(name)); e == nil {
 				if e = b.verify(r); e != nil {
@@ -361,7 +645,12 @@ func (b *builder) run(stage string) error {
 				return e
 			}
 		}
+		if e = b.materializeRcloneModule(); e != nil {
+			return e
+		}
 		return b.workspace()
+	case "module-source":
+		return b.materializeRcloneModule()
 	case "ui":
 		return b.ui()
 	case "cp", "plugin", "test":
@@ -417,15 +706,11 @@ func (b *builder) workspace() error {
 		return err
 	}
 	// A derived module is an admitted source, not a global module-cache edit.
-	manifests, e := filepath.Glob(filepath.Join(b.root, ".git-source-relationships", "*.json"))
+	admitted, e := b.sources()
 	if e != nil {
 		return e
 	}
-	for _, manifest := range manifests {
-		var r relationship
-		if e = readJSON(manifest, &r); e != nil {
-			return e
-		}
+	for _, r := range admitted {
 		dir := b.sourcePath(filepath.Base(r.Path))
 		if _, e = os.Stat(filepath.Join(dir, "go.mod")); os.IsNotExist(e) {
 			continue
@@ -442,6 +727,18 @@ func (b *builder) workspace() error {
 		}
 		available[m.Module.Path] = dir
 	}
+	rcloneVersion, e := b.rcloneVersion()
+	if e != nil {
+		return e
+	}
+	series, e := b.rcloneSeries()
+	if e != nil {
+		return e
+	}
+	if _, e = b.verifyModuleSnapshot(rcloneVersion, series); e != nil {
+		return e
+	}
+	available[rcloneModule] = b.rcloneModulePath()
 	workerDir := filepath.Join(b.root, "go")
 	raw, e := b.command(workerDir, b.mise, "exec", "go@"+b.tools.Go, "--", "go", "mod", "edit", "-json")
 	if e != nil {
@@ -473,6 +770,9 @@ func (b *builder) workspace() error {
 			return e
 		}
 		for _, r := range m.Require {
+			if r.Path == rcloneModule && semver.Compare(r.Version, rcloneVersion) > 0 {
+				return fmt.Errorf("module %s requires rclone %s above selected Infra version %s", m.Module.Path, r.Version, rcloneVersion)
+			}
 			if p, ok := available[r.Path]; ok {
 				queue = append(queue, p)
 				replacements = append(replacements, "-replace="+r.Path+"@"+r.Version+"="+p)
@@ -754,6 +1054,37 @@ func (b *builder) provenanceDigest() (string, error) {
 		return "", e
 	}
 	fmt.Fprintf(h, "Makefile %s\ninfra %s\n", recipe, infra)
+	// Infra owns the filesystem adapter and its patched upstream. Bind actual
+	// selected inputs as well as its commit so dirty development snapshots and
+	// backend-only patch updates cannot advertise an unchanged build identity.
+	rclone, e := b.rcloneSeries()
+	if e != nil {
+		return "", e
+	}
+	version, e := b.rcloneVersion()
+	if e != nil {
+		return "", e
+	}
+	fmt.Fprintf(h, "infra/module %s@%s\n", rcloneModule, version)
+	for _, name := range []string{"patches/rclone/series.json", "go/go.mod", "go/go.sum"} {
+		digest, e := hashFile(filepath.Join(b.infra, name))
+		if e != nil {
+			return "", e
+		}
+		fmt.Fprintf(h, "infra/%s %s\n", name, digest)
+	}
+	storage, e := treeDigest(filepath.Join(b.infra, "go/storage"))
+	if e != nil {
+		return "", e
+	}
+	fmt.Fprintf(h, "infra/go/storage %s\n", storage)
+	for _, patch := range rclone.Patches {
+		digest, e := hashFile(filepath.Join(b.infra, patch.Path))
+		if e != nil {
+			return "", e
+		}
+		fmt.Fprintf(h, "infra/%d/%s %s\n", patch.Order, patch.Path, digest)
+	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
