@@ -249,3 +249,47 @@ func TestImageCompositionsContainEmbeddedCPAndIndependentPlugins(t *testing.T) {
 		}
 	}
 }
+
+func TestNativeBuildIdentityTracksBackendPatchesAndRecipe(t *testing.T) {
+	b, _ := fixture(t)
+	b.infra = filepath.Join(b.root, "third_party/fixture")
+	inputs := map[string]string{
+		"go/client.go":                          "package client\n",
+		".git-source-relationships/rclone.json": "pinned upstream and result tree\n",
+		"patches/rclone/0001.patch":             "original backend patch\n",
+		"build/toolchain.json":                  "pinned tools\n",
+		"Makefile":                              "native build flags\n",
+	}
+	for name, content := range inputs {
+		path := filepath.Join(b.root, name)
+		if e := os.MkdirAll(filepath.Dir(path), 0755); e != nil {
+			t.Fatal(e)
+		}
+		if e := os.WriteFile(path, []byte(content), 0644); e != nil {
+			t.Fatal(e)
+		}
+	}
+	baseline, e := b.provenanceDigest()
+	if e != nil {
+		t.Fatal(e)
+	}
+	again, e := b.provenanceDigest()
+	if e != nil || again != baseline {
+		t.Fatalf("unstable build identity: %q %v", again, e)
+	}
+	for name, original := range inputs {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(b.root, name)
+			if e := os.WriteFile(path, []byte(original+"changed\n"), 0644); e != nil {
+				t.Fatal(e)
+			}
+			changed, e := b.provenanceDigest()
+			if e != nil || changed == baseline {
+				t.Fatalf("changed build input kept identity: %q %v", changed, e)
+			}
+			if e := os.WriteFile(path, []byte(original), 0644); e != nil {
+				t.Fatal(e)
+			}
+		})
+	}
+}

@@ -369,11 +369,7 @@ func (b *builder) run(stage string) error {
 	case "inputs":
 		return b.imageInputs()
 	case "fingerprint":
-		r, e := b.load("openlist")
-		if e != nil {
-			return e
-		}
-		digest, e := b.provenanceDigest(r)
+		digest, e := b.provenanceDigest()
 		if e != nil {
 			return e
 		}
@@ -649,7 +645,7 @@ func (b *builder) compile(stage string) error {
 		args = append(args, "test", "-race", "./clientplugin", "./pluginentry", "./pkg/gowebdav", "./pkg/storage/s3session", "./internal/controlplane/...", "./server")
 	} else if stage == "plugin" {
 		artifact = "client-openlist.so"
-		provenance, e := b.provenanceDigest(r)
+		provenance, e := b.provenanceDigest()
 		if e != nil {
 			return e
 		}
@@ -738,8 +734,18 @@ func patchDigest(r relationship) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (b *builder) provenanceDigest(r relationship) (string, error) {
-	firstparty, e := treeDigest(filepath.Join(b.root, "go"))
+func (b *builder) provenanceDigest() (string, error) {
+	h := sha256.New()
+	// Both native artifacts depend on the product's admitted sources and build
+	// recipe. A backend patch alone must invalidate the advertised build ID.
+	for _, name := range []string{"go", ".git-source-relationships", "patches", "build"} {
+		digest, e := treeDigest(filepath.Join(b.root, name))
+		if e != nil {
+			return "", e
+		}
+		fmt.Fprintf(h, "%s %s\n", name, digest)
+	}
+	recipe, e := hashFile(filepath.Join(b.root, "Makefile"))
 	if e != nil {
 		return "", e
 	}
@@ -747,8 +753,7 @@ func (b *builder) provenanceDigest(r relationship) (string, error) {
 	if e != nil {
 		return "", e
 	}
-	h := sha256.New()
-	fmt.Fprintf(h, "%s\n%s\n%s\n", patchDigest(r), firstparty, infra)
+	fmt.Fprintf(h, "Makefile %s\ninfra %s\n", recipe, infra)
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
