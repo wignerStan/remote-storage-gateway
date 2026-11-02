@@ -34,7 +34,7 @@ spec:
         - name: gateway
           image: GATEWAY_IMAGE
           imagePullPolicy: Never
-          command: [/opt/gateway/remote-storage-gateway, -config, /run/gateway-secrets/gateway.json]
+          command: [/opt/gateway/storage-worker, -config, /run/gateway-secrets/gateway.json]
           securityContext:
             runAsUser: 1001
             runAsGroup: 1001

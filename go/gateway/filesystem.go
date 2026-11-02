@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	workerconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/worker"
 	"io"
 	"os"
 	"path"
@@ -28,7 +29,7 @@ func BindExchange(ctx context.Context, flow *Exchange, size int64, contentType s
 }
 func NewFilesystem(service *Runtime) *Filesystem { return &Filesystem{service: service} }
 
-func (f *Filesystem) selected(ctx context.Context, name string) (Mount, string, client.Client, error) {
+func (f *Filesystem) selected(ctx context.Context, name string) (workerconfig.Mount, string, client.Client, error) {
 	m, p, e := f.service.Resolve(name)
 	if e != nil {
 		return m, p, nil, e

@@ -1,7 +1,9 @@
 # Reproducible product derivation
 
-This monorepo owns the Worker, gateway composition, concrete client plugin
-entries and the OpenList patch stack. Official OpenList and its frontend are
+This monorepo owns the Gateway Worker application, Control Plane, independent
+VFS application, concrete client/transfer entries and OpenList patch stack.
+Generic Data Plane contracts and runtime remain in the independent
+`network-data-plane-worker` Go module, selected by `DATA_PLANE_ROOT`. Official OpenList and its frontend are
 pristine exact submodules below the product's `third_party/` directory. Infra
 owns the cloud filesystem and optional VFS adapters, the required rclone Go
 package version and its ordered patch stack. The product consumes that selected
@@ -53,11 +55,20 @@ OpenList factory. Entry types and named operations still contribute to the
 existing schema effect tool. Moving the sources does not introduce a second
 descriptor, secret-field schema or HTTP framework contract.
 
+The fifth patch assembles the Gateway process manager, local typed management
+entries and child-aware readiness inside OpenList. The native provider
+`nativeclient/provider` adapter now delegates generic C/eventfd/cgo mechanics to
+Infra `runtime/nativeplugin/provider`.
+
+The sixth patch isolates managed Control Plane execution before persisted setting
+hooks, storage initialization and task restoration. It publishes only identity,
+DB metadata and typed control routes; legacy mode remains a separate profile.
+
 ## Build stages
 
 Initialize the exact submodules, then select the reviewed Infra checkout and an
 external output directory. The `-release` source-tool option additionally
-requires clean exact product and Infra commits. An unfinished dev checkout is
+requires clean exact product, Infra and external Data Plane commits. An unfinished dev checkout is
 recorded as dirty and cannot satisfy that release gate.
 
 ```sh
@@ -126,8 +137,10 @@ The built programs are:
 | --- | --- |
 | `bin/openlist-control-plane` | CP with the built UI embedded |
 | `bin/client-openlist.so` | Selected OpenList-derived native client |
-| `bin/client-rclone.so` | Default rclone remote client; optional local materialization |
-| `bin/remote-storage-gateway` | Worker/gateway composition |
+| `bin/client-rclone.so` | Rclone remote client |
+| `bin/storage-worker` | Independent Worker process |
+| `bin/storage-vfs` | Independent optional materializer |
+| `bin/transfer-reapi.so` | Dynamic REAPI / ByteStream codec |
 | `bin/gateway-admin` | Administrative bootstrap tool |
 
 ## Native OCI assembly
@@ -136,17 +149,18 @@ Root `BUILD.bazel` uses native `rules_img` 0.3.23. The official Debian
 trixie-slim index is pinned to
 `sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4`.
 The gateway image contains its program, both independent client `.so` files and
-the public CA bundle. The CP image contains its UI-embedded binary and CA
-bundle; there is no external frontend layer or `OPENLIST_DIST_DIR` override.
+the transfer plugin and public CA bundle. The CP-manager image additionally
+contains separate Worker/VFS child binaries and plugin artifacts. The VFS image
+contains its separate executable and CA bundle; there is no external frontend layer or `OPENLIST_DIST_DIR` override.
 
-Set `GATEWAY_IMAGE_INPUTS` and `CONTROL_PLANE_IMAGE_INPUTS` to external reviewed
+Set `GATEWAY_IMAGE_INPUTS`, `CONTROL_PLANE_IMAGE_INPUTS` and `VFS_IMAGE_INPUTS` to external reviewed
 input directories. Each needs `inputs.json`, an exact filename-to-SHA-256 map.
 The repository rule verifies bytes and exposes only the allowlisted names.
 Never include operator configuration, credentials, databases or keys.
 
 ```sh
 bazel build --config=buildbarn --lockfile_mode=off \
-  --output_groups=+oci_tarball,+digest //:gateway_image //:control_plane_image
+  --output_groups=+oci_tarball,+digest //:gateway_image //:control_plane_image //:vfs_image
 ```
 
 Remote image actions have local fallback disabled. They use neither BuildKit,

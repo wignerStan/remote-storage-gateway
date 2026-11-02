@@ -1,0 +1,109 @@
+# Opt-in three-process profile with its own Deployment and Service identity.
+# It does not replace the live OpenList app selector or legacy HTTP/S3 Services.
+# GATEWAY_CONTROL_PLANE_PVC must be selected explicitly. Reusing the old database
+# PVC requires stopping its previous writer and migrating legacy endpoint traffic.
+# CONTROL_PLANE_IMAGE must contain storage-worker/storage-vfs and both plugin axes.
+# openlist-control supplies targets.json, processes.json and referenced credentials.
+# processes.json runtime_directory=/run/gateway/control; private VFS uses loopback.
+# CP config binds management to loopback and delegates public TLS to its Worker.
+# CONTROL_PLANE_HOST equals the configured Worker control_plane.host. Its /ping
+# succeeds only after manager activation and all children are ready.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: remote-storage-gateway
+  namespace: selfhost
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: remote-storage-gateway}
+  template:
+    metadata:
+      labels: {app: remote-storage-gateway}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: k3s-cilium}
+      automountServiceAccountToken: false
+      securityContext: {fsGroup: 1001}
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 172.16.0.210
+          hostnames: [incus.tail5ced8c.ts.net]
+      initContainers:
+        - name: private-control-files
+          image: docker.io/library/debian@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+          command: [/bin/sh, -ec, "cp /input/* /private/; chmod 0600 /private/*; chown 1001:1001 /private/*"]
+          securityContext:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [CHOWN]}
+          volumeMounts:
+            - {name: input, mountPath: /input, readOnly: true}
+            - {name: private, mountPath: /private}
+      containers:
+        - name: openlist
+          image: CONTROL_PLANE_IMAGE
+          imagePullPolicy: Never
+          command: [/opt/control-plane/openlist, server, --data, /opt/openlist/data, --config, /opt/openlist/data/config.json]
+          workingDir: /opt/openlist
+          env:
+            - {name: OPENLIST_CONTROL_TARGETS_FILE, value: /run/control-secrets/targets.json}
+            - {name: OPENLIST_GATEWAY_PROCESSES_FILE, value: /run/control-secrets/processes.json}
+            - {name: HTTP_PROXY, value: 'http://172.16.0.1:10809'}
+            - {name: HTTPS_PROXY, value: 'http://172.16.0.1:10809'}
+            - {name: NO_PROXY, value: 'localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,incus.tail5ced8c.ts.net,CONTROL_ORIGIN_NO_PROXY'}
+          securityContext:
+            runAsUser: 1001
+            runAsGroup: 1001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 2Gi}
+          ports:
+            - {name: https, containerPort: 8443}
+            - {name: http-private, containerPort: 5244}
+          readinessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /ping
+              port: https
+              httpHeaders: [{name: Host, value: CONTROL_PLANE_HOST}]
+            periodSeconds: 5
+          startupProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /ping
+              port: https
+              httpHeaders: [{name: Host, value: CONTROL_PLANE_HOST}]
+            failureThreshold: 60
+            periodSeconds: 5
+          volumeMounts:
+            - {name: data, mountPath: /opt/openlist/data}
+            - {name: private, mountPath: /run/control-secrets, readOnly: true}
+            - {name: temporary, mountPath: /tmp}
+            - {name: child-runtime, mountPath: /run/gateway}
+            - {name: vfs-cache, mountPath: /var/cache/storage-vfs}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: GATEWAY_CONTROL_PLANE_PVC}
+        - name: input
+          secret: {secretName: remote-storage-gateway-control, defaultMode: 0400}
+        - name: private
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+        - name: temporary
+          emptyDir: {sizeLimit: 1Gi}
+        - name: child-runtime
+          emptyDir: {medium: Memory, sizeLimit: 4Mi}
+        - name: vfs-cache
+          emptyDir: {sizeLimit: 4Gi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: remote-storage-gateway, namespace: selfhost}
+spec:
+  selector: {app: remote-storage-gateway}
+  ports:
+    - {name: https, port: 443, targetPort: https}

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/gin-gonic/gin"
-	"github.com/wignerStan/network-data-plane-worker/go/gateway"
+	"github.com/wignerStan/remote-storage-gateway/go/gateway"
 	"golang.org/x/net/webdav"
 	"io"
 	"net"
@@ -52,15 +52,18 @@ func RegisterGin(router *gin.Engine, r *gateway.Runtime, control, proxy http.Han
 	router.GET("/healthz", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	router.Any("/v1", gin.WrapH(control))
 	router.Any("/v1/*path", gin.WrapH(control))
-	dav := &webdav.Handler{Prefix: "/dav", FileSystem: &filesystem{Filesystem: gateway.NewFilesystem(r)}, LockSystem: webdav.NewMemLS()}
-	handler := func(c *gin.Context) { serveWebDAV(c.Writer, c.Request, r, dav) }
-	for _, route := range []string{"/dav", "/dav/*path"} {
-		for _, method := range []string{"GET", "HEAD", "PROPFIND", "OPTIONS", "PUT", "DELETE"} {
-			router.Handle(method, route, handler)
+
+	for _, prefix := range []string{"/dav", "/remote-dav"} {
+		dav := &webdav.Handler{Prefix: prefix, FileSystem: &filesystem{Filesystem: gateway.NewFilesystem(r)}, LockSystem: webdav.NewMemLS()}
+		handler := func(c *gin.Context) { serveWebDAV(c.Writer, c.Request, r, prefix, dav) }
+		for _, route := range []string{prefix, prefix + "/*path"} {
+			for _, method := range []string{"GET", "HEAD", "PROPFIND", "OPTIONS", "PUT", "DELETE"} {
+				router.Handle(method, route, handler)
+			}
 		}
 	}
 	router.NoMethod(func(c *gin.Context) {
-		if c.Request.URL.Path == "/dav" || strings.HasPrefix(c.Request.URL.Path, "/dav/") {
+		if c.Request.URL.Path == "/dav" || strings.HasPrefix(c.Request.URL.Path, "/dav/") || c.Request.URL.Path == "/remote-dav" || strings.HasPrefix(c.Request.URL.Path, "/remote-dav/") {
 			c.Header("Allow", "GET, HEAD, PROPFIND, OPTIONS, PUT, DELETE")
 			http.Error(c.Writer, "Operation unsupported", http.StatusMethodNotAllowed)
 			return
@@ -70,7 +73,7 @@ func RegisterGin(router *gin.Engine, r *gateway.Runtime, control, proxy http.Han
 	router.NoRoute(func(c *gin.Context) { http.NotFound(c.Writer, c.Request) })
 }
 
-func serveWebDAV(w http.ResponseWriter, q *http.Request, r *gateway.Runtime, dav *webdav.Handler) {
+func serveWebDAV(w http.ResponseWriter, q *http.Request, r *gateway.Runtime, prefix string, dav *webdav.Handler) {
 	if q.Method == "OPTIONS" {
 		w.Header().Set("DAV", "1")
 		w.Header().Set("Allow", "GET, HEAD, PROPFIND, OPTIONS, PUT, DELETE")
@@ -85,8 +88,14 @@ func serveWebDAV(w http.ResponseWriter, q *http.Request, r *gateway.Runtime, dav
 		http.Error(w, "Conditional mutation unsupported", http.StatusNotImplemented)
 		return
 	}
-	name := strings.TrimPrefix(q.URL.Path, "/dav")
-	flow, e := r.BeginExchange(name, q.Method == "PUT" || q.Method == "DELETE")
+	name := strings.TrimPrefix(q.URL.Path, prefix)
+	var flow *gateway.Exchange
+	var e error
+	if prefix == "/remote-dav" {
+		flow, e = r.BeginRemoteExchange(name, q.Method == "PUT" || q.Method == "DELETE")
+	} else {
+		flow, e = r.BeginExchange(name, q.Method == "PUT" || q.Method == "DELETE")
+	}
 	if errors.Is(e, os.ErrPermission) {
 		http.Error(w, "Read only mount", http.StatusForbidden)
 		return
