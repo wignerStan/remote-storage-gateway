@@ -55,15 +55,3 @@ func TestManagerDefaultDeniesAndCloseIsIdempotent(t *testing.T) {
 		t.Fatal(e)
 	}
 }
-
-func TestMaterializerEndpointUsesObservedWorkerOrigin(t *testing.T) {
-	got, e := materializerEndpoint("http://127.0.0.1:42109", "/remote-dav/files/")
-	if e != nil || got != "http://127.0.0.1:42109/remote-dav/files/" {
-		t.Fatal(got, e)
-	}
-	for _, bad := range []string{"http://provider.invalid/remote-dav/files/", "//provider.invalid/remote-dav/files/", "/dav/files/", "/remote-dav/../", "/remote-dav/a%2Fb/", "/remote-dav/files/?token=secret"} {
-		if _, e := materializerEndpoint("http://127.0.0.1:42109", bad); e == nil {
-			t.Fatal("unsafe endpoint accepted", bad)
-		}
-	}
-}

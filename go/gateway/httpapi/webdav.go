@@ -16,14 +16,16 @@ type filesystem struct{ *gateway.Filesystem }
 func (f *filesystem) OpenFile(ctx context.Context, name string, flags int, mode os.FileMode) (webdav.File, error) {
 	file, err := f.Filesystem.OpenFile(ctx, name, flags, mode)
 	if err != nil {
+		recordProviderFailure(ctx, err)
 		return nil, err
 	}
-	return &davFile{File: file}, nil
+	return &davFile{File: file, failures: providerFailuresFrom(ctx)}, nil
 }
 
 func (f *filesystem) Stat(ctx context.Context, name string) (os.FileInfo, error) {
 	info, err := f.Filesystem.Stat(ctx, name)
 	if err != nil {
+		recordProviderFailure(ctx, err)
 		return nil, err
 	}
 	return metadata{info}, nil
@@ -41,10 +43,20 @@ func contentType(name string) string {
 	return value
 }
 
-type davFile struct{ webdav.File }
+type davFile struct {
+	webdav.File
+	failures *providerFailures
+}
+
+func (f *davFile) Read(p []byte) (int, error) {
+	n, err := f.File.Read(p)
+	f.failures.record(err)
+	return n, err
+}
 
 func (f *davFile) Stat() (os.FileInfo, error) {
 	info, err := f.File.Stat()
+	f.failures.record(err)
 	if err != nil {
 		return nil, err
 	}
@@ -52,6 +64,7 @@ func (f *davFile) Stat() (os.FileInfo, error) {
 }
 func (f *davFile) Readdir(count int) ([]os.FileInfo, error) {
 	entries, err := f.File.Readdir(count)
+	f.failures.record(err)
 	for i := range entries {
 		entries[i] = metadata{entries[i]}
 	}

@@ -1,0 +1,12 @@
+diff --git a/clientplugin/native_test.go b/clientplugin/native_test.go
+--- a/clientplugin/native_test.go
++++ b/clientplugin/native_test.go
+@@ -16,7 +16,7 @@
+ 	"time"
+ 
+ 	infraexec "github.com/wignerStan/infra/go/process/exec"
+-	native "github.com/wignerStan/infra/go/runtime/nativeplugin"
++	native "github.com/wignerStan/infra/go/plugins/native"
+ 	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
+ 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
+ 	"github.com/wignerStan/network-data-plane-worker/go/nativeclient"

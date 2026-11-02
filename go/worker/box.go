@@ -104,8 +104,18 @@ func (b *Box) SetConfig(c config.ProcessConfig) error {
 	if e != nil || copy.InstanceID == "" || len(copy.InstanceID) > 128 || !filepath.IsAbs(copy.ControlSocket) || len(copy.ControlSocket) > 107 || copy.BrokerSocket != "" && !filepath.IsAbs(copy.BrokerSocket) {
 		return broker.ErrInvalid
 	}
-	if p := copy.LocalDataSocket; p != "" && (!filepath.IsAbs(p) || filepath.Clean(p) != p || len(p) > 107 || p == filepath.Clean(copy.ControlSocket) || p == filepath.Clean(copy.BrokerSocket)) {
+	if (copy.StorageIPCSocket == "") != (copy.StorageOfferSocket == "") {
 		return broker.ErrInvalid
+	}
+	seen := map[string]bool{filepath.Clean(copy.ControlSocket): true, filepath.Clean(copy.BrokerSocket): true}
+	for _, p := range []string{copy.StorageIPCSocket, copy.StorageOfferSocket} {
+		if p == "" {
+			continue
+		}
+		if !filepath.IsAbs(p) || filepath.Clean(p) != p || len(p) > 107 || seen[p] {
+			return broker.ErrInvalid
+		}
+		seen[p] = true
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -180,7 +190,7 @@ func (b *Box) Start(ctx context.Context) error {
 			return err
 		}
 		info, err := candidate.Info(attempt)
-		if err != nil || !info.Ready || info.ID != o.Config.InstanceID {
+		if err != nil || !info.Ready || info.ID != o.Config.InstanceID || o.Config.StorageIPCSocket != "" && (info.StorageSocket != o.Config.StorageIPCSocket || info.OfferSocket != o.Config.StorageOfferSocket || info.Incarnation == "") {
 			candidate.Close(context.Background())
 			return broker.ErrUnavailable
 		}

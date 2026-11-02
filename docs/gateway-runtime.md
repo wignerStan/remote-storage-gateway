@@ -8,7 +8,7 @@ control-plane code is not on the payload path.
 Build with the workspace described in the repository README:
 
 ```sh
-make INFRA_ROOT=/path/to/reviewed/infra BUILD_DIR=/tmp/trade-remote-gateway-build plugin worker vfs rclone transfer
+make INFRA_ROOT=/path/to/reviewed/infra BUILD_DIR=/tmp/trade-remote-gateway-build plugin worker materializer rclone transfer
 ```
 
 The ELF SHA256 approves executable bytes; the descriptor SHA256 approves exact
@@ -172,40 +172,30 @@ retiring its previous writer and completing endpoint migration. This candidate
 does not implement a legacy-compatible S3 frontend.
 
 `client.rclone` streams remotely. Its former `materialization` option is rejected.
-Materialization now runs only in the independent `storage-vfs` process.
+VFS lives in the independent `github.com/wignerStan/rclone/go` module. Gateway
+imports its passive Box configuration; the external source build produces the
+native `rclone serve managed-vfs` command. There is no Gateway VFS runtime.
 
-The Control Plane loads `OPENLIST_GATEWAY_PROCESSES_FILE`. Its `workers` list
-contains executable paths and passive Worker process configuration; optional
-`vfs` entries contain a separate executable and VFS process configuration.
-`runtime_directory` can create a private child of an existing runtime volume.
-The supplied managed deployment uses `/run/gateway/control`.
+The Control Plane loads `OPENLIST_GATEWAY_PROCESSES_FILE`. `workers` select Worker
+executables and configurations; optional `materializers` select external rclone
+executables and `box.ProcessConfig`. A materializer's `remote` names only the
+Worker IPC/offer sockets, raw namespace and expected Worker ID/incarnation. CP
+pins actual endpoints from the ready Worker's Info, then starts the external
+Box. Origin URLs and provider credentials have no representation in that backend
+assignment. `runtime_directory` can create a private child of a runtime volume.
 
-A VFS entry names `worker_instance_id` and `worker_control_socket`; its
-`data_endpoint` selects `/remote-dav/<mount>/`. The manager derives the real
-origin from the ready Worker's typed Info response, so a Worker can bind port0.
-Standalone VFS config requires that complete observed Data Plane URL. A public
-TLS Worker should also set `local_data_socket` under the private runtime directory.
-The manager supplies and pins VFS `worker_local_data_socket`; standalone VFS must
-match that path explicitly. Payload then uses rclone WebDAV's existing
-`unix_socket` transport with a local HTTP origin, while the public endpoint
-remains metadata identity. No public TLS certificate check is bypassed: VFS does
-not dial the public listener. The data socket is distinct from ttrpc and only
-permits authenticated raw GET/HEAD/OPTIONS/PROPFIND, without admin/cache/gRPC. VFS rejects
-provider URLs, foreign worker identities and recursive cache paths.
+The backend uses bounded ttrpc metadata plus an authenticated Unix seqpacket
+shared-memory bootstrap. Worker owns allocation, exact generation leases and
+process recovery. CP supplies routing decisions without carrying bytes. The
+private native rclone frontend remains an optional read-only Worker client
+endpoint. Its local DAV credential is independent of Worker ingress/TLS secrets.
+The previous private raw HTTP Unix data socket is removed.
 
-VFS has separate `local_username` / `local_password_file` and outbound
-`data_username` / `data_password_file`. Its local listener is loopback-only.
-`directory`, `max_bytes` and `max_age_seconds` govern the regenerable cache.
-The byte target controls eviction; the deployment volume separately bounds disk
-capacity. This remains distinct from backup, retention and hot/cold placement.
-
-An optional `activate_client` contains an exact Worker-owned Selection. After VFS
-is ready the manager compares against the observed generation and publishes that
-selection. Its mount must be read-only and bind a distinct `remote_client`;
-activation of writable or recursive assignments fails closed. Public cache reads
-traverse Worker `/dav`; remote cache misses traverse its `/remote-dav` route.
-The source-built process test verifies cache hits without extra origin reads and
-both actual child reaps. It does not claim write-through cache support.
+For cache controls and immutable ZIP placement, see [Small files](small-files.md)
+and the external rclone application's configuration. The cache remains
+regenerable and distinct from backup, retention and hot/cold placement. A
+`materializers[].activate_client` selection must bind a read-only mount with a
+distinct `remote_client`; it is published only after external Box readiness.
 
 `/api/admin/control/instances` and its manifest/descriptor/observed/client routes
 manage local children over ttrpc. Legacy configured remote management targets

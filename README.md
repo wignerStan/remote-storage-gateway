@@ -7,13 +7,13 @@ The generic [Data Plane](https://github.com/wignerStan/network-data-plane-worker
 remains a separate repository. Gateway imports its Go module; this repository
 does not contain a second copy of its runtime, contracts, or Rust source.
 
-## Three applications
+## Applications and module boundaries
 
 | Application | Source | Responsibility |
 | --- | --- | --- |
 | Control Plane | `go/controlplane`, patched OpenList | Desired configuration, exact plugin descriptors, process management and transfer decisions |
 | Worker | `go/worker`, `go/worker/runtime`, `go/cmd/storage-worker` | Public TLS/reverse proxy, data ingress/egress and dynamic plugin execution |
-| VFS | `go/vfs`, `go/cmd/storage-vfs` | Optional local materialization and cache lifecycle in its own process |
+| VFS | Independent [`rclone`](https://github.com/wignerStan/rclone) module and patched native CLI | Optional local materialization through its ttrpc/shared-memory backend |
 
 When a Gateway process file is configured, OpenList runs in managed mode: legacy
 provider initialization, queued payload tasks, media/index execution and auxiliary
@@ -38,7 +38,7 @@ publishes the resulting routes.
 | Axis | Product implementations | Worker-owned port |
 | --- | --- | --- |
 | Client | `go/plugins/client/rclone`; OpenList client extracted by the ordered upstream patches | `client/v1` |
-| Transfer / codec | `go/plugins/transfer/reapi` | `encoded/v1` |
+| Transfer / codec | `go/plugins/transfer/reapi` | `encoded/v2` |
 
 Both axes publish dynamically loaded `.so` artifacts. The Data Plane owns contract
 structure, lifecycle, admission and the native ABI. Concrete plugins publish
@@ -51,35 +51,38 @@ remain host-owned gRPC buffer leases; byte bodies never cross the native control
 RPC or the Control Plane. Application buffer reuse is distinct from a claim
 about kernel or TLS copies.
 
-## Independent materialization
+## Independent rclone materialization
+
+VFS is a separate rclone-derived product and Go module. This repository contains
+no VFS implementation, filesystem wrapper or VFS executable. The Control Plane
+imports the external module's Box to manage its native CLI process.
 
 ```text
-public client -> Worker /dav -> client plugin -> private VFS DAV
-                                                    |
-                                            cache miss only
-                                                    |
-                         Worker /remote-dav -> remote client -> provider
+public client -> Worker /dav -> client plugin -> private native rclone DAV/VFS
+                                                          |
+                                      ttrpc metadata + shared-memory leases
+                                                          |
+                         Worker raw namespace -> remote client -> provider
 ```
 
-Infra `go/storage/cloud` and `go/storage/vfs` supply reusable mechanisms. The VFS
-application owns their execution and local disk. Its advertised endpoint is pinned
-to the ready Worker's control identity and selects a remote-only mount. For public
-TLS Workers, `local_data_socket` supplies a separate private HTTP Unix data
-listener. The manager pins that socket for VFS; rclone's existing `unix_socket`
-transport carries bytes without a public DNS/CA override. This data listener is
-separate from metadata-only ttrpc and accepts authenticated raw reads only.
+Rclone's new backend reads an explicitly assigned Worker namespace. It receives
+no cloud credentials or origin URL. Worker authenticates the ttrpc and Unix
+seqpacket bootstrap peer, obtains a scoped CP decision and retains the exact
+client generation. Reusable shared memory carries bytes; ttrpc carries only
+bounded metadata and references. The CP neither allocates nor reclaims arenas.
 
-Cached mounts are read-only; activation rejects writable mounts. Ordinary remote
-streaming mounts retain their existing write operations. A cached mount has distinct `client` and `remote_client` assignments. The raw
-`/remote-dav` route always selects the latter, preventing cache recursion. The
-Control Plane starts the Worker first, then VFS; an optional `activate_client`
-selection is published with a compare-and-swap against the observed generation
-once VFS is ready. Provider configuration bytes remain plugin-owned.
+The external application reuses native rclone VFS and private serve behavior.
+The backend leg no longer passes through WebDAV or the public TLS listener.
+Its private frontend can be selected by a Worker client; public traffic still
+enters the Worker. This is not a claim that both local directions use shared
+memory or that legacy native client chunks avoid copying.
 
-VFS's private local DAV credential is separate from its outbound Data Plane
-credential. Only explicitly approved client secret references can reach native
-clients; Worker ingress and TLS secrets stay host-owned. Shutdown retires VFS
-before its Worker and keeps ownership until actual process reaping completes.
+Cached mounts are read-only, with distinct cached `client` and raw
+`remote_client` assignments. CP starts Worker first, pins its observed IPC
+incarnation, starts rclone, then optionally activates the exact client selection
+using generation compare-and-swap. Rclone retires before Worker. Native leases
+remain held until actual borrowers finish or exact process-exit recovery permits
+reclamation; cancellation and disconnect do not imply release.
 
 ## Source and build
 
@@ -88,7 +91,7 @@ patches under `.git-source-relationships`. The builder derives external source
 under `/tmp/trade-*` or `/var/tmp/trade-*`; it does not modify upstream checkouts.
 The UI is built from the admitted frontend and embedded into the CP binary.
 
-Rclone is an Infra Go package dependency, currently `v1.75.2`. Infra owns its
+The rclone SDK is an Infra Go package dependency, currently `v1.75.2`. Infra owns its
 patch inventory. The builder verifies module checksums, derives the patches in
 external build storage and leaves the Go module cache unchanged. Rclone has no
 Git submodule or commit pin.
@@ -98,6 +101,7 @@ Use the selected, reviewed Infra and Data Plane sources explicitly:
 ```sh
 make all MISE=mise INFRA_ROOT=/path/to/reviewed/infra \
   DATA_PLANE_ROOT=/develop/network/data-plane-worker \
+  RCLONE_ROOT=/develop/network/rclone \
   BUILD_DIR=/tmp/trade-remote-gateway-build
 make test INFRA_ROOT=/path/to/reviewed/infra \
   DATA_PLANE_ROOT=/develop/network/data-plane-worker

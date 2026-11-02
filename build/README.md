@@ -1,7 +1,7 @@
 # Reproducible product derivation
 
 This monorepo owns the Gateway Worker application, Control Plane, independent
-VFS application, concrete client/transfer entries and OpenList patch stack.
+concrete client/transfer entries and OpenList patch stack.
 Generic Data Plane contracts and runtime remain in the independent
 `network-data-plane-worker` Go module, selected by `DATA_PLANE_ROOT`. Official OpenList and its frontend are
 pristine exact submodules below the product's `third_party/` directory. Infra
@@ -58,11 +58,14 @@ descriptor, secret-field schema or HTTP framework contract.
 The fifth patch assembles the Gateway process manager, local typed management
 entries and child-aware readiness inside OpenList. The native provider
 `nativeclient/provider` adapter now delegates generic C/eventfd/cgo mechanics to
-Infra `runtime/nativeplugin/provider`.
+Infra `plugins/native/provider`.
 
 The sixth patch isolates managed Control Plane execution before persisted setting
 hooks, storage initialization and task restoration. It publishes only identity,
 DB metadata and typed control routes; legacy mode remains a separate profile.
+
+The seventh patch follows Infra’s published `plugins/native` import in the
+extracted native test without rewriting the earlier patches.
 
 ## Build stages
 
@@ -76,7 +79,7 @@ git submodule update --init --recursive
 make MISE=mise INFRA_ROOT=/path/to/reviewed/infra \
   BUILD_DIR=/tmp/trade-remote-gateway-build source test-build
 make MISE=mise INFRA_ROOT=/path/to/reviewed/infra \
-  BUILD_DIR=/tmp/trade-remote-gateway-build plugin gateway rclone admin
+  BUILD_DIR=/tmp/trade-remote-gateway-build plugin worker materializer rclone admin
 make MISE=mise INFRA_ROOT=/path/to/reviewed/infra \
   BUILD_DIR=/tmp/trade-remote-gateway-build control-plane test-derived
 ```
@@ -139,7 +142,7 @@ The built programs are:
 | `bin/client-openlist.so` | Selected OpenList-derived native client |
 | `bin/client-rclone.so` | Rclone remote client |
 | `bin/storage-worker` | Independent Worker process |
-| `bin/storage-vfs` | Independent optional materializer |
+| `bin/rclone` | Externally derived native rclone materializer |
 | `bin/transfer-reapi.so` | Dynamic REAPI / ByteStream codec |
 | `bin/gateway-admin` | Administrative bootstrap tool |
 
@@ -160,7 +163,7 @@ Never include operator configuration, credentials, databases or keys.
 
 ```sh
 bazel build --config=buildbarn --lockfile_mode=off \
-  --output_groups=+oci_tarball,+digest //:gateway_image //:control_plane_image //:vfs_image
+  --output_groups=+oci_tarball,+digest //:gateway_image //:control_plane_image
 ```
 
 Remote image actions have local fallback disabled. They use neither BuildKit,
@@ -183,3 +186,10 @@ ordered patches and update only their inventory checksums. Re-materialize in a
 fresh external module snapshot and measure its resulting bytes. Do not add a
 Git pin, hard-coded expected tree, modified global module cache or committed
 absolute replacement.
+
+The VFS executable is independently derived by `/develop/network/rclone`; select
+that versioned Go module through `RCLONE_ROOT`. Its own recipe verifies the same
+Infra-owned SDK patch inventory, then applies the managed native command/backend
+patches in its separate build workspace. Gateway assembles its resulting binary
+for the optional managed child; it does not own another VFS implementation or
+VFS image. Public materializer configuration is imported from that module.

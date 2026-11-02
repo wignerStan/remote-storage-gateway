@@ -1,119 +1,58 @@
 package controlplane
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"net/url"
-	"strings"
-	"time"
-
-	processexec "github.com/wignerStan/infra/go/process/exec"
-	"github.com/wignerStan/infra/go/process/supervisor"
+	rclonebox "github.com/wignerStan/rclone/go/box"
 	"github.com/wignerStan/remote-storage-gateway/go/contracts/control/broker"
-	control "github.com/wignerStan/remote-storage-gateway/go/control/ttrpc"
 )
 
-type materializer struct {
-	child   *supervisor.Child
-	control *control.VFSClient
-}
+type materializer struct{ box *rclonebox.Box }
 
-func (m *Manager) startVFS(ctx context.Context, s VFSSpec) error {
-	workerControl, e := m.Worker(s.Config.WorkerInstanceID)
-	if e != nil {
-		return e
+func (m *Manager) startMaterializer(ctx context.Context, s MaterializerSpec) error {
+	workerControl, err := m.Worker(s.Config.Remote.ExpectedWorkerID)
+	if err != nil {
+		return err
 	}
-	workerInfo, e := workerControl.Info(ctx)
-	if e != nil || !workerInfo.Ready || workerInfo.ID != s.Config.WorkerInstanceID {
+	info, err := workerControl.Info(ctx)
+	if err != nil || !info.Ready || info.ID != s.Config.Remote.ExpectedWorkerID {
 		return broker.ErrUnavailable
 	}
-
-	expectedSocket := ""
-	for _, assigned := range m.config.Workers {
-		if assigned.Config.InstanceID == s.Config.WorkerInstanceID && assigned.Config.ControlSocket == s.Config.WorkerControlSocket {
-			expectedSocket = assigned.Config.LocalDataSocket
-		}
+	if info.StorageSocket == "" || info.OfferSocket == "" || info.Incarnation == "" {
+		return broker.ErrUnavailable
 	}
-	if workerInfo.LocalDataSocket != expectedSocket || s.Config.WorkerLocalDataSocket != "" && s.Config.WorkerLocalDataSocket != expectedSocket {
+	remote := &s.Config.Remote
+	if remote.Socket != "" && remote.Socket != info.StorageSocket || remote.OfferSocket != "" && remote.OfferSocket != info.OfferSocket || remote.ExpectedIncarnation != "" && remote.ExpectedIncarnation != info.Incarnation {
 		return broker.ErrInvalid
 	}
-	s.Config.WorkerLocalDataSocket = expectedSocket
-	endpoint, e := materializerEndpoint(workerInfo.DataEndpoint, s.Config.DataEndpoint)
-	if e != nil {
-		return e
-	}
-	s.Config.DataEndpoint = endpoint
-	if e = control.ValidateVacantSocket(s.Config.ControlSocket); e != nil {
-		return e
-	}
-	payload, e := json.Marshal(s.Config)
-	if e != nil || len(payload) > 1<<20 {
-		return broker.ErrInvalid
-	}
-	defer clear(payload)
-	var client *control.VFSClient
-	child, e := m.supervisor.Start(ctx, supervisor.Spec{Command: processexec.NewStartSpec(s.Executable, "--config=-").WithStdin(bytes.NewReader(payload)), ReadyTimeout: 30 * time.Second, Ready: func(ctx context.Context, _ *supervisor.Child) error {
-		probe, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-		defer cancel()
-		candidate, e := control.DialVFS(probe, s.Config.ControlSocket)
-		if e != nil {
-			return e
-		}
-		status, e := candidate.Info(probe)
-		if e != nil || !status.Ready || status.ID != s.Config.InstanceID {
-			candidate.Close(context.Background())
-			return broker.ErrUnavailable
-		}
-		client = candidate
-		return nil
-	}})
-	if e != nil {
-		if client != nil {
-			client.Close(context.Background())
-		}
-		return e
+	remote.Socket = info.StorageSocket
+	remote.OfferSocket = info.OfferSocket
+	remote.ExpectedIncarnation = info.Incarnation
+	child, err := rclonebox.New(rclonebox.Config{Executable: s.Executable, ProcessConfig: s.Config})
+	if err != nil {
+		return err
 	}
 	m.mu.Lock()
-	m.materializers[s.Config.InstanceID] = &materializer{child, client}
+	m.materializers[s.Config.InstanceID] = &materializer{box: child}
 	m.mu.Unlock()
+	if err = child.Start(ctx); err != nil {
+		return err
+	}
+	state, err := child.Info(ctx)
+	if err != nil || !state.Ready || state.WorkerID != info.ID || state.Namespace != remote.Namespace || state.Incarnation != info.Incarnation {
+		return broker.ErrUnavailable
+	}
 	if s.ActivateClient != nil {
-		states, e := workerControl.Observed(ctx)
-		if e != nil {
-			return e
+		states, err := workerControl.Observed(ctx)
+		if err != nil {
+			return err
 		}
 		for _, state := range states {
 			if state.Name == s.ActivateClient.Name && state.Accepting {
-				_, e = workerControl.Replace(ctx, state.Name, state.Version, *s.ActivateClient)
-				return e
+				_, err = workerControl.Replace(ctx, state.Name, state.Version, *s.ActivateClient)
+				return err
 			}
 		}
 		return broker.ErrUnavailable
 	}
 	return nil
-}
-
-// Operator configuration selects only the remote-only mount path. The actual
-// origin comes from the ready child's typed control port, including dynamic ports.
-func materializerEndpoint(observed, selected string) (string, error) {
-	origin, e := url.Parse(observed)
-	if e != nil || origin.Host == "" || (origin.Scheme != "http" && origin.Scheme != "https") || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || (origin.Path != "" && origin.Path != "/") {
-		return "", broker.ErrInvalid
-	}
-	path, e := url.Parse(selected)
-	if e != nil || path.User != nil || path.RawQuery != "" || path.Fragment != "" || path.RawPath != "" || path.Opaque != "" {
-		return "", broker.ErrInvalid
-	}
-	if path.IsAbs() && (path.Scheme != origin.Scheme || path.Host != origin.Host) {
-		return "", broker.ErrInvalid
-	}
-	if !path.IsAbs() && path.Host != "" {
-		return "", broker.ErrInvalid
-	}
-	parts := strings.Split(path.Path, "/")
-	if len(parts) != 4 || parts[0] != "" || parts[1] != "remote-dav" || parts[2] == "" || parts[2] == "." || parts[2] == ".." || strings.ContainsAny(parts[2], "\\\x00") || parts[3] != "" {
-		return "", broker.ErrInvalid
-	}
-	origin.Path = path.Path
-	return origin.String(), nil
 }

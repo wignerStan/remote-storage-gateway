@@ -53,6 +53,10 @@
         {
           "path": "runtime.go",
           "role_stratum": "entry"
+        },
+        {
+          "path": "storageipc.go",
+          "role_stratum": "assembly"
         }
       ]
     },
@@ -69,7 +73,9 @@
         "mechanisms": [
           "network",
           "file",
-          "codec"
+          "codec",
+          "config_source",
+          "open_input"
         ],
         "controls": [
           "cancellation",
@@ -114,13 +120,6 @@
       "path": "contracts/worker",
       "names": [
         "gateway_worker_configuration"
-      ],
-      "role": "protocol_spec"
-    },
-    {
-      "path": "contracts/vfs",
-      "names": [
-        "gateway_vfs_configuration"
       ],
       "role": "protocol_spec"
     },
@@ -212,41 +211,6 @@
       ]
     },
     {
-      "path": "vfs",
-      "names": [
-        "independent_vfs_access"
-      ],
-      "role": "effect_tool",
-      "role_stratum": "handler_adapter",
-      "effect_family": "storage",
-      "effect_operation": {
-        "name": "cached_data_plane_filesystem",
-        "mechanisms": [
-          "network",
-          "file"
-        ],
-        "controls": [
-          "cancellation",
-          "backpressure",
-          "lifecycle",
-          "shutdown",
-          "drain"
-        ]
-      }
-    },
-    {
-      "path": "cmd/storage-vfs",
-      "names": [
-        "independent_vfs_process_assembly"
-      ],
-      "role": "front_door",
-      "role_stratum": "assembly",
-      "entry_type": [
-        "direct"
-      ],
-      "subsystem": "storage_materializer_process"
-    },
-    {
       "path": "plugins/transfer/reapi",
       "names": [
         "reapi_encoded_session"
@@ -277,29 +241,6 @@
       "subsystem": "reapi_native_plugin",
       "entry_type": [
         "direct"
-      ]
-    },
-    {
-      "path": "vfs/runtime",
-      "names": [
-        "independent_vfs_assembly"
-      ],
-      "role": "front_door",
-      "role_stratum": "assembly",
-      "subsystem": "storage_gateway_materializer",
-      "entry_type": [
-        "direct"
-      ]
-    },
-    {
-      "path": "vfs/httpapi",
-      "names": [
-        "independent_vfs_dav_entry"
-      ],
-      "role": "front_door",
-      "role_stratum": "entry",
-      "entry_type": [
-        "server"
       ]
     },
     {

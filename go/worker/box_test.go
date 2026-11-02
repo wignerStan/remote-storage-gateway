@@ -81,6 +81,40 @@ func (h helperControl) Replace(context.Context, string, dp.Version, dp.Selection
 	return dp.Version{}, broker.ErrInvalid
 }
 func testBox(t *testing.T, id string) (*Box, string) { return testBoxWithProxy(t, id, nil) }
+
+func TestStorageIPCConfigRequiresDistinctPairedSockets(t *testing.T) {
+	valid, _ := testBox(t, "ipc-validation")
+	base := valid.options.Config
+	for _, kind := range []string{"missing_offer", "control_alias", "broker_alias", "offer_alias", "relative", "traversal"} {
+		t.Run(kind, func(t *testing.T) {
+			c := base
+			c.StorageIPCSocket = filepath.Join(filepath.Dir(c.ControlSocket), "storage")
+			c.StorageOfferSocket = filepath.Join(filepath.Dir(c.ControlSocket), "offer")
+			switch kind {
+			case "missing_offer":
+				c.StorageOfferSocket = ""
+			case "control_alias":
+				c.StorageIPCSocket = c.ControlSocket
+			case "broker_alias":
+				c.BrokerSocket = c.StorageOfferSocket
+			case "offer_alias":
+				c.StorageOfferSocket = c.StorageIPCSocket
+			case "relative":
+				c.StorageIPCSocket = "storage"
+			case "traversal":
+				c.StorageIPCSocket = filepath.Dir(c.ControlSocket) + "/sub/../storage"
+			}
+			if err := valid.SetConfig(c); err == nil {
+				t.Fatal("invalid endpoint assignment accepted")
+			}
+		})
+	}
+	base.StorageIPCSocket = filepath.Join(filepath.Dir(base.ControlSocket), "storage")
+	base.StorageOfferSocket = filepath.Join(filepath.Dir(base.ControlSocket), "offer")
+	if err := valid.SetConfig(base); err != nil {
+		t.Fatal(err)
+	}
+}
 func testBoxWithProxy(t *testing.T, id string, proxy ProxyEnvironment) (*Box, string) {
 	t.Helper()
 	dir, e := os.MkdirTemp("/tmp", "trade-box-")

@@ -266,12 +266,12 @@ func TestEncodedWorkerListenerTLSBrokerAuthenticationAndJoinedClose(t *testing.T
 	if e != nil || len(initial.Get("worker-origin-header")) != 1 {
 		t.Fatal("Worker withheld initial upstream headers until body", initial, e)
 	}
-	body := []byte("early-header-body")
-	if e = upload.Send(&bs.WriteRequest{ResourceName: "uploads/header-fixture", Data: body, FinishWrite: true}); e != nil {
+	uploadBody := []byte("early-header-body")
+	if e = upload.Send(&bs.WriteRequest{ResourceName: "uploads/header-fixture", Data: uploadBody, FinishWrite: true}); e != nil {
 		t.Fatal(e)
 	}
 	committed, e := upload.CloseAndRecv()
-	if e != nil || committed.CommittedSize != int64(len(body)) {
+	if e != nil || committed.CommittedSize != int64(len(uploadBody)) {
 		t.Fatal(committed, e)
 	}
 	stream, e := bs.NewByteStreamClient(conn).Read(auth, &bs.ReadRequest{ResourceName: "blocked"})

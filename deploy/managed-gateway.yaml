@@ -2,7 +2,7 @@
 # It does not replace the live OpenList app selector or legacy HTTP/S3 Services.
 # GATEWAY_CONTROL_PLANE_PVC must be selected explicitly. Reusing the old database
 # PVC requires stopping its previous writer and migrating legacy endpoint traffic.
-# CONTROL_PLANE_IMAGE must contain storage-worker/storage-vfs and both plugin axes.
+# CONTROL_PLANE_IMAGE must contain storage-worker and independently derived rclone and both plugin axes.
 # openlist-control supplies targets.json, processes.json and referenced credentials.
 # processes.json runtime_directory=/run/gateway/control; Worker local_data_socket
 # is /run/gateway/control/data.sock. VFS payload uses this private data UDS; its
@@ -93,7 +93,7 @@ spec:
             - {name: private, mountPath: /run/control-secrets, readOnly: true}
             - {name: temporary, mountPath: /tmp}
             - {name: child-runtime, mountPath: /run/gateway}
-            - {name: vfs-cache, mountPath: /var/cache/storage-vfs}
+            - {name: vfs-cache, mountPath: /var/cache/rclone-vfs}
       volumes:
         - name: data
           persistentVolumeClaim: {claimName: GATEWAY_CONTROL_PLANE_PVC}

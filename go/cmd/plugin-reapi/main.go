@@ -3,7 +3,7 @@
 package main
 
 import (
-	"github.com/wignerStan/infra/go/runtime/nativeplugin/provider"
+	"github.com/wignerStan/infra/go/plugins/native/provider"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/encoded"
 	"github.com/wignerStan/network-data-plane-worker/go/encodedruntime/nativebridge"
 	"github.com/wignerStan/remote-storage-gateway/go/plugins/transfer/reapi"

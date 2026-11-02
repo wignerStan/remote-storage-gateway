@@ -4,9 +4,9 @@ package controlplane
 
 import (
 	"context"
+	"fmt"
 	configsource "github.com/wignerStan/infra/go/config/source"
-	"github.com/wignerStan/infra/go/process/supervisor"
-	vfsconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/vfs"
+	rclonebox "github.com/wignerStan/rclone/go/box"
 
 	"path/filepath"
 	"sort"
@@ -31,17 +31,17 @@ type Rule struct {
 	TargetID   string          `json:"target_id,omitempty"`
 	Decision   broker.Decision `json:"decision"`
 }
-type VFSSpec struct {
+type MaterializerSpec struct {
 	ActivateClient *dp.Selection           `json:"activate_client,omitempty"`
 	Executable     string                  `json:"executable"`
-	Config         vfsconfig.ProcessConfig `json:"config"`
+	Config         rclonebox.ProcessConfig `json:"config"`
 }
 type Config struct {
-	RuntimeDirectory string       `json:"runtime_directory,omitempty"`
-	VFS              []VFSSpec    `json:"vfs,omitempty"`
-	Workers          []WorkerSpec `json:"workers"`
-	Rules            []Rule       `json:"rules,omitempty"`
-	MetadataNames    []string     `json:"metadata_names,omitempty"`
+	RuntimeDirectory string             `json:"runtime_directory,omitempty"`
+	Materializers    []MaterializerSpec `json:"materializers,omitempty"`
+	Workers          []WorkerSpec       `json:"workers"`
+	Rules            []Rule             `json:"rules,omitempty"`
+	MetadataNames    []string           `json:"metadata_names,omitempty"`
 }
 type Instance struct {
 	Kind  string `json:"kind"`
@@ -51,7 +51,6 @@ type Instance struct {
 }
 type Manager struct {
 	materializers map[string]*materializer
-	supervisor    *supervisor.Supervisor
 	stop          context.Context
 	cancel        context.CancelFunc
 	life          sync.Mutex
@@ -82,7 +81,7 @@ func Load(path string) (*Manager, error) {
 	return New(c)
 }
 func New(c Config) (*Manager, error) {
-	if len(c.VFS) > 64 || len(c.Workers) > 64 || len(c.Rules) > 256 || len(c.MetadataNames) > broker.MaxMetadataEntries {
+	if len(c.Materializers) > 64 || len(c.Workers) > 64 || len(c.Rules) > 256 || len(c.MetadataNames) > broker.MaxMetadataEntries {
 		return nil, broker.ErrInvalid
 	}
 	stop, cancel := context.WithCancel(context.Background())
@@ -105,17 +104,13 @@ func New(c Config) (*Manager, error) {
 		}
 	}()
 	m.materializers = map[string]*materializer{}
-	m.supervisor, e = supervisor.New(supervisor.Options{MaxChildren: 64})
-	if e != nil {
-		return nil, e
-	}
 	paths := map[string]bool{}
 	for _, spec := range c.Workers {
 		id := spec.Config.InstanceID
 		if m.boxes[id] != nil {
 			return nil, broker.ErrInvalid
 		}
-		for _, path := range []string{spec.Config.ControlSocket, spec.Config.BrokerSocket, spec.Config.LocalDataSocket} {
+		for _, path := range []string{spec.Config.ControlSocket, spec.Config.BrokerSocket, spec.Config.StorageIPCSocket, spec.Config.StorageOfferSocket} {
 			if path == "" {
 				continue
 			}
@@ -130,7 +125,7 @@ func New(c Config) (*Manager, error) {
 		}
 		m.boxes[id] = box
 	}
-	for _, s := range c.VFS {
+	for _, s := range c.Materializers {
 		id := s.Config.InstanceID
 		if id == "" || m.boxes[id] != nil || m.materializers[id] != nil || !filepath.IsAbs(s.Executable) || !filepath.IsAbs(s.Config.ControlSocket) || len(s.Config.ControlSocket) > 107 || paths[s.Config.ControlSocket] || c.RuntimeDirectory != "" && filepath.Dir(s.Config.ControlSocket) != c.RuntimeDirectory {
 			return nil, broker.ErrInvalid
@@ -138,11 +133,17 @@ func New(c Config) (*Manager, error) {
 		paths[s.Config.ControlSocket] = true
 		found := false
 		for _, w := range c.Workers {
-			if w.Config.InstanceID == s.Config.WorkerInstanceID && w.Config.ControlSocket == s.Config.WorkerControlSocket {
-				if s.Config.WorkerLocalDataSocket != "" && s.Config.WorkerLocalDataSocket != w.Config.LocalDataSocket {
-					return nil, broker.ErrInvalid
+			if w.Config.InstanceID != s.Config.Remote.ExpectedWorkerID {
+				continue
+			}
+			remote := s.Config.Remote
+			if w.Config.StorageIPCSocket == "" || w.Config.StorageOfferSocket == "" || remote.Socket != "" && remote.Socket != w.Config.StorageIPCSocket || remote.OfferSocket != "" && remote.OfferSocket != w.Config.StorageOfferSocket {
+				return nil, broker.ErrInvalid
+			}
+			for _, mount := range w.Config.Mounts {
+				if mount.Name == remote.Namespace && mount.RemoteClient != "" {
+					found = true
 				}
-				found = true
 			}
 		}
 		if !found {
@@ -151,7 +152,7 @@ func New(c Config) (*Manager, error) {
 		if s.ActivateClient != nil {
 			assigned := false
 			for _, w := range c.Workers {
-				if w.Config.InstanceID == s.Config.WorkerInstanceID {
+				if w.Config.InstanceID == s.Config.Remote.ExpectedWorkerID {
 					for _, mount := range w.Config.Mounts {
 						if mount.RemoteClient == s.ActivateClient.Name {
 							return nil, broker.ErrInvalid
@@ -232,12 +233,12 @@ func (m *Manager) Start(ctx context.Context) (err error) {
 			m.mu.Unlock()
 		}
 		if err = m.boxes[s.Config.InstanceID].Start(startup); err != nil {
-			return err
+			return fmt.Errorf("worker %s: %w", s.Config.InstanceID, err)
 		}
 	}
-	for _, s := range m.config.VFS {
-		if err = m.startVFS(startup, s); err != nil {
-			return err
+	for _, s := range m.config.Materializers {
+		if err = m.startMaterializer(startup, s); err != nil {
+			return fmt.Errorf("rclone %s: %w", s.Config.InstanceID, err)
 		}
 	}
 	m.mu.Lock()
@@ -260,7 +261,7 @@ func (m *Manager) Ready() bool {
 		}
 	}
 	for _, v := range m.materializers {
-		if v.child == nil || !v.child.IsReady() {
+		if v.box == nil || v.box.State().Phase != "ready" {
 			return false
 		}
 	}
@@ -275,13 +276,11 @@ func (m *Manager) Instances() []Instance {
 		out = append(out, Instance{Kind: "worker", ID: s.ID, PID: s.PID, Phase: s.Phase})
 	}
 	for id, v := range m.materializers {
-		state := Instance{Kind: "vfs", ID: id, Phase: "new"}
-		if v.child != nil {
-			state.PID = v.child.PID()
-			state.Phase = "exited"
-			if v.child.IsReady() {
-				state.Phase = "ready"
-			}
+		state := Instance{Kind: "rclone", ID: id, Phase: "new"}
+		if v.box != nil {
+			child := v.box.State()
+			state.PID = child.PID
+			state.Phase = child.Phase
 		}
 		if m.closing {
 			state.Phase = "stopping"
@@ -328,12 +327,9 @@ func (m *Manager) beginClose() {
 			m.life.Lock()
 			defer m.life.Unlock()
 			// Retire materializers first while the data-plane remote path lives.
-			if m.supervisor != nil {
-				_ = m.supervisor.Close(context.Background())
-			}
 			for _, v := range m.materializers {
-				if v.control != nil {
-					_ = v.control.Close(context.Background())
+				if v.box != nil {
+					_ = v.box.Close(context.Background())
 				}
 			}
 			var joined sync.WaitGroup

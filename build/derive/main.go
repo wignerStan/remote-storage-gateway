@@ -51,11 +51,11 @@ type toolchain struct {
 	PNPM string `json:"pnpm"`
 }
 type builder struct {
-	root, output, infra, dataPlane, mise string
-	ca                                   string
-	release                              bool
-	tools                                toolchain
-	downloadModule                       func(string, string) (moduleDownload, error)
+	root, output, infra, dataPlane, materializer, mise string
+	ca                                                 string
+	release                                            bool
+	tools                                              toolchain
+	downloadModule                                     func(string, string) (moduleDownload, error)
 }
 
 const rcloneModule = "github.com/rclone/rclone"
@@ -315,6 +315,7 @@ func main() {
 	flag.StringVar(&b.output, "out", "/tmp/trade-remote-gateway-build", "external build directory")
 	flag.StringVar(&b.infra, "infra-root", "/develop/infra", "explicit Infra source checkout (reviewed and clean for release)")
 	flag.StringVar(&b.dataPlane, "data-plane-root", "/develop/network/data-plane-worker", "explicit independently owned Data Plane module checkout")
+	flag.StringVar(&b.materializer, "rclone-root", "/develop/network/rclone", "independently derived rclone application and process module")
 	flag.StringVar(&b.mise, "mise", "mise", "mise executable")
 	flag.StringVar(&b.ca, "ca-bundle", "/etc/ssl/certs/ca-certificates.crt", "public runtime CA bundle")
 	flag.BoolVar(&b.release, "release", false, "require clean exact product and Infra source commits")
@@ -597,7 +598,7 @@ func (b *builder) verifyDerived(r relationship) error {
 }
 func (b *builder) run(stage string) error {
 	var e error
-	for _, p := range []*string{&b.root, &b.output, &b.infra, &b.dataPlane} {
+	for _, p := range []*string{&b.root, &b.output, &b.infra, &b.dataPlane, &b.materializer} {
 		*p, e = filepath.Abs(*p)
 		if e != nil {
 			return e
@@ -610,7 +611,7 @@ func (b *builder) run(stage string) error {
 		return e
 	}
 	if b.release {
-		for _, p := range []string{b.root, b.infra, b.dataPlane} {
+		for _, p := range []string{b.root, b.infra, b.dataPlane, b.materializer} {
 			s, e := b.git(p, "status", "--porcelain", "--untracked-files=all")
 			if e != nil {
 				return e
@@ -757,6 +758,11 @@ func (b *builder) workspace() error {
 		return e
 	}
 	available["github.com/wignerStan/network-data-plane-worker/go"] = coreDir
+	materializerDir, e := b.externalModule(b.materializer, "github.com/wignerStan/rclone/go")
+	if e != nil {
+		return e
+	}
+	available["github.com/wignerStan/rclone/go"] = materializerDir
 	available[workerModule.Module.Path] = workerDir
 	queue := []string{filepath.Join(b.root, "go"), b.sourcePath("openlist")}
 	used := map[string]bool{}
@@ -802,12 +808,12 @@ func (b *builder) workspace() error {
 	if _, e := b.command(b.output, b.mise, args...); e != nil {
 		return e
 	}
-	return writeJSON(filepath.Join(b.output, "receipts/workspace.json"), map[string]any{"modules": dirs, "infra_root": b.infra, "gateway_module": filepath.Join(b.root, "go"), "data_plane_module": coreDir})
+	return writeJSON(filepath.Join(b.output, "receipts/workspace.json"), map[string]any{"modules": dirs, "infra_root": b.infra, "gateway_module": filepath.Join(b.root, "go"), "data_plane_module": coreDir, "rclone_module": materializerDir})
 }
 
-// dataPlaneModule verifies ownership and package-version authority before a dev
-// workspace may select external source. It never copies Core into the product.
-func (b *builder) dataPlaneModule() (string, error) {
+// externalModule admits an explicitly selected independent checkout by module
+// identity and required package version. Adjacency is never source authority.
+func (b *builder) externalModule(root, module string) (string, error) {
 	productPath := filepath.Join(b.root, "go/go.mod")
 	body, err := os.ReadFile(productPath)
 	if err != nil {
@@ -817,7 +823,6 @@ func (b *builder) dataPlaneModule() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	const module = "github.com/wignerStan/network-data-plane-worker/go"
 	version := ""
 	for _, requirement := range product.Require {
 		if requirement.Mod.Path == module {
@@ -825,26 +830,29 @@ func (b *builder) dataPlaneModule() (string, error) {
 		}
 	}
 	if !semver.IsValid(version) || version == "v0.0.0" {
-		return "", errors.New("Gateway must require a Data Plane package version")
+		return "", fmt.Errorf("Gateway must require a package version for %s", module)
 	}
-	dir := filepath.Join(b.dataPlane, "go")
+	dir := filepath.Join(root, "go")
 	relative, err := filepath.Rel(b.root, dir)
 	if err != nil || relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", errors.New("Data Plane must be an independent source repository")
+		return "", errors.New("module must be an independent source repository")
 	}
-	corePath := filepath.Join(dir, "go.mod")
-	body, err = os.ReadFile(corePath)
+	selected := filepath.Join(dir, "go.mod")
+	body, err = os.ReadFile(selected)
 	if err != nil {
 		return "", err
 	}
-	core, err := modfile.Parse(corePath, body, nil)
+	parsed, err := modfile.Parse(selected, body, nil)
 	if err != nil {
 		return "", err
 	}
-	if core.Module == nil || core.Module.Mod.Path != module {
-		return "", errors.New("wrong Data Plane module identity")
+	if parsed.Module == nil || parsed.Module.Mod.Path != module {
+		return "", errors.New("wrong independent module identity")
 	}
 	return dir, nil
+}
+func (b *builder) dataPlaneModule() (string, error) {
+	return b.externalModule(b.dataPlane, "github.com/wignerStan/network-data-plane-worker/go")
 }
 
 func copyTree(src, dst string) error {
@@ -1180,8 +1188,8 @@ func copyInput(src, dst string) error {
 }
 
 func (b *builder) imageInputs() error {
-	compositions := map[string][]string{"gateway": {"storage-worker", "client-openlist.so", "client-rclone.so", "transfer-reapi.so", "ca-certificates.crt"}, "control-plane": {"openlist-control-plane", "storage-worker", "storage-vfs", "client-openlist.so", "client-rclone.so", "transfer-reapi.so", "ca-certificates.crt"}, "vfs": {"storage-vfs", "ca-certificates.crt"}}
-	for _, composition := range []string{"gateway", "control-plane", "vfs"} {
+	compositions := map[string][]string{"gateway": {"storage-worker", "client-openlist.so", "client-rclone.so", "transfer-reapi.so", "ca-certificates.crt"}, "control-plane": {"openlist-control-plane", "storage-worker", "rclone", "client-openlist.so", "client-rclone.so", "transfer-reapi.so", "ca-certificates.crt"}}
+	for _, composition := range []string{"gateway", "control-plane"} {
 		dir := filepath.Join(b.output, "image-inputs", composition)
 		if e := os.MkdirAll(dir, 0755); e != nil {
 			return e

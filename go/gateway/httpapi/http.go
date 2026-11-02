@@ -124,7 +124,7 @@ func serveWebDAV(w http.ResponseWriter, q *http.Request, r *gateway.Runtime, pre
 		w.Header().Set("Content-Type", contentType(q.URL.Path))
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 	}
-	dav.ServeHTTP(w, q)
+	serveDAVResponse(w, q, dav)
 	return
 }
 

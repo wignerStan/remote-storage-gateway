@@ -1,8 +1,10 @@
 package controlplane
 
 import (
+	"context"
+	storageipc "github.com/wignerStan/network-data-plane-worker/go/contracts/storageipc"
+	rclonebox "github.com/wignerStan/rclone/go/box"
 	"github.com/wignerStan/remote-storage-gateway/go/contracts/control/broker"
-	vfsconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/vfs"
 	workerconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/worker"
 	"os"
 	"path/filepath"
@@ -17,6 +19,14 @@ func TestLocalDataAssignmentsRejectForeignSocketAndCollision(t *testing.T) {
 	defer os.RemoveAll(dir)
 	meta := filepath.Join(dir, "meta")
 	data := filepath.Join(dir, "raw")
+	good := Config{Workers: []WorkerSpec{{Executable: "/bin/true", Config: workerconfig.ProcessConfig{RuntimeConfig: workerconfig.RuntimeConfig{StorageIPCSocket: data, StorageOfferSocket: filepath.Join(dir, "offer"), Mounts: []workerconfig.Mount{{Name: "files", Client: "cached", RemoteClient: "origin", ReadOnly: true}}}, InstanceID: "worker", ControlSocket: meta}}}, Materializers: []MaterializerSpec{{Executable: "/bin/true", Config: rclonebox.ProcessConfig{InstanceID: "rclone", ControlSocket: filepath.Join(dir, "rclone"), Remote: storageipc.Endpoint{ExpectedWorkerID: "worker", Socket: data, OfferSocket: filepath.Join(dir, "offer"), Namespace: "files"}}}}}
+	manager, err := New(good)
+	if err != nil {
+		t.Fatalf("valid raw IPC assignment rejected: %v", err)
+	}
+	if err = manager.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	for _, which := range []string{"foreign-socket", "metadata-collision"} {
 		t.Run(which, func(t *testing.T) {
 			selected := data
@@ -25,7 +35,13 @@ func TestLocalDataAssignmentsRejectForeignSocketAndCollision(t *testing.T) {
 				selected = meta
 				expected = meta
 			}
-			_, e := New(Config{Workers: []WorkerSpec{{Executable: "/bin/true", Config: workerconfig.ProcessConfig{RuntimeConfig: workerconfig.RuntimeConfig{LocalDataSocket: selected}, InstanceID: "worker", ControlSocket: meta}}}, VFS: []VFSSpec{{Executable: "/bin/true", Config: vfsconfig.ProcessConfig{InstanceID: "vfs", ControlSocket: filepath.Join(dir, "vfs"), WorkerInstanceID: "worker", WorkerControlSocket: meta, WorkerLocalDataSocket: expected}}}})
+			candidate, e := copyConfig(good)
+			if e != nil {
+				t.Fatal(e)
+			}
+			candidate.Workers[0].Config.StorageIPCSocket = selected
+			candidate.Materializers[0].Config.Remote.Socket = expected
+			_, e = New(candidate)
 			if e != broker.ErrInvalid {
 				t.Fatalf("unapproved local data assignment admitted: %v", e)
 			}

@@ -34,7 +34,7 @@ image_layer(
     srcs = {
         "/opt/control-plane/openlist": "@control_plane_inputs//:openlist-control-plane",
         "/opt/gateway/storage-worker": "@control_plane_inputs//:storage-worker",
-        "/opt/gateway/storage-vfs": "@control_plane_inputs//:storage-vfs",
+        "/opt/materializer/rclone": "@control_plane_inputs//:rclone",
         "/opt/gateway/client-openlist.so": "@control_plane_inputs//:client-openlist.so",
         "/opt/gateway/client-rclone.so": "@control_plane_inputs//:client-rclone.so",
         "/opt/gateway/transfer-reapi.so": "@control_plane_inputs//:transfer-reapi.so",
@@ -58,30 +58,6 @@ image_manifest(
     entrypoint = ["/opt/control-plane/openlist"],
     cmd = ["server", "--data", "/opt/openlist/data", "--config", "/opt/openlist/data/config.json"],
     working_dir = "/opt/openlist",
-    env = {"SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt"},
-    labels = {"org.opencontainers.image.source": "https://github.com/wignerStan/remote-storage-gateway"},
-)
-
-image_layer(
-    name = "vfs_program",
-    srcs = {"/opt/gateway/storage-vfs": "@vfs_inputs//:storage-vfs"},
-    default_metadata = file_metadata(mode = "0555", uid = 1001, gid = 1001),
-    include_runfiles = False,
-)
-image_layer(
-    name = "vfs_trust",
-    srcs = {"/etc/ssl/certs/ca-certificates.crt": "@vfs_inputs//:ca-certificates.crt"},
-    default_metadata = file_metadata(mode = "0644", uid = 0, gid = 0),
-    include_runfiles = False,
-)
-image_manifest(
-    name = "vfs_image",
-    base = "@gateway_runtime",
-    layers = [":vfs_program", ":vfs_trust"],
-    user = "1001:1001",
-    entrypoint = ["/opt/gateway/storage-vfs"],
-    cmd = ["--config", "/run/gateway-secrets/vfs.json"],
-    working_dir = "/",
     env = {"SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt"},
     labels = {"org.opencontainers.image.source": "https://github.com/wignerStan/remote-storage-gateway"},
 )

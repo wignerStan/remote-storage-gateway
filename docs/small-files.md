@@ -28,13 +28,14 @@ To keep the local cache packed as well, put the independent VFS **before** the
 archive view:
 
 ```text
-Worker archive client -> private VFS DAV (ZIP object/ranges)
-                      -> Worker raw data socket -> ordinary origin client
+Worker archive client -> native rclone DAV/VFS (packed ZIP cache)
+                      -> ttrpc metadata + shared-memory leases
+                      -> Worker raw namespace -> ordinary origin client
 ```
 
-VFS is still a separate process. It caches the ZIP object rather than extracting
+VFS is the separate patched-rclone application and process; its filesystem/serve code is upstream native rclone. It caches the ZIP object rather than extracting
 members. The archive plugin consumes its authenticated WebDAV endpoint; VFS
-misses fetch through the Worker's separately admitted raw HTTP Unix data socket.
+misses fetch through the Worker's separately admitted ttrpc/shared-memory backend.
 Control Plane coordinates process/configuration metadata through ttrpc. It never
 carries ZIP bytes. Public access remains on the Worker. Each cache assignment
 must retain distinct raw origin and cached client identities, avoiding recursion.
@@ -61,16 +62,18 @@ The independent VFS process accepts these optional bounds:
 
 | Configuration | Default | Meaning |
 | --- | --- | --- |
-| `max_concurrent_requests` | 64 | Fail-fast HTTP admission, capped by `max_open_files`; busy replies use503/Retry-After |
-| `max_open_files` | 128 | Pending plus live cache handles; no unbounded internal open wait queue |
+| `max_concurrent_requests` | 8 | Fail-fast HTTP admission, capped by `max_open_files`; busy replies use503/Retry-After |
+| `max_open_files` | 8 | Pending plus live cache handles; no unbounded internal open wait queue |
 | `max_cache_entries` | 4096 | Inactive cache-entry eviction target, including zero-byte files |
 | `max_directory_entries` | 10000 | Per-directory inventory admission bound |
 
 `max_bytes` and `max_age_seconds` remain required. Active files can temporarily
 exceed eviction targets. The directory bound is not a total-process memory bound
 and cannot prevent allocations made inside a provider page before its callback.
-The private cache context uses a 1MiB transfer buffer, no read-ahead and a single
-chunk stream. These are per-transfer controls, not a total-process RAM quota.
+Request and open limits are further clamped to the Worker session’s negotiated
+handle capacity. The native CLI uses no private prefetch buffer or read-ahead,
+1MiB chunks and no parallel chunk streams. These are per-transfer controls, not
+a total-process RAM quota.
 Metadata HEAD, PROPFIND, conditional GET and invalid ranges do not fetch file
 payloads to sniff MIME type. An extension-derived type or application/octet-stream
 is published by the DAV entry instead.

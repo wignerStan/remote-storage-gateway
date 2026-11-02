@@ -93,7 +93,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		}
 	}
 
-	localServer, localListener, e := r.prepareLocalData()
+	storage, e := r.prepareStorageIPC(ctx)
 	if e != nil {
 		if listener != nil {
 			listener.Close()
@@ -101,8 +101,8 @@ func (r *Runtime) Start(ctx context.Context) error {
 		return e
 	}
 	defer func() {
-		if !r.started && localListener != nil {
-			localListener.Close()
+		if !r.started && storage != nil {
+			_ = storage.close(context.Background())
 		}
 	}()
 	server, e := l7.NewServer(l7.ServerOptions{Handler: r.handler, TLSConfig: r.tlsConfig})
@@ -120,19 +120,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		return e
 	}
 
-	if localServer != nil {
-		if e = localServer.Start(localListener); e != nil {
-			data.Close()
-			if listener != nil {
-				listener.Close()
-			}
-			return e
-		}
-	}
 	if e = server.Start(data); e != nil {
-		if localServer != nil {
-			_ = localServer.Shutdown(context.Background())
-		}
 		data.Close()
 		if listener != nil {
 			listener.Close()
@@ -140,7 +128,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		return e
 	}
 	r.httpServer = server
-	r.localDataServer = localServer
+	r.storageIPC = storage
 	r.controlServer = entry
 	r.started = true
 	if r.process.DataEndpoint == "" {
@@ -154,12 +142,12 @@ func (r *Runtime) Start(ctx context.Context) error {
 		go func() { _ = entry.Serve(listener) }()
 	}
 	go func() {
-		if localServer == nil {
+		if storage == nil {
 			<-server.Done()
 		} else {
 			select {
 			case <-server.Done():
-			case <-localServer.Done():
+			case <-storage.server.Done():
 			}
 		}
 		close(r.stopped)
@@ -174,7 +162,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 	r.closeOnce.Do(func() {
 		r.lifeMu.Lock()
 		r.retiring = true
-		server, localServer, entry := r.httpServer, r.localDataServer, r.controlServer
+		server, storage, entry := r.httpServer, r.storageIPC, r.controlServer
 		r.lifeMu.Unlock()
 		go func() {
 			var errs []error
@@ -185,8 +173,8 @@ func (r *Runtime) Close(ctx context.Context) error {
 			if server != nil {
 				errs = append(errs, server.Shutdown(context.Background()))
 			}
-			if localServer != nil {
-				errs = append(errs, localServer.Shutdown(context.Background()))
+			if storage != nil {
+				errs = append(errs, storage.close(context.Background()))
 			}
 			if r.Runtime != nil {
 				errs = append(errs, r.Runtime.Close(context.Background()))
@@ -223,18 +211,20 @@ func (r *Runtime) Info(context.Context) (broker.InstanceInfo, error) {
 		default:
 		}
 	}
-	if ready && r.localDataServer != nil {
+	if ready && r.storageIPC != nil {
 		select {
-		case <-r.localDataServer.Done():
+		case <-r.storageIPC.server.Done():
 			ready = false
 		default:
 		}
 	}
-	localSocket := ""
-	if ready && r.localDataServer != nil {
-		localSocket = r.config.LocalDataSocket
+	info := broker.InstanceInfo{Contract: broker.Contract, ID: r.process.InstanceID, Ready: ready, DataEndpoint: r.process.DataEndpoint}
+	if ready && r.storageIPC != nil {
+		info.StorageSocket = r.config.StorageIPCSocket
+		info.OfferSocket = r.config.StorageOfferSocket
+		info.Incarnation = r.storageIPC.server.Info().Incarnation
 	}
-	return broker.InstanceInfo{Contract: broker.Contract, ID: r.process.InstanceID, Ready: ready, DataEndpoint: r.process.DataEndpoint, LocalDataSocket: localSocket}, nil
+	return info, nil
 }
 func (r *Runtime) Manifest(context.Context) (dp.Manifest, error) {
 	m := r.manifest

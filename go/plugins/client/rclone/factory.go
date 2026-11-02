@@ -128,6 +128,8 @@ func endpoint(value string) bool {
 	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https") && u.User == nil && u.RawQuery == "" && u.Fragment == ""
 }
 
+// Prepare decodes the operator-supplied public configuration and resolves only
+// the secrets declared by the exact plugin descriptor before backend admission.
 func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Candidate, error) {
 	if err := admission.Validate(f.Descriptor()); err != nil {
 		return nil, port.ErrInvalid
