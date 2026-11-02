@@ -37,8 +37,20 @@ func (s scopedSecrets) Resolve(ctx context.Context, name string) (client.Secret,
 		return nil, client.ErrInvalid
 	}
 	value, err := s.source.Resolve(ctx, ref)
-	if errors.Is(err, client.ErrNotFound) {
+	if err != nil {
+		// A failed resolver must not transfer a partially resolved credential.
+		if value != nil {
+			value.Close()
+		}
+		// Only an absent field is optional. A mapped but unavailable operator
+		// reference must fail closed, including wrapped ErrNotFound values.
+		if errors.Is(err, client.ErrNotFound) {
+			return nil, client.ErrInvalid
+		}
+		return nil, err
+	}
+	if value == nil {
 		return nil, client.ErrInvalid
 	}
-	return value, err
+	return value, nil
 }
