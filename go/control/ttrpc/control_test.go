@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wignerStan/infra/go/code/schema"
-	carrier "github.com/wignerStan/infra/go/network/actions/ttrpc"
+	"github.com/wignerStan/infra/go/config/schema"
+	carrier "github.com/wignerStan/infra/go/network/rpc/ttrpc"
 	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
@@ -80,11 +81,11 @@ func TestWorkerControlPreservesExactDescriptorAndRejectsPayloadOperations(t *tes
 	type Configuration struct {
 		Name string `json:"name"`
 	}
-	document, e := schema.Derive[Configuration](schema.Identity{ID: "fixture", Version: "1", Owner: "control-test"})
+	document, e := schema.Derive[Configuration]()
 	if e != nil {
 		t.Fatal(e)
 	}
-	raw, e := json.Marshal(document.Schema)
+	raw, e := json.Marshal(document)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -107,11 +108,19 @@ func TestWorkerControlPreservesExactDescriptorAndRejectsPayloadOperations(t *tes
 		t.Fatal(e)
 	}
 	defer client.Close(context.Background())
+	wrong, e := carrier.Dial(context.Background(), path, carrier.Protocol{Service: broker.DecisionRPCService}, limits())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer wrong.Close(context.Background())
+	if _, e = wrong.Call(context.Background(), infoMethod, []byte("{}")); !errors.Is(e, carrier.ErrNotFound) {
+		t.Fatal("worker socket admitted foreign protobuf service", e)
+	}
 	got, e := client.Descriptor(context.Background(), record.Digest)
 	if e != nil || !bytes.Equal(got.Bytes, record.Bytes) {
 		t.Fatal("descriptor exact bytes lost", e)
 	}
-	wire, e := carrier.Dial(context.Background(), path, limits())
+	wire, e := carrier.Dial(context.Background(), path, carrier.Protocol{Service: broker.WorkerRPCService}, limits())
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -157,7 +166,7 @@ func TestDecisionBindsTrustedPrincipalAndRejectsClaimedIdentity(t *testing.T) {
 	if _, e = client.Decide(context.Background(), in); e != nil {
 		t.Fatal(e)
 	}
-	wire, e := carrier.Dial(context.Background(), path, limits())
+	wire, e := carrier.Dial(context.Background(), path, carrier.Protocol{Service: broker.DecisionRPCService}, limits())
 	if e != nil {
 		t.Fatal(e)
 	}

@@ -3,7 +3,7 @@ package reapi
 import (
 	"context"
 	"encoding/json"
-	"github.com/wignerStan/infra/go/code/schema"
+	"github.com/wignerStan/infra/go/config/schema"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"strings"
 	"testing"
@@ -14,11 +14,11 @@ import (
 
 func factory(t *testing.T) *Factory {
 	t.Helper()
-	doc, e := schema.Derive[Configuration](schema.Identity{ID: "reapi.test", Version: "1", Owner: PluginID})
+	doc, e := schema.Derive[Configuration]()
 	if e != nil {
 		t.Fatal(e)
 	}
-	raw, e := json.Marshal(doc.Schema)
+	raw, e := json.Marshal(doc)
 	if e != nil {
 		t.Fatal(e)
 	}

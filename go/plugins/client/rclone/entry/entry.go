@@ -5,49 +5,49 @@ package rclone
 import (
 	"encoding/json"
 
-	"github.com/wignerStan/infra/go/code/schema"
+	"github.com/wignerStan/infra/go/config/schema"
 	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
 	"github.com/wignerStan/remote-storage-gateway/go/plugins/client/rclone"
 )
 
-func configurationSchema[T any](backend string) (json.RawMessage, error) {
-	document, err := schema.Derive[T](schema.Identity{ID: rcloneclient.PluginID + "/configuration/" + backend, Version: "1", Owner: rcloneclient.PluginID})
+func configurationSchema[T any]() (json.RawMessage, error) {
+	document, err := schema.Derive[T]()
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(document.Schema)
+	return json.Marshal(document)
 }
 
 // NewFactory derives only this plugin's concrete implementation models and
 // publishes the descriptor consumed by the runtime adapter.
 func NewFactory(buildDigest string) (*rcloneclient.Factory, error) {
-	s3, err := configurationSchema[rcloneclient.S3Configuration]("s3")
+	s3, err := configurationSchema[rcloneclient.S3Configuration]()
 	if err != nil {
 		return nil, err
 	}
-	dav, err := configurationSchema[rcloneclient.WebDAVConfiguration]("webdav")
+	dav, err := configurationSchema[rcloneclient.WebDAVConfiguration]()
 	if err != nil {
 		return nil, err
 	}
-	streamingDAV, err := configurationSchema[rcloneclient.WebDAVConfiguration]("webdav-streaming")
+	streamingDAV, err := configurationSchema[rcloneclient.WebDAVConfiguration]()
 	if err != nil {
 		return nil, err
 	}
-	drive, err := configurationSchema[rcloneclient.DriveConfiguration]("drive")
+	drive, err := configurationSchema[rcloneclient.DriveConfiguration]()
 	if err != nil {
 		return nil, err
 	}
-	archiveS3, err := configurationSchema[rcloneclient.S3ArchiveConfiguration]("archive-s3")
+	archiveS3, err := configurationSchema[rcloneclient.S3ArchiveConfiguration]()
 	if err != nil {
 		return nil, err
 	}
-	archiveDAV, err := configurationSchema[rcloneclient.WebDAVArchiveConfiguration]("archive-webdav")
+	archiveDAV, err := configurationSchema[rcloneclient.WebDAVArchiveConfiguration]()
 	if err != nil {
 		return nil, err
 	}
-	archiveDrive, err := configurationSchema[rcloneclient.DriveArchiveConfiguration]("archive-drive")
+	archiveDrive, err := configurationSchema[rcloneclient.DriveArchiveConfiguration]()
 	if err != nil {
 		return nil, err
 	}

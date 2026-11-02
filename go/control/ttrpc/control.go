@@ -9,7 +9,7 @@ import (
 	"net"
 	"time"
 
-	carrier "github.com/wignerStan/infra/go/network/actions/ttrpc"
+	carrier "github.com/wignerStan/infra/go/network/rpc/ttrpc"
 	clock "github.com/wignerStan/infra/go/time/clock"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
@@ -33,7 +33,7 @@ func limits() carrier.Limits {
 type WorkerClient struct{ wire *carrier.Client }
 
 func DialWorker(ctx context.Context, path string) (*WorkerClient, error) {
-	c, e := carrier.Dial(ctx, path, limits())
+	c, e := carrier.Dial(ctx, path, carrier.Protocol{Service: broker.WorkerRPCService}, limits())
 	if e != nil {
 		return nil, e
 	}
@@ -115,7 +115,7 @@ type DecisionClient struct {
 }
 
 func DialDecision(ctx context.Context, path string, metadataNames []string) (*DecisionClient, error) {
-	c, e := carrier.Dial(ctx, path, limits())
+	c, e := carrier.Dial(ctx, path, carrier.Protocol{Service: broker.DecisionRPCService}, limits())
 	if e != nil {
 		return nil, e
 	}
@@ -174,7 +174,7 @@ func NewWorkerServer(control broker.WorkerControl) (*Server, error) {
 	if control == nil {
 		return nil, broker.ErrInvalid
 	}
-	s, e := carrier.NewServer(&workerEntry{control}, limits())
+	s, e := carrier.NewServer(&workerEntry{control}, carrier.Protocol{Service: broker.WorkerRPCService}, limits())
 	if e != nil {
 		return nil, e
 	}
@@ -274,7 +274,7 @@ func NewDecisionServer(service broker.DecisionBroker, o DecisionOptions) (*Serve
 	if service == nil || o.Principal == nil {
 		return nil, broker.ErrInvalid
 	}
-	s, e := carrier.NewServer(&decisionEntry{service, o.Principal, names(o.MetadataNames)}, limits())
+	s, e := carrier.NewServer(&decisionEntry{service, o.Principal, names(o.MetadataNames)}, carrier.Protocol{Service: broker.DecisionRPCService}, limits())
 	if e != nil {
 		return nil, e
 	}

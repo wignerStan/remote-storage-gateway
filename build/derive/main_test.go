@@ -471,13 +471,14 @@ func TestProductCannotShadowInfraModulePatchAuthority(t *testing.T) {
 
 func TestNativeBuildIdentityTracksBackendPatchesAndRecipe(t *testing.T) {
 	b, _, _ := moduleFixture(t)
+	fixtureHuma(t, b.infra)
 	for _, args := range [][]string{{"init"}, {"config", "user.name", "Fixture"}, {"config", "user.email", "fixture@example.invalid"}, {"commit", "--allow-empty", "-m", "Infra fixture"}} {
 		if _, e := b.git(b.infra, args...); e != nil {
 			t.Fatal(e)
 		}
 	}
 	productInputs := map[string]string{"go/client.go": "package client\n", ".git-source-relationships/openlist.json": "product source\n", "patches/openlist/0001.patch": "OpenList patch\n", "build/toolchain.json": "tools\n", "Makefile": "flags\n"}
-	infraInputs := map[string]string{"go/storage/cloud/backend.go": "package cloud\n", "go/storage/vfs/cache.go": "package vfs\n"}
+	infraInputs := map[string]string{"go/storage/cloud/backend.go": "package cloud\n", "go/storage/vfs/cache.go": "package vfs\n", "third_party/huma/schema.go": "package huma\n"}
 	for _, input := range []struct {
 		root   string
 		values map[string]string
@@ -549,5 +550,51 @@ func TestDataPlaneRemainsIndependentVersionedModule(t *testing.T) {
 	b.dataPlane = b.root
 	if _, e := b.dataPlaneModule(); e == nil {
 		t.Fatal("embedded Core source accepted")
+	}
+}
+
+func fixtureHuma(t *testing.T, root string) string {
+	t.Helper()
+	write := func(relative, body string) {
+		t.Helper()
+		p := filepath.Join(root, relative)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	original, _ := os.ReadFile(filepath.Join(root, "go/go.mod"))
+	if len(original) == 0 {
+		original = []byte("module fixture/sdk\n\ngo 1.27.3\n")
+	}
+	write("go/go.mod", string(original)+"\nreplace github.com/danielgtaylor/huma/v2 => ../third_party/huma\n")
+	write(".git-source-relationships/huma.json", `{"schema_version":"git-source-relationship/v1","kind":"third_party_implementation","path":"third_party/huma","owner":"fixture.schema","integration":"tracked","upstream":{"url":"https://example.invalid/huma","commit":"0000000000000000000000000000000000000000"},"patches":[],"public_api":"Fixture schema API","result_tree":null,"licenses":[]}`)
+	write("third_party/huma/go.mod", "module github.com/danielgtaylor/huma/v2\n\ngo 1.27.3\n")
+	write("third_party/huma/schema.go", "package huma\n")
+	return filepath.Join(root, "third_party/huma")
+}
+func TestSDKSchemaSourceRequiresOwnedDeclaredModule(t *testing.T) {
+	root := t.TempDir()
+	module := fixtureHuma(t, root)
+	got, err := sdkHuma(root)
+	if err != nil || got != module {
+		t.Fatal(got, err)
+	}
+	if err = os.WriteFile(filepath.Join(module, "go.mod"), []byte("module adjacent/wrong\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sdkHuma(root); err == nil {
+		t.Fatal("wrong module identity admitted")
+	}
+	if err = os.WriteFile(filepath.Join(module, "go.mod"), []byte("module github.com/danielgtaylor/huma/v2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(root, "go/go.mod"), []byte("module fixture/sdk\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sdkHuma(root); err == nil {
+		t.Fatal("undeclared neighboring source admitted")
 	}
 }

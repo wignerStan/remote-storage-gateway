@@ -43,10 +43,15 @@
       "order": 7,
       "path": "patches/openlist/0007-follow-infra-capability-family-imports.patch",
       "sha256": "80190ff44d074f07cb5eb326d3044410aba8478c64dcafa295c812e0a5d4a918"
+    },
+    {
+      "order": 8,
+      "path": "patches/openlist/0008-adopt-owned-schema-and-openapi-facets.patch",
+      "sha256": "e4334ccb1e3f13f626be603b3db8592ec1e0006f832537572d8435ade8fec0f9"
     }
   ],
   "public_api": "Worker client/v1 native plugin, shared S3 initializer, context-aware WebDAV kernel, managed metadata-only OpenList control-plane HTTP API",
-  "result_tree": "309f306028d38bed648c3666a5147fa1b705d2e7",
+  "result_tree": "a4364f78aa26009b6a783a86cb3b0a5dde7ac3b0",
   "licenses": [
     "third_party/openlist/LICENSE"
   ]

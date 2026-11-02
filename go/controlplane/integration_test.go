@@ -32,7 +32,7 @@ import (
 	"testing"
 	"time"
 
-	carrier "github.com/wignerStan/infra/go/network/actions/ttrpc"
+	carrier "github.com/wignerStan/infra/go/network/rpc/ttrpc"
 	processexec "github.com/wignerStan/infra/go/process/exec"
 	supervision "github.com/wignerStan/infra/go/process/supervisor"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
@@ -301,7 +301,7 @@ func TestManagedWorkerAndIndependentMaterializer(t *testing.T) {
 	if e != nil || grant.ApprovedUpstreamID != "buildbarn" {
 		t.Fatal("actual CP broker grant", e)
 	}
-	wire, e := carrier.Dial(ctx, brokerSocket, carrier.Limits{MaxPayload: 1 << 20, MaxInflight: 16, Timeout: time.Second})
+	wire, e := carrier.Dial(ctx, brokerSocket, carrier.Protocol{Service: broker.DecisionRPCService}, carrier.Limits{MaxPayload: 1 << 20, MaxInflight: 16, Timeout: time.Second})
 	if e != nil {
 		t.Fatal(e)
 	}

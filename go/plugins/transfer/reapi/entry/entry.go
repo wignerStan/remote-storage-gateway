@@ -3,18 +3,18 @@ package entry
 
 import (
 	"encoding/json"
-	"github.com/wignerStan/infra/go/code/schema"
+	"github.com/wignerStan/infra/go/config/schema"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/encoded"
 	"github.com/wignerStan/remote-storage-gateway/go/plugins/transfer/reapi"
 )
 
 func NewFactory(buildDigest string) (*reapi.Factory, error) {
-	doc, e := schema.Derive[reapi.Configuration](schema.Identity{ID: "transfer.reapi.configuration", Version: "1", Owner: reapi.PluginID})
+	doc, e := schema.Derive[reapi.Configuration]()
 	if e != nil {
 		return nil, e
 	}
-	raw, e := json.Marshal(doc.Schema)
+	raw, e := json.Marshal(doc)
 	if e != nil {
 		return nil, e
 	}

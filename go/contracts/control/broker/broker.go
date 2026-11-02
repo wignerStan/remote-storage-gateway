@@ -13,6 +13,10 @@ import (
 )
 
 const Contract = "remote-storage-gateway/control-broker/v1"
+
+// Explicit protobuf service identities separate the two metadata-only sockets.
+const WorkerRPCService = "remote_storage_gateway.control.v1.Worker"
+const DecisionRPCService = "remote_storage_gateway.control.v1.Decisions"
 const MaxMetadataBytes = 8 << 10
 const MaxMetadataEntries = 32
 const MaxTTLSeconds = 300

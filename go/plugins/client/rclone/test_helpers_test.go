@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wignerStan/infra/go/code/schema"
+	"github.com/wignerStan/infra/go/config/schema"
 	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"golang.org/x/net/webdav"
@@ -40,23 +40,23 @@ func (f resolverFunc) Resolve(ctx context.Context, name string) (port.Secret, er
 // The entry package owns published schema assembly and has its own tests. These
 // same-package runtime tests inject a typed fixture without importing that entry
 // (which would introduce an import cycle).
-func fixtureSchema[T any](t *testing.T, backend string) json.RawMessage {
+func fixtureSchema[T any](t *testing.T) json.RawMessage {
 	t.Helper()
-	document, err := schema.Derive[T](schema.Identity{ID: PluginID + "/configuration/" + backend, Version: "1", Owner: PluginID})
+	document, err := schema.Derive[T]()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return mustJSON(t, document.Schema)
+	return mustJSON(t, document)
 }
 
 func testFactory(t *testing.T) *Factory {
 	t.Helper()
 	capabilities := []string{"stat", "list", "open", "put", "delete", "range", "unknown-size-put", "list-pagination"}
 	return NewFactory(descriptor.Descriptor{Schema: descriptor.Schema, PluginID: PluginID, PluginVersion: "0.1.0-alpha.1", Contract: port.Contract, Runtime: "go", BuildDigest: testBuildDigest, Implementations: []descriptor.Implementation{
-		{ID: "s3", ConfigSchema: fixtureSchema[S3Configuration](t, "s3"), Capabilities: append([]string(nil), capabilities...)},
-		{ID: "webdav", ConfigSchema: fixtureSchema[WebDAVConfiguration](t, "webdav"), Capabilities: []string{"stat", "list", "open", "put", "delete", "range", "list-pagination"}},
-		{ID: "webdav-streaming", ConfigSchema: fixtureSchema[WebDAVConfiguration](t, "webdav-streaming"), Capabilities: append([]string(nil), capabilities...)},
-		{ID: "drive", ConfigSchema: fixtureSchema[DriveConfiguration](t, "drive"), Capabilities: append([]string(nil), capabilities...)},
+		{ID: "s3", ConfigSchema: fixtureSchema[S3Configuration](t), Capabilities: append([]string(nil), capabilities...)},
+		{ID: "webdav", ConfigSchema: fixtureSchema[WebDAVConfiguration](t), Capabilities: []string{"stat", "list", "open", "put", "delete", "range", "list-pagination"}},
+		{ID: "webdav-streaming", ConfigSchema: fixtureSchema[WebDAVConfiguration](t), Capabilities: append([]string(nil), capabilities...)},
+		{ID: "drive", ConfigSchema: fixtureSchema[DriveConfiguration](t), Capabilities: append([]string(nil), capabilities...)},
 	}})
 }
 func passwordResolver() port.SecretResolver {

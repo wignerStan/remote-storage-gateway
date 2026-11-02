@@ -679,6 +679,52 @@ type moduleJSON struct {
 	}
 }
 
+// sdkHuma admits the SDK owner's tracked module. A neighboring checkout or a
+// dependency's ignored replace directive cannot silently select schema code.
+func sdkHuma(root string) (string, error) {
+	var record relationship
+	if err := readJSON(filepath.Join(root, ".git-source-relationships/huma.json"), &record); err != nil {
+		return "", err
+	}
+	if record.Schema != "git-source-relationship/v1" || record.Kind != "third_party_implementation" || record.Integration != "tracked" || record.Path != "third_party/huma" || record.Owner == "" {
+		return "", errors.New("SDK Huma requires its tracked source relationship")
+	}
+	directory := filepath.Join(root, record.Path)
+	actual, err := filepath.EvalSymlinks(directory)
+	if err != nil || actual != filepath.Clean(directory) {
+		return "", errors.New("SDK Huma source must be the declared owned directory")
+	}
+	parse := func(path string) (*modfile.File, error) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		return modfile.Parse(path, data, nil)
+	}
+	owner, err := parse(filepath.Join(root, "go/go.mod"))
+	if err != nil {
+		return "", err
+	}
+	const module = "github.com/danielgtaylor/huma/v2"
+	declared := false
+	for _, replacement := range owner.Replace {
+		if replacement.Old.Path == module && replacement.New.Version == "" && filepath.Clean(filepath.Join(root, "go", replacement.New.Path)) == directory {
+			declared = true
+		}
+	}
+	if !declared {
+		return "", errors.New("SDK Huma source is not declared by the owner go.mod")
+	}
+	selected, err := parse(filepath.Join(directory, "go.mod"))
+	if err != nil {
+		return "", err
+	}
+	if selected.Module == nil || selected.Module.Mod.Path != module {
+		return "", errors.New("SDK Huma module identity mismatch")
+	}
+	return directory, nil
+}
+
 func (b *builder) workspace() error {
 	// Discover module identities from go.mod through Go itself. Only required
 	// first-party modules join the workspace, never adjacent legacy forks.
@@ -707,6 +753,11 @@ func (b *builder) workspace() error {
 	if err != nil {
 		return err
 	}
+	huma, e := sdkHuma(b.infra)
+	if e != nil {
+		return e
+	}
+	available["github.com/danielgtaylor/huma/v2"] = huma
 	// A derived module is an admitted source, not a global module-cache edit.
 	admitted, e := b.sources()
 	if e != nil {
@@ -1114,6 +1165,19 @@ func (b *builder) provenanceDigest() (string, error) {
 		return "", e
 	}
 	fmt.Fprintf(h, "Makefile %s\ninfra %s\n", recipe, infra)
+	huma, e := sdkHuma(b.infra)
+	if e != nil {
+		return "", e
+	}
+	humaHash, e := treeDigest(huma)
+	if e != nil {
+		return "", e
+	}
+	relationshipHash, e := hashFile(filepath.Join(b.infra, ".git-source-relationships/huma.json"))
+	if e != nil {
+		return "", e
+	}
+	fmt.Fprintf(h, "infra/huma %s %s\n", humaHash, relationshipHash)
 	// Infra owns the filesystem adapter and its patched upstream. Bind actual
 	// selected inputs as well as its commit so dirty development snapshots and
 	// backend-only patch updates cannot advertise an unchanged build identity.
