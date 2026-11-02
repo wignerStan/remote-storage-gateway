@@ -276,6 +276,7 @@ network-data-plane-worker/l4-policy/v1
 network-data-plane-worker/l7-policy/v1
 network-data-plane-worker/protocol/v1
 network-data-plane-worker/observed-state/v1
+network-data-plane-worker/management/v1
 ```
 
 The exact Go, Rust, JSON, and control-wire representations may differ, but they
@@ -620,6 +621,36 @@ The default is one attempt. Retry requires explicit replayability proof:
 - a remaining deadline and retry budget.
 
 # Control-plane interaction
+
+## Typed management registration
+
+The Go `management` package owns the bounded HTTP SDK and fixed route
+registrations for `network-data-plane-worker/management/v1`:
+
+| Method | Route | Meaning |
+| --- | --- | --- |
+| GET | `/v1/manifest` | Passive Worker capability manifest |
+| GET | `/v1/descriptors/{digest}` | Byte-exact approved descriptor |
+| GET | `/v1/state` | Sanitized published generation and drain observations |
+| POST | `/v1/clients/{name}` | One expected-generation CAS replacement |
+
+The product composition authenticates and authorizes access before dispatching
+to the registered handler. Client names and descriptor inventory are frozen from
+operator-approved registration. Unknown methods, routes, query parameters,
+unregistered client names, unknown JSON fields, and frames over 1 MiB fail closed.
+Management contains no object-body method or arbitrary upstream proxy operation.
+The descriptor endpoint preserves exact bytes and the SDK verifies the expected
+SHA-256 before returning approval material. Updates never include resolved secret
+values; they reference the Worker's existing operator-controlled resolver.
+
+Control planes may register concrete rclone or origin-specific administrative
+SDK clients under their own authenticated routes. Those clients own their own
+provider-specific management vocabulary. They do not expand the generic payload
+Client contract, redefine a Worker descriptor, or put management RPCs on the
+ordinary data path. The common Worker SDK binds a configured origin, refuses
+redirects, sanitizes remote diagnostics, and bounds each call to 30 seconds.
+It sends one CAS attempt without automatic retry; a timed-out update can already
+have published, so callers reconcile observations before another attempt.
 
 ## Desired state
 

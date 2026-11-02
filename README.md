@@ -47,6 +47,12 @@ without reading secrets or constructing provider clients. `--print-capabilities`
 reports the selected lanes and approved artifact descriptors. Product-specific
 data listeners belong to their ingress composition, not to the inspection CLI.
 
+The public `management` package provides the authenticated-composition handler
+and typed control-plane SDK for manifest, exact descriptor, observed generation,
+and CAS replacement routes. `RouteDefinitions()` is the authority for those
+registrations. This port carries bounded administrative metadata; provider
+management SDKs and ordinary streaming object operations remain separate.
+
 The Rust application preserves its existing native L7 proxy and adds an
 independently selectable static TCP L4 entry. Select `l4`, `l7`, or `l4,l7`
 explicitly; there is no default data lane. In a combined build, `--lane l4` selects
