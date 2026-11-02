@@ -69,5 +69,6 @@
       "source_sha256": "9228f0c422b954184ccb2b87d8e4dd2f03e1a8fa3881cbd7b4af0d4b225fef0f",
       "namespace_change": "private product packages now belong to the Worker monorepo module"
     }
-  ]
+  ],
+  "status": "Historical transfer receipt at its source commit; current application ownership is described in README.md and build/source-history.json. Original source hashes and namespace-change observations remain unmodified."
 }

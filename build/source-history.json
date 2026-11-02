@@ -29,5 +29,18 @@
     "publication": "pluginentry.ConfigurationSchemas and NewFactory",
     "runtime": "clientplugin receives immutable descriptor values and returns deep copies",
     "native_entry": "Invalid publication leaves the ABI provider unregistered and is rejected by the loader without init panic"
+  },
+  "application_split": {
+    "base": "502877cf25640f93453df94c67f5c4d346b5a331",
+    "gateway_repository": "https://github.com/wignerStan/remote-storage-gateway",
+    "gateway_module": "github.com/wignerStan/remote-storage-gateway/go",
+    "core_repository": "https://github.com/wignerStan/network-data-plane-worker",
+    "core_module": "github.com/wignerStan/network-data-plane-worker/go",
+    "core_repository_id": 1442271176,
+    "ownership": "Three Gateway applications and two concrete plugin axes; generic Data Plane contracts/runtime remain independent modules; native C/eventfd/cgo exporter mechanism belongs to Infra.",
+    "patches": [
+      "patches/openlist/0005-assemble-independent-gateway-processes.patch",
+      "patches/openlist/0006-isolate-managed-control-plane-execution.patch"
+    ]
   }
 }
