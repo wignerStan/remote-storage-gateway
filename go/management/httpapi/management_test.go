@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/gin-gonic/gin"
 	"github.com/wignerStan/infra/go/code/schema"
+	schemaapi "github.com/wignerStan/infra/go/code/schema/api"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
@@ -68,7 +70,18 @@ func (instance) Put(context.Context, client.PutRequest) (client.PutResult, error
 func (instance) Delete(context.Context, client.ObjectRef) error {
 	return client.ErrUnsupported
 }
-func setup(t *testing.T) (*Handler, *pluginruntime.Manager, *factory) {
+
+// The fixture is product assembly: the entry supplies typed registrations and
+// guards, while the HTTP facility alone constructs and serves the router.
+type testHandler struct {
+	http.Handler
+	entry ManagementEntry
+	table *schemaapi.Table
+}
+
+func (h *testHandler) Routes() []schemaapi.RouteInfo { return h.table.Routes() }
+
+func setup(t *testing.T) (*testHandler, *pluginruntime.Manager, *factory) {
 	t.Helper()
 	doc, err := schema.Derive[struct{}](schema.Identity{ID: "worker.test.config", Version: "1", Owner: "network-data-plane-worker"})
 	if err != nil {
@@ -102,11 +115,26 @@ func setup(t *testing.T) (*Handler, *pluginruntime.Manager, *factory) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := NewHandler(Options{Registry: registry, Manager: m, Manifest: manifest, ClientNames: []string{"account"}})
+	entry, err := NewEntry(Options{Registry: registry, Manager: m, Manifest: manifest, ClientNames: []string{"account"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return h, m, f
+	table, err := schemaapi.Compose(schemaapi.Config{
+		Title: "Worker management test", Version: "1",
+		OpenAPIPath: "/v1/openapi", SchemasPath: "/v1/schemas",
+		Guard: entry.Guard, Headers: map[string]string{"Cache-Control": "no-store"},
+	}, entry.RegisterRoutes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := gin.New()
+	router.RedirectTrailingSlash = false
+	router.RedirectFixedPath = false
+	router.HandleMethodNotAllowed = true
+	if err = schemaapi.MountGin(router, nil, table); err != nil {
+		t.Fatal(err)
+	}
+	return &testHandler{Handler: router, entry: entry, table: table}, m, f
 }
 func TestSDKPassiveDiscoveryExactDescriptorAndCAS(t *testing.T) {
 	h, m, f := setup(t)
@@ -165,6 +193,31 @@ func TestSDKPassiveDiscoveryExactDescriptorAndCAS(t *testing.T) {
 		t.Fatal("mismatched route identity accepted", err)
 	}
 }
+
+func TestTypedEntryDiscoveryCannotMutateApprovalState(t *testing.T) {
+	h, _, f := setup(t)
+	ctx := context.Background()
+	first, err := h.entry.Manifest(ctx, &ManifestRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Body.Controls[0] = "tampered"
+	first.Body.PluginDescriptors[0].PluginID = "tampered"
+	next, err := h.entry.Manifest(ctx, &ManifestRequest{})
+	if err != nil || next.Body.Controls[0] == "tampered" || next.Body.PluginDescriptors[0].PluginID == "tampered" {
+		t.Fatal("typed response exposed mutable entry approval state", err)
+	}
+	raw, err := h.entry.Descriptor(ctx, &DescriptorRequest{Digest: f.record.Digest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw.Body[0] = 'X'
+	nextRaw, err := h.entry.Descriptor(ctx, &DescriptorRequest{Digest: f.record.Digest})
+	if err != nil || !bytes.Equal(nextRaw.Body, f.record.Bytes) || f.preparations.Load() != 0 {
+		t.Fatal("typed descriptor response changed frozen bytes or initialized provider", err)
+	}
+}
+
 func TestRegisteredRoutesFailClosed(t *testing.T) {
 	h, _, _ := setup(t)
 	for _, test := range []struct {
@@ -174,8 +227,10 @@ func TestRegisteredRoutesFailClosed(t *testing.T) {
 		{"POST", management.ManifestPath, "{}", 405},
 		{"GET", "/v1/object/open", "", 404},
 		{"POST", management.ClientPrefix + "unknown", "{}", 404},
+		{"POST", management.ClientPrefix + "unknown", `{"expected":`, 404},
 		{"POST", management.ClientPrefix + "account", `{"expected":{},"expected":{},"selection":{}}`, 400},
 		{"GET", management.ObservedPath + "?target=http://arbitrary.invalid", "", 400},
+		{"GET", "/v1/%73tate", "", 400},
 		{"POST", management.ClientPrefix + "account", strings.Repeat(" ", descriptor.MaxBytes+1), 413},
 	} {
 		r := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))

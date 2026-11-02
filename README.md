@@ -47,12 +47,15 @@ without reading secrets or constructing provider clients. `--print-capabilities`
 reports the selected lanes and approved artifact descriptors. Product-specific
 data listeners belong to their ingress composition, not to the inspection CLI.
 
-The public `management` package provides the typed control-plane SDK. Its
-`management/httpapi` adapter registers typed operations through Infra's common
-Huma binding on the standard HTTP mux and publishes OpenAPI at `/v1/openapi.json` and
-generated component schemas under `/v1/schemas`. Its registered OpenAPI
-operations are the route authority. This port carries bounded administrative
-metadata; ordinary streaming object operations retain their separate port.
+The public `management` package provides the typed control-plane SDK.
+`management/httpapi` owns the `ManagementEntry` interface, public request/response
+types, named operations and route guards. Its `RegisterRoutes` contributes those
+typed methods to Infra's `code/schema/api` application support tool. That tool
+retains the concrete types for schema derivation and official Huma/Gin binding;
+the entry receives no framework API or serving engine. Product assembly owns
+Gin construction and mounting. The same contributions determine route discovery,
+OpenAPI at `/v1/openapi.json` and component schemas under `/v1/schemas`. This port
+carries bounded administrative metadata; streaming objects retain their separate port.
 
 Plugin descriptor envelope v2 carries standard JSON Schema in `config_schema`.
 Concrete plugin adapters generate it from their own public Go configuration
