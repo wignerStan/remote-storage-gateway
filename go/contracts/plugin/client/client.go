@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+	workercontract "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"io"
 	"time"
 )
@@ -67,6 +68,20 @@ type Client interface {
 	Open(context.Context, OpenRequest) (ReadPlan, error)
 	Put(context.Context, PutRequest) (PutResult, error)
 	Delete(context.Context, ObjectRef) error
+	Close(context.Context) error
+}
+
+// Lease retains the exact client generation through real operation completion.
+type Lease interface {
+	Client() Client
+	Version() workercontract.Version
+	Release()
+}
+
+// ManagedClients is the host capability consumed by namespace use-flows.
+// Close stops admission and retains cleanup ownership beyond cancelled waiters.
+type ManagedClients interface {
+	Pin(string) (Lease, error)
 	Close(context.Context) error
 }
 type Secret interface {

@@ -8,6 +8,8 @@ import (
 	native "github.com/wignerStan/infra/go/runtime/nativeplugin"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
+	workercontract "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,13 +23,8 @@ import (
 // references its plugin/descriptor identity and cannot install executable code.
 // SHA256 binds ELF bytes. Descriptor.BuildDigest names build provenance and is
 // intentionally distinct from the impossible self-embedded ELF digest.
-type Artifact struct {
-	Path             string `json:"path"`
-	SHA256           string `json:"sha256"`
-	DescriptorDigest string `json:"descriptor_digest"`
-	PluginID         string `json:"plugin_id"`
-	Language         string `json:"language"`
-}
+// Artifact preserves the native client API's existing name for the pure value.
+type Artifact = workercontract.Artifact
 type Factory struct {
 	artifact Artifact
 	record   descriptor.Record
@@ -47,7 +44,7 @@ func NewFactory(ctx context.Context, a Artifact) (*Factory, error) {
 	if e != nil {
 		return nil, mapError(e)
 	}
-	r, e := descriptor.Decode(b)
+	r, e := admission.Decode(b)
 	if e != nil || r.Digest != a.DescriptorDigest || r.Descriptor.PluginID != a.PluginID || r.Descriptor.Contract != client.Contract || r.Descriptor.Runtime != a.Language {
 		return nil, errors.New("approved descriptor mismatch")
 	}
@@ -68,7 +65,7 @@ func Inspect(ctx context.Context, path, sha256, pluginID, language string) (desc
 	if e != nil {
 		return descriptor.Record{}, mapError(e)
 	}
-	r, e := descriptor.Decode(b)
+	r, e := admission.Decode(b)
 	if e != nil || r.Descriptor.PluginID != pluginID || r.Descriptor.Runtime != language || r.Descriptor.Contract != client.Contract {
 		return descriptor.Record{}, errors.New("invalid passive client descriptor")
 	}
@@ -79,11 +76,11 @@ func (f *Factory) ArtifactDigest() string {
 }
 func (f *Factory) Artifact() Artifact { return f.artifact }
 func (f *Factory) Descriptor() descriptor.Descriptor {
-	r, _ := descriptor.Decode(f.record.Bytes)
+	r, _ := admission.Decode(f.record.Bytes)
 	return r.Descriptor
 }
 func (f *Factory) DescriptorRecord() descriptor.Record {
-	r, _ := descriptor.Decode(f.record.Bytes)
+	r, _ := admission.Decode(f.record.Bytes)
 	return r
 }
 func (f *Factory) load() (*native.Client, error) {
@@ -130,17 +127,14 @@ func (f *Factory) Prepare(ctx context.Context, cfg client.PluginConfig) (client.
 		}
 	}()
 	refs := map[string]string{}
-	for _, field := range a.ConfigSchema.Fields {
-		if !field.Secret {
-			continue
-		}
+	for _, field := range admission.SecretFields(a) {
 		if cfg.Secrets == nil {
 			if field.Required {
 				return nil, client.ErrNotFound
 			}
 			continue
 		}
-		secret, e := cfg.Secrets.Resolve(ctx, field.Path)
+		secret, e := cfg.Secrets.Resolve(ctx, field.Name)
 		if errors.Is(e, client.ErrNotFound) && !field.Required {
 			continue
 		}
@@ -155,14 +149,14 @@ func (f *Factory) Prepare(ctx context.Context, cfg client.PluginConfig) (client.
 			secret.Close()
 			return nil, client.ErrInvalid
 		}
-		secrets[field.Path] = append([]byte(nil), value...)
+		secrets[field.Name] = append([]byte(nil), value...)
 		secret.Close()
-		refs[field.Path] = "resolved"
+		refs[field.Name] = "resolved"
 	}
 	if len(cfg.Public) == 0 {
 		cfg.Public = []byte(`{}`)
 	}
-	if e := descriptor.ValidateConfig(a, cfg.Public, refs); e != nil {
+	if e := admission.ValidateConfig(a, cfg.Public, refs); e != nil {
 		return nil, e
 	}
 	n, e := f.load()
@@ -179,7 +173,7 @@ func (f *Factory) Prepare(ctx context.Context, cfg client.PluginConfig) (client.
 	if e != nil {
 		return nil, mapError(e)
 	}
-	record, e := descriptor.Decode(raw)
+	record, e := admission.Decode(raw)
 	if e != nil || record.Digest != f.record.Digest {
 		return nil, errors.New("loaded descriptor differs from approved descriptor")
 	}
@@ -257,7 +251,7 @@ func decodeResult[T any](b []byte, e error) (T, error) {
 	if e != nil {
 		return out, e
 	}
-	if descriptor.StrictJSON(b, &out) != nil {
+	if admission.StrictJSON(b, &out) != nil {
 		return out, client.ErrProvider
 	}
 	return out, nil

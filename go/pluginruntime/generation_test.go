@@ -3,9 +3,12 @@ package pluginruntime
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"github.com/wignerStan/infra/go/code/schema"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
 	"io"
 	"sync/atomic"
 	"testing"
@@ -17,8 +20,19 @@ type fakeFactory struct {
 	instances chan *fakeClient
 }
 
+func generatedConfig[T any]() descriptor.ConfigSchema {
+	doc, err := schema.Derive[T](schema.Identity{ID: "worker.test.config", Version: "1", Owner: "network-data-plane-worker"})
+	if err != nil {
+		panic(err)
+	}
+	b, err := json.Marshal(doc.Schema)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
 func (f *fakeFactory) Descriptor() descriptor.Descriptor {
-	return descriptor.Descriptor{Schema: descriptor.Schema, PluginID: "test.client", PluginVersion: "1", Contract: client.Contract, Runtime: "go", BuildDigest: "sha256:" + string(bytes.Repeat([]byte("a"), 64)), Implementations: []descriptor.Implementation{{ID: "fake", ConfigSchema: descriptor.ConfigSchema{Version: 1}, Capabilities: []string{"stat", "open"}}}}
+	return descriptor.Descriptor{Schema: descriptor.Schema, PluginID: "test.client", PluginVersion: "1", Contract: client.Contract, Runtime: "go", BuildDigest: "sha256:" + string(bytes.Repeat([]byte("a"), 64)), Implementations: []descriptor.Implementation{{ID: "fake", ConfigSchema: generatedConfig[struct{}](), Capabilities: []string{"stat", "open"}}}}
 }
 func (f *fakeFactory) Prepare(context.Context, client.PluginConfig) (client.Candidate, error) {
 	if f.failed.Load() {
@@ -31,13 +45,22 @@ func (f *fakeFactory) Prepare(context.Context, client.PluginConfig) (client.Cand
 
 type fakeCandidate struct{ c *fakeClient }
 
-func (c *fakeCandidate) Validate(context.Context) error  { return nil }
-func (c *fakeCandidate) Publish() (client.Client, error) { return c.c, nil }
-func (c *fakeCandidate) Abort(context.Context) error     { return nil }
+func (c *fakeCandidate) Validate(context.Context) error {
+	return nil
+}
+func (c *fakeCandidate) Publish() (client.Client, error) {
+	return c.c, nil
+}
+func (c *fakeCandidate) Abort(context.Context) error {
+	return nil
+}
 
 type fakeClient struct{ closed chan struct{} }
 
-func (c *fakeClient) Close(context.Context) error { close(c.closed); return nil }
+func (c *fakeClient) Close(context.Context) error {
+	close(c.closed)
+	return nil
+}
 func (c *fakeClient) Stat(context.Context, client.ObjectRef) (client.ObjectInfo, error) {
 	return client.ObjectInfo{Path: "pinned"}, nil
 }
@@ -50,7 +73,9 @@ func (c *fakeClient) Open(context.Context, client.OpenRequest) (client.ReadPlan,
 func (c *fakeClient) Put(context.Context, client.PutRequest) (client.PutResult, error) {
 	return client.PutResult{}, client.ErrUnsupported
 }
-func (c *fakeClient) Delete(context.Context, client.ObjectRef) error { return client.ErrUnsupported }
+func (c *fakeClient) Delete(context.Context, client.ObjectRef) error {
+	return client.ErrUnsupported
+}
 func setup(t *testing.T) (*Manager, *fakeFactory, Selection) {
 	t.Helper()
 	r := NewRegistry()
@@ -180,12 +205,16 @@ type exactFactory struct {
 	record descriptor.Record
 }
 
-func (f *exactFactory) DescriptorRecord() descriptor.Record { return f.record }
-func (f *exactFactory) Descriptor() descriptor.Descriptor   { return f.record.Descriptor }
+func (f *exactFactory) DescriptorRecord() descriptor.Record {
+	return f.record
+}
+func (f *exactFactory) Descriptor() descriptor.Descriptor {
+	return f.record.Descriptor
+}
 func TestRegistryPreservesExactBytesAndDetachesReads(t *testing.T) {
 	f := &fakeFactory{instances: make(chan *fakeClient, 8)}
-	r, _ := descriptor.Encode(f.Descriptor())
-	r, e := descriptor.Decode(append([]byte(" \n"), r.Bytes...))
+	r, _ := admission.Encode(f.Descriptor())
+	r, e := admission.Decode(append([]byte(" \n"), r.Bytes...))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -204,17 +233,16 @@ func TestRegistryPreservesExactBytesAndDetachesReads(t *testing.T) {
 		t.Fatal("descriptor record aliases mutable caller")
 	}
 }
-
 func TestReplacementSelectsApprovedDescriptorVersion(t *testing.T) {
 	registry := NewRegistry()
 	f := &fakeFactory{instances: make(chan *fakeClient, 8)}
-	first, e := descriptor.Encode(f.Descriptor())
+	first, e := admission.Encode(f.Descriptor())
 	if e != nil {
 		t.Fatal(e)
 	}
 	secondDescriptor := f.Descriptor()
 	secondDescriptor.PluginVersion = "2"
-	second, e := descriptor.Encode(secondDescriptor)
+	second, e := admission.Encode(secondDescriptor)
 	if e != nil {
 		t.Fatal(e)
 	}

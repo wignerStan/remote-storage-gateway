@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
 	"io"
 	"sync"
 	"time"
@@ -60,7 +61,7 @@ func NewService(f client.Factory) (*Service, error) {
 	if f == nil {
 		return nil, client.ErrInvalid
 	}
-	r, e := descriptor.Encode(f.Descriptor())
+	r, e := admission.Encode(f.Descriptor())
 	if e != nil || r.Descriptor.Contract != client.Contract {
 		return nil, client.ErrInvalid
 	}
@@ -93,7 +94,7 @@ func (s *Service) Call(ctx context.Context, method string, input []byte) ([]byte
 		return s.lifecycle(ctx, method, input)
 	case Stat:
 		var r client.ObjectRef
-		if e := descriptor.StrictJSON(input, &r); e != nil {
+		if e := admission.StrictJSON(input, &r); e != nil {
 			return nil, client.ErrInvalid
 		}
 		c, e := s.live("stat")
@@ -104,7 +105,7 @@ func (s *Service) Call(ctx context.Context, method string, input []byte) ([]byte
 		return marshalResult(v, e)
 	case List:
 		var r client.ListRequest
-		if e := descriptor.StrictJSON(input, &r); e != nil {
+		if e := admission.StrictJSON(input, &r); e != nil {
 			return nil, client.ErrInvalid
 		}
 		if r.Limit < 0 || r.Limit > 4096 {
@@ -121,7 +122,7 @@ func (s *Service) Call(ctx context.Context, method string, input []byte) ([]byte
 		return marshalResult(v, e)
 	case Delete:
 		var r client.ObjectRef
-		if e := descriptor.StrictJSON(input, &r); e != nil {
+		if e := admission.StrictJSON(input, &r); e != nil {
 			return nil, client.ErrInvalid
 		}
 		c, e := s.live("delete")
@@ -135,7 +136,7 @@ func (s *Service) Call(ctx context.Context, method string, input []byte) ([]byte
 		return s.read(ctx, input)
 	case ReadClose:
 		var r StreamFrame
-		if e := descriptor.StrictJSON(input, &r); e != nil {
+		if e := admission.StrictJSON(input, &r); e != nil {
 			return nil, client.ErrInvalid
 		}
 		return marshalResult(struct{}{}, s.closeReader(r.ID))
@@ -147,7 +148,7 @@ func (s *Service) Call(ctx context.Context, method string, input []byte) ([]byte
 		return s.commitPut(ctx, input)
 	case PutAbort:
 		var r StreamFrame
-		if e := descriptor.StrictJSON(input, &r); e != nil {
+		if e := admission.StrictJSON(input, &r); e != nil {
 			return nil, client.ErrInvalid
 		}
 		return marshalResult(struct{}{}, s.abortPut(r.ID))
@@ -182,7 +183,7 @@ func (s *Service) lifecycle(ctx context.Context, method string, input []byte) ([
 				delete(r.Secrets, k)
 			}
 		}()
-		if descriptor.StrictJSON(input, &r) != nil {
+		if admission.StrictJSON(input, &r) != nil {
 			return nil, client.ErrInvalid
 		}
 		a, ok := s.record.Descriptor.Implementation(r.ImplementationID)
@@ -196,17 +197,15 @@ func (s *Service) lifecycle(ctx context.Context, method string, input []byte) ([
 			}
 			refs[name] = "resolved"
 		}
-		if descriptor.ValidateConfig(a, r.Public, refs) != nil {
+		if admission.ValidateConfig(a, r.Public, refs) != nil {
 			return nil, client.ErrInvalid
 		}
 		ss := &secretSet{values: map[string][]byte{}, declared: map[string]bool{}}
 		for name, value := range r.Secrets {
 			ss.values[name] = append([]byte(nil), value...)
 		}
-		for _, f := range a.ConfigSchema.Fields {
-			if f.Secret {
-				ss.declared[f.Path] = true
-			}
+		for _, f := range admission.SecretFields(a) {
+			ss.declared[f.Name] = true
 		}
 		c, e := s.factory.Prepare(ctx, client.PluginConfig{ImplementationID: r.ImplementationID, Public: r.Public, Secrets: ss})
 		if e != nil {
@@ -308,7 +307,7 @@ func (s *Service) admitIDLocked(id uint64) error {
 }
 func (s *Service) open(ctx context.Context, input []byte) ([]byte, error) {
 	var r OpenFrame
-	if descriptor.StrictJSON(input, &r) != nil || r.Request.Offset < 0 || r.Request.Length < -1 {
+	if admission.StrictJSON(input, &r) != nil || r.Request.Offset < 0 || r.Request.Length < -1 {
 		return nil, client.ErrInvalid
 	}
 	c, e := s.live("open")
@@ -360,7 +359,7 @@ func (s *Service) open(ctx context.Context, input []byte) ([]byte, error) {
 }
 func (s *Service) read(ctx context.Context, input []byte) ([]byte, error) {
 	var r StreamFrame
-	if descriptor.StrictJSON(input, &r) != nil || r.Credit < 1 || r.Credit > ChunkBytes {
+	if admission.StrictJSON(input, &r) != nil || r.Credit < 1 || r.Credit > ChunkBytes {
 		return nil, client.ErrInvalid
 	}
 	s.mu.Lock()
@@ -435,7 +434,7 @@ func (s *Service) closeReader(id uint64) error {
 }
 func (s *Service) beginPut(ctx context.Context, input []byte) ([]byte, error) {
 	var r PutFrame
-	if descriptor.StrictJSON(input, &r) != nil || r.Size < -1 {
+	if admission.StrictJSON(input, &r) != nil || r.Size < -1 {
 		return nil, client.ErrInvalid
 	}
 	c, e := s.live("put")
@@ -507,7 +506,7 @@ func (s *Service) write(ctx context.Context, input []byte) ([]byte, error) {
 }
 func (s *Service) commitPut(ctx context.Context, input []byte) ([]byte, error) {
 	var r StreamFrame
-	if descriptor.StrictJSON(input, &r) != nil {
+	if admission.StrictJSON(input, &r) != nil {
 		return nil, client.ErrInvalid
 	}
 	s.mu.Lock()

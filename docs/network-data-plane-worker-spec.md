@@ -270,7 +270,7 @@ network/http/egressclient bounded control/API fetches, not payload streaming
 The first contract family is conceptually:
 
 ```text
-network-data-plane-worker/plugin-descriptor/v1
+network-data-plane-worker/plugin-descriptor/v2
 network-data-plane-worker/client/v1
 network-data-plane-worker/l4-policy/v1
 network-data-plane-worker/l7-policy/v1
@@ -292,7 +292,7 @@ Representative descriptor shape:
 
 ```json
 {
-  "schema": "network-data-plane-worker/plugin-descriptor/v1",
+  "schema": "network-data-plane-worker/plugin-descriptor/v2",
   "plugin_id": "vendor.capability",
   "plugin_version": "1.2.3",
   "contract": "network-data-plane-worker/client/v1",
@@ -302,10 +302,7 @@ Representative descriptor shape:
     {
       "id": "adapter-id",
       "display_name": "Adapter",
-      "config_schema": {
-        "version": 1,
-        "fields": []
-      },
+      "config_schema": { "type": "object", "additionalProperties": false },
       "capabilities": ["stat", "list", "open", "put", "delete"]
     }
   ]
@@ -318,25 +315,20 @@ not produce a competing schema for the same plugin version.
 
 ## Configuration schema contract
 
-The worker contract defines the allowed field-description vocabulary. A field
-contains bounded structural metadata such as:
+Envelope v2 replaces the legacy custom field list with a standard JSON Schema
+document. Each concrete plugin adapter generates its own public typed config
+schema using Huma reflection, returns the structured schema from its owner,
+and separately encodes it for the descriptor. Worker contract values remain
+neutral JSON; they do not expose a framework-native schema type. The common
+Infra configuration-codec facet uses an established sealed JSON Schema
+validator without external schema loading. There is no legacy field-list
+compatibility fallback.
 
-```go
-type FieldDescriptor struct {
-    Path          string
-    Type          FieldType
-    Required      bool
-    Secret        bool
-    WriteOnly     bool
-    Default       json.RawMessage
-    Enum          []json.RawMessage
-    MinLength     *uint32
-    MaxLength     *uint32
-    Minimum       *int64
-    Maximum       *int64
-    Description   string
-}
-```
+The Worker interprets top-level string properties marked `writeOnly: true` as
+secret fields and derives required presence from standard `required` metadata.
+Secrets cannot publish defaults, examples, enumerations or constants. Nested
+secret declarations fail closed until a corresponding reference contract exists.
+Control planes consume these exact generated schemas without redefining them.
 
 Rules:
 
@@ -626,6 +618,13 @@ The default is one attempt. Retry requires explicit replayability proof:
 
 The Go `management` package owns the bounded HTTP SDK and fixed route
 registrations for `network-data-plane-worker/management/v1`:
+
+The `management/httpapi` adapter registers typed handlers through the existing
+Infra Huma HTTP binding, independently of Gin. Huma derives operation and component schemas from
+the boundary DTOs. `/v1/openapi.json` and `/v1/schemas` publish generated schemas;
+the actual OpenAPI operation set determines route discovery. Provider payload
+streams are outside the management DTO port. Descriptor responses use the
+generated Worker descriptor schema while retaining byte-exact raw response data.
 
 | Method | Route | Meaning |
 | --- | --- | --- |

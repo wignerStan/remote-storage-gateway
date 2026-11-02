@@ -4,28 +4,16 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	lifecycle "github.com/wignerStan/infra/go/runtime/pluginlifecycle"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
+	workercontract "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"io"
 	"sync"
 )
 
-type Selection struct {
-	Name             string            `json:"name"`
-	PluginID         string            `json:"plugin_id"`
-	DescriptorDigest string            `json:"descriptor_digest"`
-	ImplementationID string            `json:"implementation_id"`
-	Public           json.RawMessage   `json:"public"`
-	SecretRefs       map[string]string `json:"secret_refs,omitempty"`
-}
-type Version struct {
-	Incarnation      string `json:"incarnation"`
-	Generation       uint64 `json:"generation"`
-	DescriptorDigest string `json:"descriptor_digest"`
-	ArtifactDigest   string `json:"artifact_digest,omitempty"`
-}
+type Selection = workercontract.Selection
+type Version = workercontract.Version
 type generation struct {
 	version   Version
 	selection Selection
@@ -46,6 +34,9 @@ type Manager struct {
 	done        chan struct{}
 	outcome     error
 }
+
+var _ client.ManagedClients = (*Manager)(nil)
+var _ client.Lease = (*Lease)(nil)
 
 func NewManager(r *Registry, resolver client.SecretResolver) (*Manager, error) {
 	if r == nil {
@@ -189,7 +180,7 @@ func (l *Lease) Release() {
 		l.call.Release()
 	}
 }
-func (m *Manager) Pin(name string) (*Lease, error) {
+func (m *Manager) Pin(name string) (client.Lease, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	g := m.current[name]
@@ -232,14 +223,7 @@ func (m *Manager) Close(ctx context.Context) error {
 	}
 }
 
-type Observed struct {
-	Name             string  `json:"name"`
-	Version          Version `json:"version"`
-	PluginID         string  `json:"plugin_id"`
-	ImplementationID string  `json:"implementation_id"`
-	Accepting        bool    `json:"accepting"`
-	Draining         int     `json:"draining"`
-}
+type Observed = workercontract.Observed
 
 func (m *Manager) Observed() []Observed {
 	m.mu.Lock()
@@ -252,7 +236,7 @@ func (m *Manager) Observed() []Observed {
 				n++
 			}
 		}
-		out = append(out, Observed{name, g.version, g.selection.PluginID, g.selection.ImplementationID, !m.closed, n})
+		out = append(out, Observed{Name: name, Version: g.version, PluginID: g.selection.PluginID, ImplementationID: g.selection.ImplementationID, Accepting: !m.closed, Draining: n})
 	}
 	return out
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
 	"reflect"
 	"sort"
 	"sync"
@@ -29,12 +30,12 @@ func (r *Registry) Register(f client.Factory) error {
 	var e error
 	if exact, ok := f.(interface{ DescriptorRecord() descriptor.Record }); ok {
 		supplied := exact.DescriptorRecord()
-		record, e = descriptor.Decode(supplied.Bytes)
+		record, e = admission.Decode(supplied.Bytes)
 		if e != nil || record.Digest != supplied.Digest || !reflect.DeepEqual(record.Descriptor, f.Descriptor()) {
 			return errors.New("descriptor bytes disagree")
 		}
 	} else {
-		record, e = descriptor.Encode(f.Descriptor())
+		record, e = admission.Encode(f.Descriptor())
 		if e != nil {
 			return e
 		}
@@ -69,7 +70,7 @@ func (r *Registry) Records() []descriptor.Record {
 	defer r.mu.RUnlock()
 	out := []descriptor.Record{}
 	for _, p := range r.plugins {
-		v, _ := descriptor.Decode(p.record.Bytes)
+		v, _ := admission.Decode(p.record.Bytes)
 		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -87,7 +88,7 @@ func (r *Registry) resolve(s Selection) (registration, descriptor.Implementation
 	if !ok || v.record.Digest != s.DescriptorDigest {
 		return registration{}, descriptor.Implementation{}, errors.New("unapproved descriptor")
 	}
-	v.record, _ = descriptor.Decode(v.record.Bytes)
+	v.record, _ = admission.Decode(v.record.Bytes)
 	a, ok := v.record.Descriptor.Implementation(s.ImplementationID)
 	if !ok {
 		return registration{}, a, errors.New("implementation unavailable")

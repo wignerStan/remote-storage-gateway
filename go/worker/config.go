@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
 	workercontract "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"github.com/wignerStan/network-data-plane-worker/go/nativeclient"
 	"github.com/wignerStan/network-data-plane-worker/go/pluginruntime"
@@ -19,15 +20,10 @@ import (
 	"sort"
 )
 
-const BootstrapSchema = "network-data-plane-worker/bootstrap/v1"
+const BootstrapSchema = workercontract.BootstrapSchema
 const CapabilitySchema = workercontract.CapabilitySchema
 
-type Bootstrap struct {
-	Schema      string                    `json:"schema"`
-	Artifacts   []nativeclient.Artifact   `json:"artifacts"`
-	Clients     []pluginruntime.Selection `json:"clients"`
-	SecretFiles map[string]string         `json:"secret_files,omitempty"`
-}
+type Bootstrap = workercontract.Bootstrap
 
 func ReadBootstrap(path string) (Bootstrap, error) {
 	var out Bootstrap
@@ -40,7 +36,7 @@ func ReadBootstrap(path string) (Bootstrap, error) {
 	if e != nil {
 		return out, e
 	}
-	if e = descriptor.StrictJSON(b, &out); e != nil {
+	if e = admission.StrictJSON(b, &out); e != nil {
 		return out, e
 	}
 	if out.Schema != BootstrapSchema || len(out.Artifacts) > 32 || len(out.Clients) > 64 || len(out.SecretFiles) > 256 {
@@ -83,7 +79,7 @@ func Validate(c Bootstrap, r *pluginruntime.Registry) error {
 			if !ok {
 				return errors.New("unavailable implementation")
 			}
-			if e := descriptor.ValidateConfig(a, s.Public, s.SecretRefs); e != nil {
+			if e := admission.ValidateConfig(a, s.Public, s.SecretRefs); e != nil {
 				return e
 			}
 			found = true
@@ -114,7 +110,7 @@ func Capabilities(r *pluginruntime.Registry) (Manifest, error) {
 	m := Manifest{Schema: CapabilitySchema, Implementation: "go", Lanes: lanes, Controls: []string{}, PluginRuntimes: []string{"native"}, PluginDescriptors: []PluginCapability{}}
 	if r != nil {
 		for _, v := range r.Records() {
-			m.PluginDescriptors = append(m.PluginDescriptors, PluginCapability{v.Descriptor.PluginID, v.Descriptor.Contract, v.Descriptor.PluginVersion, v.Digest})
+			m.PluginDescriptors = append(m.PluginDescriptors, PluginCapability{PluginID: v.Descriptor.PluginID, Contract: v.Descriptor.Contract, PluginVersion: v.Descriptor.PluginVersion, DescriptorDigest: v.Digest})
 		}
 	}
 	sort.Slice(m.PluginDescriptors, func(i, j int) bool { return m.PluginDescriptors[i].PluginID < m.PluginDescriptors[j].PluginID })
