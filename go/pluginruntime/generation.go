@@ -35,6 +35,9 @@ type Manager struct {
 	outcome     error
 }
 
+var _ client.ManagedClients = (*Manager)(nil)
+var _ client.Lease = (*Lease)(nil)
+
 func NewManager(r *Registry, resolver client.SecretResolver) (*Manager, error) {
 	if r == nil {
 		return nil, errors.New("registry required")
@@ -177,7 +180,7 @@ func (l *Lease) Release() {
 		l.call.Release()
 	}
 }
-func (m *Manager) Pin(name string) (*Lease, error) {
+func (m *Manager) Pin(name string) (client.Lease, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	g := m.current[name]

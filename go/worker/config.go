@@ -20,15 +20,10 @@ import (
 	"sort"
 )
 
-const BootstrapSchema = "network-data-plane-worker/bootstrap/v1"
+const BootstrapSchema = workercontract.BootstrapSchema
 const CapabilitySchema = workercontract.CapabilitySchema
 
-type Bootstrap struct {
-	Schema      string                    `json:"schema"`
-	Artifacts   []nativeclient.Artifact   `json:"artifacts"`
-	Clients     []pluginruntime.Selection `json:"clients"`
-	SecretFiles map[string]string         `json:"secret_files,omitempty"`
-}
+type Bootstrap = workercontract.Bootstrap
 
 func ReadBootstrap(path string) (Bootstrap, error) {
 	var out Bootstrap

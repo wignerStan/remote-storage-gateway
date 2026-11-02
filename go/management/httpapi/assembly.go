@@ -36,10 +36,10 @@ func NewHandler(o Options) (*Handler, error) {
 		return nil, errors.New("invalid management registration")
 	}
 	h := &Handler{records: map[string][]byte{}, manager: o.Manager, names: map[string]bool{}}
-	identities:=map[string]descriptor.Descriptor{}
+	identities := map[string]descriptor.Descriptor{}
 	for _, record := range o.Registry.Records() {
 		h.records[record.Digest] = record.Bytes
-		identities[record.Digest]=record.Descriptor
+		identities[record.Digest] = record.Descriptor
 	}
 	if len(o.Manifest.PluginDescriptors) != len(h.records) {
 		return nil, errors.New("manifest disagrees with approved descriptors")
@@ -51,7 +51,7 @@ func NewHandler(o Options) (*Handler, error) {
 			return nil, errors.New("descriptor unavailable")
 		}
 		seen[p.DescriptorDigest] = true
-		identity:=identities[p.DescriptorDigest]
+		identity := identities[p.DescriptorDigest]
 		if p.PluginID != identity.PluginID || p.Contract != identity.Contract || p.PluginVersion != identity.PluginVersion {
 			return nil, errors.New("descriptor identity disagrees")
 		}
@@ -62,11 +62,11 @@ func NewHandler(o Options) (*Handler, error) {
 		}
 		h.names[name] = true
 	}
-	h.manifest=o.Manifest
-	h.manifest.Controls=append([]string{},o.Manifest.Controls...)
-	h.manifest.Lanes=append([]string{},o.Manifest.Lanes...)
-	h.manifest.PluginRuntimes=append([]string{},o.Manifest.PluginRuntimes...)
-	h.manifest.PluginDescriptors=append([]workercontract.PluginCapability{},o.Manifest.PluginDescriptors...)
+	h.manifest = o.Manifest
+	h.manifest.Controls = append([]string{}, o.Manifest.Controls...)
+	h.manifest.Lanes = append([]string{}, o.Manifest.Lanes...)
+	h.manifest.PluginRuntimes = append([]string{}, o.Manifest.PluginRuntimes...)
+	h.manifest.PluginDescriptors = append([]workercontract.PluginCapability{}, o.Manifest.PluginDescriptors...)
 	hasContract := false
 	for _, control := range h.manifest.Controls {
 		hasContract = hasContract || control == management.Contract
@@ -74,8 +74,10 @@ func NewHandler(o Options) (*Handler, error) {
 	if !hasContract {
 		h.manifest.Controls = append(h.manifest.Controls, management.Contract)
 	}
-	b,err:=json.Marshal(h.manifest)
-	if err!=nil||len(b)>descriptor.MaxBytes{return nil,errors.New("oversized manifest")}
+	b, err := json.Marshal(h.manifest)
+	if err != nil || len(b) > descriptor.MaxBytes {
+		return nil, errors.New("oversized manifest")
+	}
 	mux := http.NewServeMux()
 	config := schema.OpenAPIConfig("Network data-plane Worker management", "1")
 	config.OpenAPIPath = "/v1/openapi"

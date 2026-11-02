@@ -9,6 +9,7 @@ import (
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
+	workercontract "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"io"
 	"os"
 	"path/filepath"
@@ -22,13 +23,8 @@ import (
 // references its plugin/descriptor identity and cannot install executable code.
 // SHA256 binds ELF bytes. Descriptor.BuildDigest names build provenance and is
 // intentionally distinct from the impossible self-embedded ELF digest.
-type Artifact struct {
-	Path             string `json:"path"`
-	SHA256           string `json:"sha256"`
-	DescriptorDigest string `json:"descriptor_digest"`
-	PluginID         string `json:"plugin_id"`
-	Language         string `json:"language"`
-}
+// Artifact preserves the native client API's existing name for the pure value.
+type Artifact = workercontract.Artifact
 type Factory struct {
 	artifact Artifact
 	record   descriptor.Record

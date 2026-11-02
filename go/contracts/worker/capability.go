@@ -5,6 +5,21 @@ package worker
 import "encoding/json"
 
 const CapabilitySchema = "network-data-plane-worker/capabilities/v1"
+const BootstrapSchema = "network-data-plane-worker/bootstrap/v1"
+
+type Artifact struct {
+	Path             string `json:"path"`
+	SHA256           string `json:"sha256"`
+	DescriptorDigest string `json:"descriptor_digest"`
+	PluginID         string `json:"plugin_id"`
+	Language         string `json:"language"`
+}
+type Bootstrap struct {
+	Schema      string            `json:"schema"`
+	Artifacts   []Artifact        `json:"artifacts"`
+	Clients     []Selection       `json:"clients"`
+	SecretFiles map[string]string `json:"secret_files,omitempty"`
+}
 
 type PluginCapability struct {
 	PluginID         string `json:"plugin_id"`
