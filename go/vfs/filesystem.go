@@ -22,12 +22,12 @@ import (
 var ErrUnavailable = errors.New("materializer unavailable")
 
 type Service struct {
-	store                      *cloud.Store
-	observe                    func(context.Context) (broker.InstanceInfo, error)
-	workerID, origin, username string
-	password                   []byte
-	mu                         sync.RWMutex
-	closing                    atomic.Bool
+	store                                  *cloud.Store
+	observe                                func(context.Context) (broker.InstanceInfo, error)
+	workerID, origin, username, dataSocket string
+	password                               []byte
+	mu                                     sync.RWMutex
+	closing                                atomic.Bool
 }
 
 // New binds a pre-admitted Data Plane store to a private read-only namespace.
@@ -39,14 +39,14 @@ func New(c config.ProcessConfig, store *cloud.Store, observe func(context.Contex
 	if err != nil {
 		return nil, broker.ErrInvalid
 	}
-	return &Service{store: store, observe: observe, workerID: c.WorkerInstanceID, origin: u.Scheme + "://" + strings.ToLower(u.Host), username: c.LocalUsername, password: append([]byte(nil), password...)}, nil
+	return &Service{store: store, observe: observe, workerID: c.WorkerInstanceID, dataSocket: c.WorkerLocalDataSocket, origin: u.Scheme + "://" + strings.ToLower(u.Host), username: c.LocalUsername, password: append([]byte(nil), password...)}, nil
 }
 func (s *Service) CheckOrigin(ctx context.Context) error {
 	if s.closing.Load() {
 		return ErrUnavailable
 	}
 	info, err := s.observe(ctx)
-	if err != nil || !info.Ready || info.ID != s.workerID || info.Contract != broker.Contract {
+	if err != nil || !info.Ready || info.ID != s.workerID || info.Contract != broker.Contract || info.LocalDataSocket != s.dataSocket {
 		return ErrUnavailable
 	}
 	u, err := url.Parse(info.DataEndpoint)

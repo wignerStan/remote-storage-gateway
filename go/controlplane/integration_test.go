@@ -5,11 +5,18 @@ package controlplane_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -135,14 +142,38 @@ func TestManagedWorkerAndIndependentMaterializer(t *testing.T) {
 	}
 	workerAddress := address()
 	vfsAddress := address()
-	workerEndpoint := "http://" + workerAddress
+	_, publicPort, e := net.SplitHostPort(workerAddress)
+	if e != nil {
+		t.Fatal(e)
+	}
+	workerEndpoint := "https://gateway.test:" + publicPort
+	certificate, key, roots := gatewayDNSCertificate(t)
+	certificatePath := filepath.Join(dir, "gateway.crt")
+	keyPath := filepath.Join(dir, "gateway.key")
+	if e = os.WriteFile(certificatePath, certificate, 0644); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(keyPath, key, 0600); e != nil {
+		t.Fatal(e)
+	}
+	// Only the test client supplies trust/DNS dialing for its isolated fixture.
+	// The independently spawned VFS gets neither this trust root nor a DNS shim.
+	publicTransport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		if address != "gateway.test:"+publicPort {
+			return nil, errors.New("unexpected public test origin")
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, workerAddress)
+	}}
+	defer publicTransport.CloseIdleConnections()
+	publicClient := &http.Client{Transport: publicTransport}
+	localDataSocket := filepath.Join(dir, "raw-http")
 	activate := cached
 	activate.Public = marshal(map[string]string{"address": "http://" + vfsAddress + "/dav/", "username": "cache-user"})
 	activate.SecretRefs = map[string]string{"password": "cache-auth"}
 	workerSocket := filepath.Join(dir, "worker")
 	brokerSocket := filepath.Join(dir, "broker")
 	vfsSocket := filepath.Join(dir, "vfs")
-	process := workerconfig.ProcessConfig{RuntimeConfig: workerconfig.RuntimeConfig{Listen: workerAddress, Username: "dp-user", AuthSecret: "ingress", ClientSecretRefs: []string{"cache-auth"}, Worker: dp.Bootstrap{Schema: dp.BootstrapSchema, Artifacts: []dp.Artifact{{Path: plugin, SHA256: digest, PluginID: "client.openlist", DescriptorDigest: record.Digest, Language: "go"}}, Clients: []dp.Selection{base, cached}, SecretFiles: map[string]string{"ingress": ingress, "cache-auth": local}}, Mounts: []workerconfig.Mount{{Name: "files", Client: "cached", RemoteClient: "origin", ReadOnly: true}}}, InstanceID: "worker-one", ControlSocket: workerSocket, BrokerSocket: brokerSocket, DataEndpoint: workerEndpoint}
+	process := workerconfig.ProcessConfig{RuntimeConfig: workerconfig.RuntimeConfig{LocalDataSocket: localDataSocket, TLS: &workerconfig.TLSOptions{CertificateFile: certificatePath, PrivateKeySecret: "tls-key"}, Listen: workerAddress, Username: "dp-user", AuthSecret: "ingress", ClientSecretRefs: []string{"cache-auth"}, Worker: dp.Bootstrap{Schema: dp.BootstrapSchema, Artifacts: []dp.Artifact{{Path: plugin, SHA256: digest, PluginID: "client.openlist", DescriptorDigest: record.Digest, Language: "go"}}, Clients: []dp.Selection{base, cached}, SecretFiles: map[string]string{"ingress": ingress, "cache-auth": local, "tls-key": keyPath}}, Mounts: []workerconfig.Mount{{Name: "files", Client: "cached", RemoteClient: "origin", ReadOnly: true}}}, InstanceID: "worker-one", ControlSocket: workerSocket, BrokerSocket: brokerSocket, DataEndpoint: workerEndpoint}
 	method := "/build.bazel.remote.execution.v2.Execution/Execute"
 	manager, e := controlplane.New(controlplane.Config{Workers: []controlplane.WorkerSpec{{Executable: workerBinary, Config: process}}, VFS: []controlplane.VFSSpec{{Executable: vfsBinary, ActivateClient: &activate, Config: vfsconfig.ProcessConfig{InstanceID: "vfs-one", WorkerInstanceID: "worker-one", WorkerControlSocket: workerSocket, ControlSocket: vfsSocket, Listen: vfsAddress, DataEndpoint: "/remote-dav/files/", DataUsername: "dp-user", DataPasswordFile: ingress, LocalUsername: "cache-user", LocalPasswordFile: local, Directory: filepath.Join(dir, "cache"), MaxBytes: 1 << 20, MaxAgeSeconds: 60}}}, MetadataNames: []string{"x-request-id"}, Rules: []controlplane.Rule{{InstanceID: "worker-one", Authority: "worker.invalid", Decision: broker.Decision{RouteID: "build", WorkerDataEndpoint: workerEndpoint, ApprovedUpstreamID: "buildbarn", TTLSeconds: 30, MaxMessageBytes: 1 << 20, MaxInflightBytes: 2 << 20, Methods: []string{method}}}}})
 	if e != nil {
@@ -155,6 +186,34 @@ func TestManagedWorkerAndIndependentMaterializer(t *testing.T) {
 		t.Fatal(e)
 	}
 	startCancel()
+
+	observedControl, e := manager.Worker("worker-one")
+	if e != nil {
+		t.Fatal(e)
+	}
+	observedWorker, e := observedControl.Info(ctx)
+	if e != nil || observedWorker.LocalDataSocket != localDataSocket || observedWorker.DataEndpoint != workerEndpoint {
+		t.Fatal("local channel changed public TLS identity", e)
+	}
+	if stat, e := os.Stat(localDataSocket); e != nil || stat.Mode().Perm() != 0600 {
+		t.Fatal("local data socket is not private", e)
+	}
+
+	// The same trusted certificate MUST fail a loopback-IP name check. VFS did
+	// not gain an InsecureSkipVerify/ServerName escape to make this topology pass.
+	wrongNameTransport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}
+	wrongNameClient := &http.Client{Transport: wrongNameTransport}
+	wrongRequest, _ := http.NewRequestWithContext(ctx, "GET", "https://"+workerAddress+"/remote-dav/files/object", nil)
+	wrongRequest.SetBasicAuth("dp-user", dataPassword)
+	rejectedResponse, rejectedError := wrongNameClient.Do(wrongRequest)
+	if rejectedResponse != nil {
+		rejectedResponse.Body.Close()
+	}
+	wrongNameTransport.CloseIdleConnections()
+	var wrongName x509.HostnameError
+	if !errors.As(rejectedError, &wrongName) {
+		t.Fatalf("DNS-only certificate unexpectedly accepted loopback name: %v", rejectedError)
+	}
 	instances := manager.Instances()
 	if len(instances) != 2 || instances[0].PID <= 0 || instances[1].PID <= 0 || instances[0].PID == instances[1].PID || instances[0].PID == os.Getpid() || instances[1].PID == os.Getpid() {
 		t.Fatalf("axes not separate processes: %+v", instances)
@@ -192,7 +251,7 @@ func TestManagedWorkerAndIndependentMaterializer(t *testing.T) {
 			t.Fatal(e)
 		}
 		request.SetBasicAuth("dp-user", dataPassword)
-		response, e := http.DefaultClient.Do(request)
+		response, e := publicClient.Do(request)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -221,7 +280,7 @@ func TestManagedWorkerAndIndependentMaterializer(t *testing.T) {
 		t.Fatal(e)
 	}
 	request.SetBasicAuth("dp-user", dataPassword)
-	response, e := http.DefaultClient.Do(request)
+	response, e := publicClient.Do(request)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -237,7 +296,7 @@ func TestManagedWorkerAndIndependentMaterializer(t *testing.T) {
 			t.Fatal(e)
 		}
 		request.SetBasicAuth("dp-user", dataPassword)
-		response, e := http.DefaultClient.Do(request)
+		response, e := publicClient.Do(request)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -249,9 +308,37 @@ func TestManagedWorkerAndIndependentMaterializer(t *testing.T) {
 	if e = manager.Close(ctx); e != nil {
 		t.Fatal(e)
 	}
+	if _, e = os.Lstat(localDataSocket); !os.IsNotExist(e) {
+		t.Fatal("owned raw data socket outlived child retirement", e)
+	}
 	for _, instance := range instances {
 		if e = syscall.Kill(instance.PID, 0); !errors.Is(e, syscall.ESRCH) {
 			t.Fatalf("child not reaped %s: %v", instance.Kind, e)
 		}
 	}
+}
+
+func gatewayDNSCertificate(t *testing.T) ([]byte, []byte, *x509.CertPool) {
+	t.Helper()
+	key, e := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if e != nil {
+		t.Fatal(e)
+	}
+	now := time.Now()
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), SubjectKeyId: []byte{1}, DNSNames: []string{"gateway.test"}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, e := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if e != nil {
+		t.Fatal(e)
+	}
+	encoded, e := x509.MarshalPKCS8PrivateKey(key)
+	if e != nil {
+		t.Fatal(e)
+	}
+	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	private := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encoded})
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(certificate) {
+		t.Fatal("fixture trust root invalid")
+	}
+	return certificate, private, pool
 }

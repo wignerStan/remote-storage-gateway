@@ -53,6 +53,9 @@ func validate(c config.ProcessConfig) error {
 	if c.InstanceID == "" || len(c.InstanceID) > 128 || c.WorkerInstanceID == "" || len(c.WorkerInstanceID) > 128 || c.LocalUsername == "" || len(c.LocalUsername) > 128 || c.DataUsername == "" || len(c.DataUsername) > 128 || !privateDirectory(c.ControlSocket) || !privateDirectory(c.WorkerControlSocket) || c.ControlSocket == c.WorkerControlSocket {
 		return broker.ErrInvalid
 	}
+	if c.WorkerLocalDataSocket != "" && (!privateDirectory(c.WorkerLocalDataSocket) || c.WorkerLocalDataSocket == c.WorkerControlSocket || c.WorkerLocalDataSocket == c.ControlSocket) {
+		return broker.ErrInvalid
+	}
 	if !filepath.IsAbs(c.LocalPasswordFile) || !filepath.IsAbs(c.DataPasswordFile) || filepath.Clean(c.LocalPasswordFile) == filepath.Clean(c.DataPasswordFile) || c.MaxAgeSeconds < 1 || c.MaxAgeSeconds > 31536000 {
 		return broker.ErrInvalid
 	}
@@ -87,7 +90,7 @@ func New(ctx context.Context, c config.ProcessConfig) (*Runtime, error) {
 	info, err := origin.Info(ctx)
 	target, _ := url.Parse(c.DataEndpoint)
 	base, e := url.Parse(info.DataEndpoint)
-	if err != nil || e != nil || info.ID != c.WorkerInstanceID || !info.Ready || info.Contract != broker.Contract || base.User != nil || base.RawQuery != "" || base.Fragment != "" || (base.Path != "" && base.Path != "/") || base.Scheme != target.Scheme || !strings.EqualFold(base.Host, target.Host) {
+	if err != nil || e != nil || info.ID != c.WorkerInstanceID || !info.Ready || info.Contract != broker.Contract || info.LocalDataSocket != c.WorkerLocalDataSocket || base.User != nil || base.RawQuery != "" || base.Fragment != "" || (base.Path != "" && base.Path != "/") || base.Scheme != target.Scheme || !strings.EqualFold(base.Host, target.Host) {
 		return nil, service.ErrUnavailable
 	}
 	resolver := secrets.FileResolver{"data": c.DataPasswordFile, "local": c.LocalPasswordFile}
@@ -104,7 +107,14 @@ func New(ctx context.Context, c config.ProcessConfig) (*Runtime, error) {
 	if len(dataSecret.Bytes()) < 16 || len(localSecret.Bytes()) < 16 || bytes.Equal(dataSecret.Bytes(), localSecret.Bytes()) {
 		return nil, broker.ErrInvalid
 	}
-	store, err := cloud.New(ctx, cloud.Config{Backend: "webdav", Parameters: map[string]string{"url": c.DataEndpoint, "user": c.DataUsername, "pass": string(dataSecret.Bytes()), "vendor": "other"}, Materialization: &materialization.Options{Directory: c.Directory, MaxBytes: c.MaxBytes, MaxAge: time.Duration(c.MaxAgeSeconds) * time.Second}})
+	parameters := map[string]string{"url": c.DataEndpoint, "user": c.DataUsername, "pass": string(dataSecret.Bytes()), "vendor": "other"}
+	if c.WorkerLocalDataSocket != "" {
+		// The observed public origin remains the identity fence. Local payloads
+		// use the separately admitted raw HTTP socket, without weakening TLS.
+		parameters["url"] = "http://localhost" + target.Path
+		parameters["unix_socket"] = c.WorkerLocalDataSocket
+	}
+	store, err := cloud.New(ctx, cloud.Config{Backend: "webdav", Parameters: parameters, Materialization: &materialization.Options{Directory: c.Directory, MaxBytes: c.MaxBytes, MaxAge: time.Duration(c.MaxAgeSeconds) * time.Second}})
 	if err != nil {
 		return nil, service.ErrUnavailable
 	}

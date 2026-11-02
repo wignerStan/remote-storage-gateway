@@ -28,6 +28,17 @@ func (m *Manager) startVFS(ctx context.Context, s VFSSpec) error {
 	if e != nil || !workerInfo.Ready || workerInfo.ID != s.Config.WorkerInstanceID {
 		return broker.ErrUnavailable
 	}
+
+	expectedSocket := ""
+	for _, assigned := range m.config.Workers {
+		if assigned.Config.InstanceID == s.Config.WorkerInstanceID && assigned.Config.ControlSocket == s.Config.WorkerControlSocket {
+			expectedSocket = assigned.Config.LocalDataSocket
+		}
+	}
+	if workerInfo.LocalDataSocket != expectedSocket || s.Config.WorkerLocalDataSocket != "" && s.Config.WorkerLocalDataSocket != expectedSocket {
+		return broker.ErrInvalid
+	}
+	s.Config.WorkerLocalDataSocket = expectedSocket
 	endpoint, e := materializerEndpoint(workerInfo.DataEndpoint, s.Config.DataEndpoint)
 	if e != nil {
 		return e

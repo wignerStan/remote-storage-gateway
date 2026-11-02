@@ -35,6 +35,7 @@ type Runtime struct {
 	lifeMu            sync.Mutex
 	process           workerconfig.ProcessConfig
 	httpServer        *l7.Server
+	localDataServer   *l7.Server
 	controlServer     *control.Server
 	started, retiring bool
 	closeDone         chan struct{}
