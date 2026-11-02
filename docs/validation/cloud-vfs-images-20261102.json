@@ -1,0 +1,168 @@
+{
+  "buildbarn": {
+    "bep": "cloud-vfs-images-bep.json",
+    "execution": "cloud-vfs-images-execution.json",
+    "local_fallback": false,
+    "successful_attempt": "cloud-vfs-images.log"
+  },
+  "images": {
+    "control_plane_image": {
+      "archive": "/var/tmp/trade-cloud-vfs-gateway-20261102/images/control_plane_image_oci_layout.tar",
+      "archive_sha256": "d8f9469c29b5c356bd82c45f2bc83fc082a4dd06cc1e0f799bfd9177879488fc",
+      "config": {
+        "architecture": "amd64",
+        "os": "linux",
+        "config": {
+          "User": "1001:1001",
+          "Env": [
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"
+          ],
+          "Entrypoint": [
+            "/opt/control-plane/openlist"
+          ],
+          "Cmd": [
+            "server",
+            "--data",
+            "/opt/openlist/data",
+            "--config",
+            "/opt/openlist/data/config.json"
+          ],
+          "WorkingDir": "/opt/openlist",
+          "Labels": {
+            "org.opencontainers.image.source": "https://github.com/wignerStan/remote-storage-gateway"
+          }
+        },
+        "rootfs": {
+          "type": "layers",
+          "diff_ids": [
+            "sha256:a5d6d345f6afa08d7c31272055746d60a838b290bfcc82c0a23e8e984d61a933",
+            "sha256:3526a7532ea7dfd75f849e4a57115fa50151d7e77116512e8800f95cd241064b",
+            "sha256:06f5b610483375d4a6983a9a54f1dc2772b8060b20bf870cd33bae7a616e70aa"
+          ]
+        },
+        "history": [
+          {
+            "created": "2026-10-27T00:00:00Z",
+            "created_by": "# debian.sh --arch 'amd64' out/ 'trixie' '@1793059200'",
+            "comment": "debuerreotype 0.17"
+          },
+          {
+            "created_by": "bazel build //:control_plane_program"
+          },
+          {
+            "created_by": "bazel build //:control_plane_trust"
+          }
+        ]
+      },
+      "layers": [
+        "sha256:6fc242d221a673263eabd14a9ad9584d3177c96e5cb504c891497338e2f912f5",
+        "sha256:af753483d00fe8cb6799666038a580700e90d993678df2f7dfffbaa8be449a4a",
+        "sha256:1b405eec317ad737baab1e37fa4bae52ef1577132907fcd0b13107a45eb04358"
+      ],
+      "manifest_digest": "sha256:6d5281bcc8dbfe6d59c946d2206dc539ecdcef7ca80bf6123df4adaca4626f19",
+      "verified_payloads": {
+        "etc/ssl/certs/ca-certificates.crt": {
+          "sha256": "714d457d580922dbf1d0be8bd35ba236a842b50b0072ae791582a19adef772a5",
+          "mode": "0444",
+          "UID": 0,
+          "GID": 0
+        },
+        "opt/control-plane/openlist": {
+          "sha256": "38baf1cba45c19db4c77dbc7c7bf5aa7f17d4a6381794e6e9a102c81670af13a",
+          "mode": "0555",
+          "UID": 0,
+          "GID": 0
+        }
+      },
+      "original_bazel_archive": "/tmp/trade-remote-gateway-bazel-links/bin/control_plane_image_oci_layout.tar",
+      "durable_copy_verified": true,
+      "original_build_archive": "/var/tmp/trade-cloud-vfs-gateway-20261102/images/control_plane_image_oci_layout.tar"
+    },
+    "gateway_image": {
+      "archive": "/var/tmp/trade-cloud-vfs-gateway-20261102/images/gateway_image_oci_layout.tar",
+      "archive_sha256": "7e55272678ad5825b60e6b36c64c5cd7c3a0b7a10e66737ac78085b2962aafd2",
+      "config": {
+        "architecture": "amd64",
+        "os": "linux",
+        "config": {
+          "User": "1001:1001",
+          "Env": [
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"
+          ],
+          "Entrypoint": [
+            "/opt/gateway/remote-storage-gateway"
+          ],
+          "Cmd": [
+            "-config",
+            "/run/gateway-secrets/gateway.json"
+          ],
+          "WorkingDir": "/",
+          "Labels": {
+            "org.opencontainers.image.source": "https://github.com/wignerStan/remote-storage-gateway"
+          }
+        },
+        "rootfs": {
+          "type": "layers",
+          "diff_ids": [
+            "sha256:a5d6d345f6afa08d7c31272055746d60a838b290bfcc82c0a23e8e984d61a933",
+            "sha256:a6d9511e90bdc912bf5393168fd84ab5ebf30316237c850861d2e06d03d354d0",
+            "sha256:9cbc2c03d944790f3ade337489da27898e0587bc2ef2ad4f76105b6cd6e177b9"
+          ]
+        },
+        "history": [
+          {
+            "created": "2026-10-27T00:00:00Z",
+            "created_by": "# debian.sh --arch 'amd64' out/ 'trixie' '@1793059200'",
+            "comment": "debuerreotype 0.17"
+          },
+          {
+            "created_by": "bazel build //:gateway_programs"
+          },
+          {
+            "created_by": "bazel build //:gateway_trust"
+          }
+        ]
+      },
+      "layers": [
+        "sha256:6fc242d221a673263eabd14a9ad9584d3177c96e5cb504c891497338e2f912f5",
+        "sha256:34e0ec00e04dc58b0df14cfb376247f766f05725596e1e6ac56c0e9cf0cfe5d4",
+        "sha256:8e0e14cff3b94f958961762ee5a9b12e96e3ba85d85f1889f3c0846df93fac04"
+      ],
+      "manifest_digest": "sha256:57f70cdbb70c1f46bec3b2056ffa16b1a66358b695b93edb7104897f5d37abf5",
+      "verified_payloads": {
+        "etc/ssl/certs/ca-certificates.crt": {
+          "sha256": "714d457d580922dbf1d0be8bd35ba236a842b50b0072ae791582a19adef772a5",
+          "mode": "0644",
+          "UID": 0,
+          "GID": 0
+        },
+        "opt/gateway/client-openlist.so": {
+          "sha256": "75f1bc74bbc17552679817f124054e356c05abf270d3076cd475fbdae991f8c9",
+          "mode": "0555",
+          "UID": 1001,
+          "GID": 1001
+        },
+        "opt/gateway/client-rclone.so": {
+          "sha256": "a648334f0f9b0142764f323d030a36ccc3a98fa3ecbf6033e2bc2c24e8341ac2",
+          "mode": "0555",
+          "UID": 1001,
+          "GID": 1001
+        },
+        "opt/gateway/remote-storage-gateway": {
+          "sha256": "ea1cf6f96c8b19d884558b3afa082fee41ca8aaa91b9f42f18cafefb9ea940eb",
+          "mode": "0555",
+          "UID": 1001,
+          "GID": 1001
+        }
+      },
+      "original_bazel_archive": "/tmp/trade-remote-gateway-bazel-links/bin/gateway_image_oci_layout.tar",
+      "durable_copy_verified": true,
+      "original_build_archive": "/var/tmp/trade-cloud-vfs-gateway-20261102/images/gateway_image_oci_layout.tar"
+    }
+  },
+  "infra_commit": "0c136f4b3a1ab1f9b017107a9b473cd7d646b1d7",
+  "product_commit": "32306a021a2276f75cec18de2ca11a2d03bb9676",
+  "schema": "remote-storage-gateway/oci-verification/v1"
+}
