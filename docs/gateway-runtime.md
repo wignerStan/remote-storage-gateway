@@ -180,7 +180,14 @@ The supplied managed deployment uses `/run/gateway/control`.
 A VFS entry names `worker_instance_id` and `worker_control_socket`; its
 `data_endpoint` selects `/remote-dav/<mount>/`. The manager derives the real
 origin from the ready Worker's typed Info response, so a Worker can bind port0.
-Standalone VFS config requires that complete observed Data Plane URL. VFS rejects
+Standalone VFS config requires that complete observed Data Plane URL. A public
+TLS Worker should also set `local_data_socket` under the private runtime directory.
+The manager supplies and pins VFS `worker_local_data_socket`; standalone VFS must
+match that path explicitly. Payload then uses rclone WebDAV's existing
+`unix_socket` transport with a local HTTP origin, while the public endpoint
+remains metadata identity. No public TLS certificate check is bypassed: VFS does
+not dial the public listener. The data socket is distinct from ttrpc and only
+permits authenticated raw GET/HEAD/OPTIONS/PROPFIND, without admin/cache/gRPC. VFS rejects
 provider URLs, foreign worker identities and recursive cache paths.
 
 VFS has separate `local_username` / `local_password_file` and outbound

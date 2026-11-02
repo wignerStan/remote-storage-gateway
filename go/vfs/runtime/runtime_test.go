@@ -38,7 +38,8 @@ const localPassword = "local-cache-only-password-5678"
 type originFixture struct {
 	started, canceled, release             chan struct{}
 	startedOnce, canceledOnce, releaseOnce sync.Once
-	opens, remoteGets                      atomic.Int32
+	opens, remoteGets, publicRequests      atomic.Int32
+	localSocket                            atomic.Value
 }
 
 func (f *originFixture) unblock() { f.releaseOnce.Do(func() { close(f.release) }) }
@@ -128,10 +129,17 @@ func (fixtureLease) Version() dp.Version {
 }
 func (fixtureLease) Release() {}
 
-type fixtureControl struct{ endpoint string }
+type fixtureControl struct {
+	endpoint string
+	source   *originFixture
+}
 
 func (f fixtureControl) Info(context.Context) (broker.InstanceInfo, error) {
-	return broker.InstanceInfo{Contract: broker.Contract, ID: "approved-worker", Ready: true, DataEndpoint: f.endpoint}, nil
+	socket := ""
+	if f.source != nil {
+		socket, _ = f.source.localSocket.Load().(string)
+	}
+	return broker.InstanceInfo{Contract: broker.Contract, ID: "approved-worker", Ready: true, DataEndpoint: f.endpoint, LocalDataSocket: socket}, nil
 }
 func (fixtureControl) Manifest(context.Context) (dp.Manifest, error) {
 	return dp.Manifest{}, broker.ErrInvalid
@@ -144,7 +152,8 @@ func (fixtureControl) Replace(context.Context, string, dp.Version, dp.Selection)
 	return dp.Version{}, broker.ErrInvalid
 }
 
-func setup(t *testing.T) (config.ProcessConfig, *originFixture) {
+func setup(t *testing.T) (config.ProcessConfig, *originFixture) { return setupTransport(t, false) }
+func setupTransport(t *testing.T, unix bool) (config.ProcessConfig, *originFixture) {
 	t.Helper()
 	directory, err := os.MkdirTemp("/tmp/trade-vfs-component", "instance-")
 	if err != nil {
@@ -159,12 +168,43 @@ func setup(t *testing.T) (config.ProcessConfig, *originFixture) {
 	}
 	router := gin.New()
 	gatewayhttp.RegisterGin(router, flow, http.NotFoundHandler(), http.NotFoundHandler())
-	data := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/remote-dav/") {
 			source.remoteGets.Add(1)
 		}
 		router.ServeHTTP(w, r)
-	}))
+	})
+	var data *httptest.Server
+	if unix {
+		data = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { source.publicRequests.Add(1); handler.ServeHTTP(w, r) }))
+	} else {
+		data = httptest.NewServer(handler)
+	}
+	advertised := data.URL
+	localSocket := ""
+	if unix {
+		// The public TLS server's certificate does not cover localhost and is not
+		// in the process trust store. Local reads must never use that listener.
+		advertised = strings.Replace(data.URL, "127.0.0.1", "localhost", 1)
+		localSocket = filepath.Join(directory, "raw.sock")
+		listener, e := net.Listen("unix", localSocket)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e = os.Chmod(localSocket, 0600); e != nil {
+			t.Fatal(e)
+		}
+		raw := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !strings.HasPrefix(r.URL.Path, "/remote-dav/") || (r.Method != "GET" && r.Method != "HEAD" && r.Method != "PROPFIND" && r.Method != "OPTIONS") {
+				http.NotFound(w, r)
+				return
+			}
+			handler.ServeHTTP(w, r)
+		})}
+		go func() { _ = raw.Serve(listener) }()
+		t.Cleanup(func() { _ = raw.Close() })
+	}
+	source.localSocket.Store(localSocket)
 	t.Cleanup(func() { source.unblock(); data.Close(); _ = flow.Close(context.Background()) })
 	socket := filepath.Join(directory, "worker.sock")
 	listener, err := net.Listen("unix", socket)
@@ -174,7 +214,7 @@ func setup(t *testing.T) (config.ProcessConfig, *originFixture) {
 	if err = os.Chmod(socket, 0600); err != nil {
 		t.Fatal(err)
 	}
-	metadata, err := control.NewWorkerServer(fixtureControl{data.URL})
+	metadata, err := control.NewWorkerServer(fixtureControl{endpoint: advertised, source: source})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +227,7 @@ func setup(t *testing.T) (config.ProcessConfig, *originFixture) {
 	if err = os.WriteFile(localFile, []byte(localPassword), 0600); err != nil {
 		t.Fatal(err)
 	}
-	return config.ProcessConfig{InstanceID: "materializer", ControlSocket: filepath.Join(directory, "vfs.sock"), Listen: "127.0.0.1:0", WorkerControlSocket: socket, WorkerInstanceID: "approved-worker", DataEndpoint: data.URL + "/remote-dav/bucket/", DataUsername: "data", DataPasswordFile: dataFile, LocalUsername: "cache", LocalPasswordFile: localFile, Directory: filepath.Join(directory, "cache"), MaxBytes: 1 << 20, MaxAgeSeconds: 60}, source
+	return config.ProcessConfig{InstanceID: "materializer", ControlSocket: filepath.Join(directory, "vfs.sock"), Listen: "127.0.0.1:0", WorkerControlSocket: socket, WorkerInstanceID: "approved-worker", WorkerLocalDataSocket: localSocket, DataEndpoint: advertised + "/remote-dav/bucket/", DataUsername: "data", DataPasswordFile: dataFile, LocalUsername: "cache", LocalPasswordFile: localFile, Directory: filepath.Join(directory, "cache"), MaxBytes: 1 << 20, MaxAgeSeconds: 60}, source
 }
 func start(t *testing.T, c config.ProcessConfig) *Runtime {
 	t.Helper()
@@ -259,7 +299,12 @@ func TestReadOnlyMaterializerAuthenticationAndDataPlaneOriginBinding(t *testing.
 }
 
 func TestCancelCachedReadKeepsPeerAndRetirementSettlesLastOwner(t *testing.T) {
-	c, source := setup(t)
+	for _, unix := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unix=%t", unix), func(t *testing.T) { cancelCachedRead(t, unix) })
+	}
+}
+func cancelCachedRead(t *testing.T, unix bool) {
+	c, source := setupTransport(t, unix)
 	app := start(t, c)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -395,38 +440,105 @@ func TestMaterializerProcessLeavesNoLateCacheWritesOrDescriptors(t *testing.T) {
 		fmt.Printf("vfs-lifecycle-probe-complete fd=%d->%d\n", len(before), len(after))
 		return
 	}
-	c, _ := setup(t)
-	payload, err := json.Marshal(c)
-	if err != nil {
-		t.Fatal(err)
+	for _, unix := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unix=%t", unix), func(t *testing.T) {
+			c, _ := setupTransport(t, unix)
+			payload, err := json.Marshal(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner, err := supervisor.New(supervisor.Options{MaxChildren: 1, GracePeriod: time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer owner.Close(context.Background())
+			command := processexec.NewStartSpec(os.Args[0], "-test.run=^TestMaterializerProcessLeavesNoLateCacheWritesOrDescriptors$", "-test.v").WithExtraEnv("GATEWAY_VFS_LIFECYCLE_PROBE", "1").WithExtraEnv("GORACE", "atexit_sleep_ms=0").WithStdin(bytes.NewReader(payload))
+			child, err := owner.Start(context.Background(), supervisor.Spec{Command: command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			if err = child.Wait(ctx); err != nil {
+				t.Fatalf("materializer subprocess: %v %s%s", err, child.Diagnostics().Stdout, child.Diagnostics().Stderr)
+			}
+			output := append(child.Diagnostics().Stdout, child.Diagnostics().Stderr...)
+			if !bytes.Contains(output, []byte("vfs-lifecycle-probe-complete")) {
+				t.Fatal("subprocess probe did not finish")
+			}
+			for _, line := range strings.Split(string(output), "\n") {
+				if strings.HasPrefix(line, "vfs-lifecycle-probe-complete") {
+					t.Log(line)
+				}
+			}
+			for _, forbidden := range []string{"close after grace period failed", "failed to write metadata"} {
+				if bytes.Contains(output, []byte(forbidden)) {
+					t.Fatalf("deferred cache work: %s", output)
+				}
+			}
+		})
 	}
-	owner, err := supervisor.New(supervisor.Options{MaxChildren: 1, GracePeriod: time.Second})
-	if err != nil {
-		t.Fatal(err)
+}
+
+func TestUnixDataSocketPreservesPublicTLSIdentityAndCache(t *testing.T) {
+	c, source := setupTransport(t, true)
+	bad := c
+	bad.WorkerLocalDataSocket = filepath.Join(filepath.Dir(c.WorkerLocalDataSocket), "different.sock")
+	if app, err := New(context.Background(), bad); err == nil {
+		_ = app.Close(context.Background())
+		t.Fatal("unobserved data socket admitted")
 	}
-	defer owner.Close(context.Background())
-	command := processexec.NewStartSpec(os.Args[0], "-test.run=^TestMaterializerProcessLeavesNoLateCacheWritesOrDescriptors$", "-test.v").WithExtraEnv("GATEWAY_VFS_LIFECYCLE_PROBE", "1").WithExtraEnv("GORACE", "atexit_sleep_ms=0").WithStdin(bytes.NewReader(payload))
-	child, err := owner.Start(context.Background(), supervisor.Spec{Command: command})
-	if err != nil {
-		t.Fatal(err)
+	app := start(t, c)
+	info, err := app.Info(context.Background())
+	if err != nil || !info.Ready {
+		t.Fatal(info, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	if err = child.Wait(ctx); err != nil {
-		t.Fatalf("materializer subprocess: %v %s%s", err, child.Diagnostics().Stdout, child.Diagnostics().Stderr)
-	}
-	output := append(child.Diagnostics().Stdout, child.Diagnostics().Stderr...)
-	if !bytes.Contains(output, []byte("vfs-lifecycle-probe-complete")) {
-		t.Fatal("subprocess probe did not finish")
-	}
-	for _, line := range strings.Split(string(output), "\n") {
-		if strings.HasPrefix(line, "vfs-lifecycle-probe-complete") {
-			t.Log(line)
+	for _, ranged := range []bool{false, true} {
+		req, _ := http.NewRequest("GET", info.DataEndpoint+"item", nil)
+		req.SetBasicAuth(c.LocalUsername, localPassword)
+		want := "materialized-through-data-plane"
+		status := 200
+		if ranged {
+			req.Header.Set("Range", "bytes=2-6")
+			want = want[2:7]
+			status = 206
+		}
+		response, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if err != nil || response.StatusCode != status || string(body) != want {
+			t.Fatal(response.StatusCode, string(body), err)
 		}
 	}
-	for _, forbidden := range []string{"close after grace period failed", "failed to write metadata"} {
-		if bytes.Contains(output, []byte(forbidden)) {
-			t.Fatalf("deferred cache work: %s", output)
-		}
+	if source.remoteGets.Load() != 1 || source.publicRequests.Load() != 0 {
+		t.Fatal("local payload used public TLS or repeated cache miss", source.remoteGets.Load(), source.publicRequests.Load())
+	}
+	// Existing cached bytes are not authority to keep serving a changed worker.
+	source.localSocket.Store(bad.WorkerLocalDataSocket)
+	if info, err := app.Info(context.Background()); err != nil || info.Ready {
+		t.Fatal("changed data socket retained readiness", info, err)
+	}
+	req, _ := http.NewRequest("GET", info.DataEndpoint+"item", nil)
+	req.SetBasicAuth(c.LocalUsername, localPassword)
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatal("changed data socket retained cached access", response.StatusCode)
+	}
+	if source.remoteGets.Load() != 1 || source.publicRequests.Load() != 0 {
+		t.Fatal("identity failure escaped to network")
+	}
+	if err := app.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(c.Directory)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("Unix cache survived retirement", entries, err)
 	}
 }

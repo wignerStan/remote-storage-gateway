@@ -115,7 +115,7 @@ func New(c Config) (*Manager, error) {
 		if m.boxes[id] != nil {
 			return nil, broker.ErrInvalid
 		}
-		for _, path := range []string{spec.Config.ControlSocket, spec.Config.BrokerSocket} {
+		for _, path := range []string{spec.Config.ControlSocket, spec.Config.BrokerSocket, spec.Config.LocalDataSocket} {
 			if path == "" {
 				continue
 			}
@@ -139,6 +139,9 @@ func New(c Config) (*Manager, error) {
 		found := false
 		for _, w := range c.Workers {
 			if w.Config.InstanceID == s.Config.WorkerInstanceID && w.Config.ControlSocket == s.Config.WorkerControlSocket {
+				if s.Config.WorkerLocalDataSocket != "" && s.Config.WorkerLocalDataSocket != w.Config.LocalDataSocket {
+					return nil, broker.ErrInvalid
+				}
 				found = true
 			}
 		}

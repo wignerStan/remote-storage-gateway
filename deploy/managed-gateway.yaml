@@ -4,7 +4,9 @@
 # PVC requires stopping its previous writer and migrating legacy endpoint traffic.
 # CONTROL_PLANE_IMAGE must contain storage-worker/storage-vfs and both plugin axes.
 # openlist-control supplies targets.json, processes.json and referenced credentials.
-# processes.json runtime_directory=/run/gateway/control; private VFS uses loopback.
+# processes.json runtime_directory=/run/gateway/control; Worker local_data_socket
+# is /run/gateway/control/data.sock. VFS payload uses this private data UDS; its
+# private cached DAV listener binds loopback. Metadata uses separate ttrpc sockets.
 # CP config must keep force:false so the explicit private bind overrides apply.
 # Management binds loopback and public TLS belongs to the Worker.
 # CONTROL_PLANE_HOST equals the configured Worker control_plane.host. Its /ping

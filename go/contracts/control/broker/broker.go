@@ -26,10 +26,11 @@ var (
 )
 
 type InstanceInfo struct {
-	Contract     string `json:"contract"`
-	ID           string `json:"id"`
-	Ready        bool   `json:"ready"`
-	DataEndpoint string `json:"data_endpoint"`
+	LocalDataSocket string `json:"local_data_socket,omitempty"`
+	Contract        string `json:"contract"`
+	ID              string `json:"id"`
+	Ready           bool   `json:"ready"`
+	DataEndpoint    string `json:"data_endpoint"`
 }
 
 // WorkerControl is the control plane's finite management surface for one child.

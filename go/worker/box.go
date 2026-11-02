@@ -104,6 +104,9 @@ func (b *Box) SetConfig(c config.ProcessConfig) error {
 	if e != nil || copy.InstanceID == "" || len(copy.InstanceID) > 128 || !filepath.IsAbs(copy.ControlSocket) || len(copy.ControlSocket) > 107 || copy.BrokerSocket != "" && !filepath.IsAbs(copy.BrokerSocket) {
 		return broker.ErrInvalid
 	}
+	if p := copy.LocalDataSocket; p != "" && (!filepath.IsAbs(p) || filepath.Clean(p) != p || len(p) > 107 || p == filepath.Clean(copy.ControlSocket) || p == filepath.Clean(copy.BrokerSocket)) {
+		return broker.ErrInvalid
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.state.Phase != "new" || b.closing {

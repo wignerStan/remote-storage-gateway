@@ -18,6 +18,7 @@ type ControlPlaneRoute struct {
 	Upstream string `json:"upstream"`
 }
 type RuntimeConfig struct {
+	LocalDataSocket  string             `json:"local_data_socket,omitempty"`
 	Encoded          *EncodedOptions    `json:"encoded,omitempty"`
 	ClientSecretRefs []string           `json:"client_secret_refs,omitempty"`
 	Listen           string             `json:"listen"`

@@ -62,8 +62,12 @@ public client -> Worker /dav -> client plugin -> private VFS DAV
 ```
 
 Infra `go/storage/cloud` and `go/storage/vfs` supply reusable mechanisms. The VFS
-application owns their execution and local disk. Its remote endpoint is verified
-against the ready Worker's control identity and must select a remote-only mount.
+application owns their execution and local disk. Its advertised endpoint is pinned
+to the ready Worker's control identity and selects a remote-only mount. For public
+TLS Workers, `local_data_socket` supplies a separate private HTTP Unix data
+listener. The manager pins that socket for VFS; rclone's existing `unix_socket`
+transport carries bytes without a public DNS/CA override. This data listener is
+separate from metadata-only ttrpc and accepts authenticated raw reads only.
 
 Cached mounts are read-only; activation rejects writable mounts. Ordinary remote
 streaming mounts retain their existing write operations. A cached mount has distinct `client` and `remote_client` assignments. The raw
