@@ -5,7 +5,8 @@
 # CONTROL_PLANE_IMAGE must contain storage-worker/storage-vfs and both plugin axes.
 # openlist-control supplies targets.json, processes.json and referenced credentials.
 # processes.json runtime_directory=/run/gateway/control; private VFS uses loopback.
-# CP config binds management to loopback and delegates public TLS to its Worker.
+# CP config must keep force:false so the explicit private bind overrides apply.
+# Management binds loopback and public TLS belongs to the Worker.
 # CONTROL_PLANE_HOST equals the configured Worker control_plane.host. Its /ping
 # succeeds only after manager activation and all children are ready.
 apiVersion: apps/v1
@@ -50,6 +51,11 @@ spec:
           env:
             - {name: OPENLIST_CONTROL_TARGETS_FILE, value: /run/control-secrets/targets.json}
             - {name: OPENLIST_GATEWAY_PROCESSES_FILE, value: /run/control-secrets/processes.json}
+            - {name: OPENLIST_ADDR, value: '127.0.0.1'}
+            - {name: OPENLIST_HTTP_PORT, value: '5244'}
+            - {name: OPENLIST_HTTPS_PORT, value: '-1'}
+            - {name: OPENLIST_FORCE_HTTPS, value: 'false'}
+            - {name: OPENLIST_ENABLE_H3, value: 'false'}
             - {name: HTTP_PROXY, value: 'http://172.16.0.1:10809'}
             - {name: HTTPS_PROXY, value: 'http://172.16.0.1:10809'}
             - {name: NO_PROXY, value: 'localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,incus.tail5ced8c.ts.net,CONTROL_ORIGIN_NO_PROXY'}

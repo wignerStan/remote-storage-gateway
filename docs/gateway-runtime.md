@@ -162,7 +162,9 @@ deployment must omit `OPENLIST_DIST_DIR`, and an existing persisted config's
 YAML is a deployment template; the candidate image receipt is not a rollout.
 Keep the existing PVC and administrator identity. The managed template has a
 separate Deployment/Service identity and requires an explicit PVC selection; it
-does not silently replace existing HTTP/S3 endpoints. Reusing a database requires
+does not silently replace existing HTTP/S3 endpoints. It supplies private HTTP
+bind and disabled-HTTPS environment values; keep persisted `force:false` so the
+upstream configuration loader applies those overrides. Reusing a database requires
 retiring its previous writer and completing endpoint migration. This candidate
 does not implement a legacy-compatible S3 frontend.
 
