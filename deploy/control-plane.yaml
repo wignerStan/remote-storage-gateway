@@ -1,0 +1,76 @@
+# Reuses existing identity/configuration/PVC. Set CONTROL_PLANE_IMAGE.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openlist
+  namespace: selfhost
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: openlist}
+  template:
+    metadata:
+      labels: {app: openlist}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: k3s-cilium}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 172.16.0.210
+          hostnames: [incus.tail5ced8c.ts.net]
+      initContainers:
+        - name: private-control-files
+          image: docker.io/library/debian@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+          command: [/bin/sh, -ec, "cp /input/* /private/; chmod 0600 /private/*; chown 1001:1001 /private/*"]
+          securityContext:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [CHOWN]}
+          volumeMounts:
+            - {name: input, mountPath: /input, readOnly: true}
+            - {name: private, mountPath: /private}
+      containers:
+        - name: openlist
+          image: CONTROL_PLANE_IMAGE
+          imagePullPolicy: Never
+          command: [/opt/control-plane/openlist, server, --data, /opt/openlist/data, --config, /opt/openlist/data/config.json]
+          workingDir: /opt/openlist
+          env:
+            - {name: OPENLIST_CONTROL_TARGETS_FILE, value: /run/control-secrets/targets.json}
+            - {name: HTTP_PROXY, value: 'http://172.16.0.1:10809'}
+            - {name: HTTPS_PROXY, value: 'http://172.16.0.1:10809'}
+            - {name: NO_PROXY, value: 'localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,incus.tail5ced8c.ts.net,CONTROL_ORIGIN_NO_PROXY'}
+          securityContext:
+            runAsUser: 1001
+            runAsGroup: 1001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 25m, memory: 128Mi}
+            limits: {memory: 1Gi}
+          ports:
+            - {name: http, containerPort: 5244}
+            - {name: s3, containerPort: 5246}
+          readinessProbe:
+            httpGet: {path: /ping, port: http}
+            periodSeconds: 5
+          startupProbe:
+            httpGet: {path: /ping, port: http}
+            failureThreshold: 60
+            periodSeconds: 5
+          volumeMounts:
+            - {name: data, mountPath: /opt/openlist/data}
+            - {name: private, mountPath: /run/control-secrets, readOnly: true}
+            - {name: temporary, mountPath: /tmp}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: openlist}
+        - name: input
+          secret: {secretName: openlist-control, defaultMode: 0400}
+        - name: private
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+        - name: temporary
+          emptyDir: {sizeLimit: 1Gi}

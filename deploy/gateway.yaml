@@ -1,0 +1,75 @@
+# Set GATEWAY_IMAGE to the verified native Buildbarn image digest before applying.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storage-gateway
+  namespace: selfhost
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: storage-gateway}
+  template:
+    metadata:
+      labels: {app: storage-gateway}
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: k3s-cilium
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        - name: private-files
+          image: docker.io/library/debian@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+          command: ["/bin/sh", "-ec", "cp /input/* /private/; chmod 0600 /private/*; chown 1001:1001 /private/*"]
+          securityContext:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [CHOWN]}
+          volumeMounts:
+            - {name: input, mountPath: /input, readOnly: true}
+            - {name: private, mountPath: /private}
+      containers:
+        - name: gateway
+          image: GATEWAY_IMAGE
+          imagePullPolicy: Never
+          command: [/opt/gateway/remote-storage-gateway, -config, /run/gateway-secrets/gateway.json]
+          securityContext:
+            runAsUser: 1001
+            runAsGroup: 1001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 25m, memory: 64Mi}
+            limits: {memory: 512Mi}
+          ports:
+            - {name: https, containerPort: 8443}
+          readinessProbe:
+            httpGet: {path: /healthz, port: https, scheme: HTTPS}
+            periodSeconds: 5
+          startupProbe:
+            httpGet: {path: /healthz, port: https, scheme: HTTPS}
+            failureThreshold: 30
+            periodSeconds: 5
+          volumeMounts:
+            - {name: private, mountPath: /run/gateway-secrets, readOnly: true}
+      volumes:
+        - name: input
+          secret:
+            secretName: storage-gateway
+            defaultMode: 0400
+        - name: private
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storage-gateway
+  namespace: selfhost
+spec:
+  type: NodePort
+  selector: {app: storage-gateway}
+  ports:
+    - {name: https, port: 443, targetPort: https, nodePort: 32448}

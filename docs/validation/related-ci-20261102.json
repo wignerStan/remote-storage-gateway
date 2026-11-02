@@ -1,0 +1,196 @@
+{
+  "schema": "remote-storage-gateway/current-ci-audit/v1",
+  "scope": "Read-only review of current PR checks; no source edits, configuration changes, test waivers or CI reruns.",
+  "prs": [
+    {
+      "repository": "wignerStan/infra",
+      "number": 76,
+      "head": "d4a80fcccc1cc0bd01c3bb432b2743168ab3aa22",
+      "current_base": "c9f29a9c350c23ddca59cdd4239d0bac183308ed",
+      "ci_merge": "70bcc97bca81de52814a6991aacd596bbd70963a",
+      "ci_merge_tree": "b8b5c9a7a2bebd63e517e44792ffaa4c610acf52",
+      "ci_merge_parents": [
+        "aea3bd402a457e684af6e6d6d90fb17f9c8d9123",
+        "d4a80fcccc1cc0bd01c3bb432b2743168ab3aa22"
+      ],
+      "head_tree_equals_ci_merge_tree": true,
+      "changed_files": 8,
+      "changed_scope": "go/runtime/nativeplugin only",
+      "runs": {
+        "ci": 41460332887,
+        "plugin_contracts": 41460333386
+      },
+      "plugin_artifact_id": 13148792681
+    },
+    {
+      "repository": "wignerStan/infra",
+      "number": 77,
+      "head": "76b47130313fe4087a67d6f3b5942b334e1aac2b",
+      "current_base": "6b38dbeec6f651c711771010bbf9117711393761",
+      "ci_merge": "cc1738a2d38d4d6b1af7bf13273341c821f67dbc",
+      "ci_merge_tree": "a0aa4497722c8c60e5bca2df2f090dd5b5b8f0b5",
+      "ci_merge_parents": [
+        "6b38dbeec6f651c711771010bbf9117711393761",
+        "76b47130313fe4087a67d6f3b5942b334e1aac2b"
+      ],
+      "changed_files": 1,
+      "changed_scope": "rust/crates/code/source-analysis/src/rust_shape/local_calls.rs",
+      "runs": {
+        "ci": 41461488716,
+        "plugin_contracts": 41461488588
+      },
+      "plugin_artifact_id": 13149431294
+    },
+    {
+      "repository": "wignerStan/aw-checker",
+      "number": 29,
+      "head": "a099acb508b05949d311eb2ee489bd5604d13ae3",
+      "current_base": "29eae18ae8fef12252268b0635e07350379265bf",
+      "ci_merge": "aa03a24ac1b7de1ae68b6b102aa8f9c034f4d5fc",
+      "ci_merge_tree": "793f14bead2c9b4c3f387970d4d0afffbea74537",
+      "ci_merge_parents": [
+        "29eae18ae8fef12252268b0635e07350379265bf",
+        "a099acb508b05949d311eb2ee489bd5604d13ae3"
+      ],
+      "changed_files": 29,
+      "runs": {
+        "hardening": 41478093542
+      }
+    }
+  ],
+  "plugin_matrix": {
+    "observed_in_both_infra_runs": true,
+    "statuses": {
+      "c": "passed",
+      "shared_snapshots": "passed",
+      "snapshot_namespaces": "blocked",
+      "shm_namespaces": "failed",
+      "build_profiles": "failed",
+      "c_libuv": "failed",
+      "cpp": "passed",
+      "rust": "passed",
+      "go": "passed",
+      "go_rust_async": "passed",
+      "node": "failed",
+      "python": "passed",
+      "cpp_python": "passed",
+      "cpp_python_ledger": "passed",
+      "cpp_python_coexistence": "passed",
+      "host_tool_cpp_python": "passed"
+    },
+    "raw": [
+      "infra-pr76-matrix.json",
+      "infra-pr77-matrix.json"
+    ],
+    "stop_causes": {
+      "node": {
+        "observed_both_heads": true,
+        "cause": "pkg-config --cflags --libs libuv fails: libuv.pc not found.",
+        "phase": "c/plugin-interop/node/build.py:49 -> libuv_support.py:23; before compilation, plugin loading or Node fixture execution.",
+        "logs": [
+          "infra-pr76-node.log",
+          "infra-pr77-node.log"
+        ]
+      },
+      "c_libuv": {
+        "cause": "Same missing libuv.pc prerequisite, before compilation.",
+        "detailed_log": "infra-pr76-c_libuv.log"
+      },
+      "build_profiles": {
+        "cause": "test_node_rejects_wrong_libuv_headers_before_compile expects status 2 but gets 1 because the pkg-config libuv prerequisite fails first.",
+        "detailed_log": "infra-pr76-build_profiles.log"
+      },
+      "shm_namespaces": {
+        "cause": "Build and ordinary separate-process stages pass; actual namespace stage fails: namespace did not change: user.",
+        "classification": "Unresolved current CI runtime/profile failure; no claim that namespace validation passed.",
+        "detailed_logs": [
+          "infra-pr76-shm_namespaces.log",
+          "infra-pr76-namespace-detail.log"
+        ]
+      },
+      "snapshot_namespaces": {
+        "cause": "Namespace profile returns exit 77 and matrix records blocked; ordinary snapshot phases emit PASS.",
+        "classification": "Blocked namespace coverage, not a namespace pass; exact runner restriction was not further diagnosed.",
+        "detailed_log": "infra-pr76-snapshot_namespaces.log"
+      }
+    },
+    "exact_base_source_evidence": {
+      "baseline": "c9f29a9c350c23ddca59cdd4239d0bac183308ed",
+      "head": "d4a80fcccc1cc0bd01c3bb432b2743168ab3aa22",
+      "c/plugin-interop_tree_identical": "7e1a2250f2ddb3d69612b14b5bd8b6da43ec4868",
+      "c/shared-memory_tree_identical": "9ddef7b0e80562f24c46c95543064cea9975d7ba",
+      "node/build.py_blob_identical": "3fc3b694956c93430017708de1ded7d402afc430",
+      "libuv_support.py_blob_identical": "8667f3eeed387fce2187bb9083b51d269a65bedd",
+      "interpretation": "Failed C/profile paths are unchanged from exact current base. The namespace test build command links only C plugin-interop sources, not the changed Go native loader. No fresh execution of the exact base was performed, and the existing namespace/profile failures remain unresolved."
+    }
+  },
+  "format": {
+    "command": "python3 ../scripts/format_rust.py --check",
+    "ci_rust_release": "1.99.1",
+    "pr76": {
+      "unique_diff_paths": 56,
+      "intersection_with_pr_changed_files": 0,
+      "paths": "infra-pr76-format-paths.txt",
+      "intersection": "infra-pr76-format-intersection.txt"
+    },
+    "pr77": {
+      "unique_diff_paths": 49,
+      "intersection_with_pr_changed_files": 0,
+      "changed_local_calls_present_in_diffs": false,
+      "paths": "infra-pr77-format-paths.txt",
+      "intersection": "infra-pr77-format-intersection.txt"
+    },
+    "interpretation": "The observed formatting failures name unchanged Rust files outside the actual PR patches; this is path/source comparison, not a newly executed baseline formatting run."
+  },
+  "aw_checker": {
+    "jobs": [
+      "hardening",
+      "package-consumer"
+    ],
+    "stop_step": "Configure published-package mirror",
+    "cause": "INFRA_CARGO_MIRROR_INDEX is empty in both current-head logs; configure-mirror rejects it as not a sparse registry URL.",
+    "checks_started_after_mirror": false,
+    "secondary_upload_failure": "Hardening reports are absent because the mirror setup stopped the job before reports were produced.",
+    "exact_base_blobs_identical": {
+      ".github/workflows/fcis-hardening.yml": "5bacaf7e3d135ba64315d06cb0e2990ee1e5cacb",
+      "scripts/infra_packages.py": "94d442ba95708cf04482a3b438114ef1b50c3799"
+    },
+    "interpretation": "Repository variable/setup failure on the observed run, not evidence of checker source tests passing or failing."
+  },
+  "additional_examined_failures": {
+    "infra76_dag": "Stale rust/.fcis/role_register.json path crates/ai/harness/action-exec/src/bin/harness-exec-server.rs.",
+    "infra77_dag": "23 raw process boundary violations in unchanged Rust, Bazel and registry scripts outside local_calls.rs.",
+    "infra76_and_77_boundary": "text/presentation-python library name divergence and text/processing ecmascript external namespace facades.",
+    "infra76_clippy": "stream-transfer missing Errors documentation and other Rust lint errors outside the PR's eight Go nativeplugin files."
+  },
+  "nonclaims": [
+    "CI remains red; no check was waived.",
+    "No blanket claim that all native/substrate lanes passed; complete observed matrix statuses are retained above.",
+    "No regression attributable to the scoped native-loader or local-call patch was identified in the examined failures.",
+    "Unchanged source paths are not treated as proof that unrelated current runtime/profile failures are safe or resolved.",
+    "Python Lint/Types/Test and Cargo Deny job causes, and SDK77 Clippy, were not separately downloaded or audited.",
+    "Checks that never ran because of earlier failures are not claimed to pass.",
+    "An early incomplete job excerpt was incorrectly summarized as only Node failing; the persisted complete matrix corrects that statement."
+  ],
+  "examined_logs": [
+    "infra-pr76-format.log",
+    "infra-pr76-plugin-contracts.log",
+    "infra-pr77-format.log",
+    "infra-pr77-plugin-contracts.log",
+    "aw-checker-pr29-hardening.log",
+    "aw-checker-pr29-package-consumer.log",
+    "infra-pr76-dag.log",
+    "infra-pr77-dag.log",
+    "infra-pr76-boundary.log",
+    "infra-pr77-boundary.log",
+    "infra-pr76-clippy.log",
+    "infra-pr76-node.log",
+    "infra-pr77-node.log",
+    "infra-pr76-go-rust-race.log",
+    "infra-pr76-c_libuv.log",
+    "infra-pr76-build_profiles.log",
+    "infra-pr76-shm_namespaces.log",
+    "infra-pr76-snapshot_namespaces.log",
+    "infra-pr76-namespace-detail.log"
+  ]
+}

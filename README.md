@@ -41,6 +41,11 @@ BuildKit or Podman is involved. Source pins, patch hashes and resulting trees ar
 recorded in `.git-source-relationships/`; see `build/README.md` for individual
 stages and execution settings.
 
+See [gateway operation](docs/gateway-runtime.md) for bootstrap, management,
+TLS and optional VFS configuration. Deployment templates live in `deploy/`;
+the source-built control plane uses its embedded UI. Candidate build receipts
+and the preserved previous deployment receipt live in `docs/validation/`.
+
 ## Worker implementation
 
 See the [security model](SECURITY.md) for trust boundaries, implemented controls and deployment responsibilities.
