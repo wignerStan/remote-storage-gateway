@@ -616,15 +616,18 @@ The default is one attempt. Retry requires explicit replayability proof:
 
 ## Typed management registration
 
-The Go `management` package owns the bounded HTTP SDK and fixed route
-registrations for `network-data-plane-worker/management/v1`:
-
-The `management/httpapi` boundary registers typed handlers directly with Huma's
-official `humagin` adapter, independently of Gin. Huma derives schemas from
-the boundary DTOs. `/v1/openapi.json` and `/v1/schemas` publish generated schemas;
-the actual OpenAPI operation set determines route discovery. Provider payload
-streams are outside the management DTO port. Descriptor responses use the
-generated Worker descriptor schema while retaining byte-exact raw response data.
+The Go `management` package owns the bounded HTTP SDK for
+`network-data-plane-worker/management/v1`. The `management/httpapi` entry owns
+its public DTOs, typed `ManagementEntry` interface, named methods and predecode
+guards. It contributes typed methods through `RegisterRoutes` to Infra's
+`code/schema/api` application support tool. The tool retains concrete input and
+output types for Huma schema derivation and its official Gin binding, without
+exposing a Huma API to the entry or placing Huma in the HTTP server owner.
+Product assembly constructs Gin and mounts the admitted contributions.
+`/v1/openapi.json` and `/v1/schemas` publish generated schemas; the same
+contributions determine registered routes and route discovery. Provider payload
+streams remain outside this DTO port. Descriptor responses use the generated
+Worker descriptor schema while retaining byte-exact raw response data.
 
 | Method | Route | Meaning |
 | --- | --- | --- |

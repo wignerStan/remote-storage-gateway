@@ -4,15 +4,10 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
-	"github.com/danielgtaylor/huma/v2"
-	"github.com/danielgtaylor/huma/v2/adapters/humagin"
-	"github.com/gin-gonic/gin"
-	"github.com/wignerStan/infra/go/config/codec"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	workercontract "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"github.com/wignerStan/network-data-plane-worker/go/management"
 	"github.com/wignerStan/network-data-plane-worker/go/pluginruntime"
-	"net/http"
 )
 
 type Options struct {
@@ -21,22 +16,20 @@ type Options struct {
 	Manifest    workercontract.Manifest
 	ClientNames []string
 }
-type Handler struct {
+type Entry struct {
 	records  map[string][]byte
 	manager  *pluginruntime.Manager
 	manifest workercontract.Manifest
 	names    map[string]bool
-	api      huma.API
-	router   http.Handler
 }
 
-// NewHandler freezes approval material and registers typed operations. The
+// NewEntry freezes approval material without constructing a transport. The
 // product composition must authenticate and authorize this entire boundary.
-func NewHandler(o Options) (*Handler, error) {
+func NewEntry(o Options) (ManagementEntry, error) {
 	if o.Registry == nil || o.Manager == nil || o.Manifest.Schema != workercontract.CapabilitySchema || !descriptor.ValidDigest(o.Manifest.BuildDigest) || len(o.ClientNames) > 64 {
 		return nil, errors.New("invalid management registration")
 	}
-	h := &Handler{records: map[string][]byte{}, manager: o.Manager, names: map[string]bool{}}
+	h := &Entry{records: map[string][]byte{}, manager: o.Manager, names: map[string]bool{}}
 	identities := map[string]descriptor.Descriptor{}
 	for _, record := range o.Registry.Records() {
 		h.records[record.Digest] = record.Bytes
@@ -79,21 +72,5 @@ func NewHandler(o Options) (*Handler, error) {
 	if err != nil || len(b) > descriptor.MaxBytes {
 		return nil, errors.New("oversized manifest")
 	}
-	engine := gin.New()
-	engine.RedirectTrailingSlash = false
-	engine.RedirectFixedPath = false
-	engine.HandleMethodNotAllowed = true
-	config := huma.DefaultConfig("Network data-plane Worker management", "1")
-	config.CreateHooks = nil
-	config.OpenAPIPath = "/v1/openapi"
-	config.SchemasPath = "/v1/schemas"
-	config.DocsPath = ""
-	strictJSON := huma.DefaultJSONFormat
-	strictJSON.Unmarshal = codec.DecodeJSONValue
-	config.Formats = map[string]huma.Format{"application/json": strictJSON, "json": strictJSON}
-	api := humagin.New(engine, config)
-	h.api = api
-	h.router = engine
-	h.register()
 	return h, nil
 }
