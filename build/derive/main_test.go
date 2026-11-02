@@ -227,7 +227,7 @@ func TestImageCompositionsContainEmbeddedCPAndIndependentPlugins(t *testing.T) {
 	if e := os.MkdirAll(dir, 0755); e != nil {
 		t.Fatal(e)
 	}
-	for _, name := range []string{"remote-storage-gateway", "client-openlist.so", "client-rclone.so", "openlist-control-plane"} {
+	for _, name := range []string{"storage-worker", "storage-vfs", "transfer-reapi.so", "client-openlist.so", "client-rclone.so", "openlist-control-plane"} {
 		if e := os.WriteFile(filepath.Join(dir, name), []byte(name), 0644); e != nil {
 			t.Fatal(e)
 		}
@@ -239,15 +239,12 @@ func TestImageCompositionsContainEmbeddedCPAndIndependentPlugins(t *testing.T) {
 	if e := b.imageInputs(); e != nil {
 		t.Fatal(e)
 	}
-	for _, composition := range []string{"gateway", "control-plane"} {
+	for _, composition := range []string{"gateway", "control-plane", "vfs"} {
 		var manifest map[string]string
 		if e := readJSON(filepath.Join(b.output, "image-inputs", composition, "inputs.json"), &manifest); e != nil {
 			t.Fatal(e)
 		}
-		want := 4
-		if composition == "control-plane" {
-			want = 2
-		}
+		want := map[string]int{"gateway": 5, "control-plane": 7, "vfs": 2}[composition]
 		if len(manifest) != want {
 			t.Fatalf("%s has %d inputs", composition, len(manifest))
 		}
@@ -529,5 +526,28 @@ func TestNativeBuildIdentityTracksBackendPatchesAndRecipe(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestDataPlaneRemainsIndependentVersionedModule(t *testing.T) {
+	base := t.TempDir()
+	b := builder{root: filepath.Join(base, "gateway"), dataPlane: filepath.Join(base, "core")}
+	for _, item := range []struct{ path, content string }{
+		{filepath.Join(b.root, "go/go.mod"), "module github.com/wignerStan/remote-storage-gateway/go\nrequire github.com/wignerStan/network-data-plane-worker/go v0.1.0-alpha.1\n"},
+		{filepath.Join(b.dataPlane, "go/go.mod"), "module github.com/wignerStan/network-data-plane-worker/go\n"},
+	} {
+		if e := os.MkdirAll(filepath.Dir(item.path), 0755); e != nil {
+			t.Fatal(e)
+		}
+		if e := os.WriteFile(item.path, []byte(item.content), 0644); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, e := b.dataPlaneModule(); e != nil {
+		t.Fatal(e)
+	}
+	b.dataPlane = b.root
+	if _, e := b.dataPlaneModule(); e == nil {
+		t.Fatal("embedded Core source accepted")
 	}
 }

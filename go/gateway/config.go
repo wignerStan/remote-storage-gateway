@@ -14,40 +14,19 @@ import (
 
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	workercontract "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
+	workerconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/worker"
 )
 
-type Mount struct {
-	Name     string `json:"name"`
-	Client   string `json:"client"`
-	ReadOnly bool   `json:"read_only,omitempty"`
-}
-type TLSOptions struct {
-	CertificateFile  string `json:"certificate_file"`
-	PrivateKeySecret string `json:"private_key_secret"`
-}
-type ControlPlaneRoute struct {
-	Host     string `json:"host"`
-	Upstream string `json:"upstream"`
-}
-type Config struct {
-	Listen       string                   `json:"listen"`
-	Username     string                   `json:"username"`
-	AuthSecret   string                   `json:"auth_secret"`
-	Worker       workercontract.Bootstrap `json:"worker"`
-	Mounts       []Mount                  `json:"mounts"`
-	TLS          *TLSOptions              `json:"tls,omitempty"`
-	ControlPlane *ControlPlaneRoute       `json:"control_plane,omitempty"`
-}
 type Runtime struct {
 	clients               client.ManagedClients
-	mounts                []Mount
+	mounts                []workerconfig.Mount
 	username, controlHost string
 	password              []byte
 	mu                    sync.RWMutex
 	closeOnce             sync.Once
 }
 
-func New(config Config, clients client.ManagedClients, password []byte) (*Runtime, error) {
+func New(config workerconfig.RuntimeConfig, clients client.ManagedClients, password []byte) (*Runtime, error) {
 	if config.Username == "" || len(password) < 16 || len(config.Mounts) > 64 || len(config.Mounts) > 0 && clients == nil {
 		return nil, errors.New("invalid gateway grants")
 	}
@@ -57,7 +36,7 @@ func New(config Config, clients client.ManagedClients, password []byte) (*Runtim
 	}
 	seen := map[string]bool{}
 	for _, mount := range config.Mounts {
-		if mount.Name == "" || strings.ContainsAny(mount.Name, "/\\\x00") || mount.Name == "." || mount.Name == ".." || seen[mount.Name] || !known[mount.Client] {
+		if mount.Name == "" || strings.ContainsAny(mount.Name, "/\\\x00") || mount.Name == "." || mount.Name == ".." || seen[mount.Name] || !known[mount.Client] || mount.RemoteClient != "" && !known[mount.RemoteClient] {
 			return nil, errors.New("invalid gateway mount")
 		}
 		seen[mount.Name] = true
@@ -66,7 +45,7 @@ func New(config Config, clients client.ManagedClients, password []byte) (*Runtim
 	if config.ControlPlane != nil {
 		controlHost = config.ControlPlane.Host
 	}
-	return &Runtime{clients: clients, mounts: append([]Mount(nil), config.Mounts...), username: config.Username, password: append([]byte(nil), password...), controlHost: controlHost}, nil
+	return &Runtime{clients: clients, mounts: append([]workerconfig.Mount(nil), config.Mounts...), username: config.Username, password: append([]byte(nil), password...), controlHost: controlHost}, nil
 }
 func (r *Runtime) Close(ctx context.Context) error {
 	if r.clients != nil {
@@ -82,7 +61,9 @@ func (r *Runtime) Authorize(username, password string) bool {
 	defer r.mu.RUnlock()
 	return subtle.ConstantTimeCompare([]byte(username), []byte(r.username)) == 1 && subtle.ConstantTimeCompare([]byte(password), r.password) == 1
 }
-func (r *Runtime) Mounts() []Mount { return append([]Mount(nil), r.mounts...) }
+func (r *Runtime) Mounts() []workerconfig.Mount {
+	return append([]workerconfig.Mount(nil), r.mounts...)
+}
 
 type Route uint8
 
@@ -94,7 +75,7 @@ const (
 )
 
 func (r *Runtime) Route(host, path string) Route {
-	reserved := path == "/healthz" || path == "/v1" || strings.HasPrefix(path, "/v1/") || path == "/dav" || strings.HasPrefix(path, "/dav/")
+	reserved := path == "/remote-dav" || strings.HasPrefix(path, "/remote-dav/") || path == "/healthz" || path == "/v1" || strings.HasPrefix(path, "/v1/") || path == "/dav" || strings.HasPrefix(path, "/dav/")
 	if r.controlHost == "" || reserved {
 		return Storage
 	}
@@ -113,18 +94,18 @@ func (r *Runtime) Route(host, path string) Route {
 	}
 	return Denied
 }
-func (r *Runtime) Resolve(name string) (Mount, string, error) {
+func (r *Runtime) Resolve(name string) (workerconfig.Mount, string, error) {
 	if !utf8.ValidString(name) || strings.ContainsAny(name, "\\\x00") {
-		return Mount{}, "", os.ErrInvalid
+		return workerconfig.Mount{}, "", os.ErrInvalid
 	}
 	for _, segment := range strings.Split(name, "/") {
 		if segment == ".." {
-			return Mount{}, "", os.ErrPermission
+			return workerconfig.Mount{}, "", os.ErrPermission
 		}
 	}
 	name = path.Clean("/" + strings.TrimPrefix(name, "/"))
 	if name == "/" {
-		return Mount{}, "/", nil
+		return workerconfig.Mount{}, "/", nil
 	}
 	parts := strings.SplitN(strings.TrimPrefix(name, "/"), "/", 2)
 	for _, mount := range r.mounts {
@@ -136,16 +117,25 @@ func (r *Runtime) Resolve(name string) (Mount, string, error) {
 			return mount, object, nil
 		}
 	}
-	return Mount{}, "", os.ErrNotExist
+	return workerconfig.Mount{}, "", os.ErrNotExist
 }
 
 type Exchange struct {
 	leases map[string]client.Lease
-	grants map[string]Mount
+	grants map[string]workerconfig.Mount
 	once   sync.Once
 }
 
 func (r *Runtime) BeginExchange(name string, mutation bool) (*Exchange, error) {
+	return r.beginExchange(name, mutation, false)
+}
+
+// BeginRemoteExchange selects the immutable remote-only mount assignment, even
+// when the public mount is later switched to an independent materializer.
+func (r *Runtime) BeginRemoteExchange(name string, mutation bool) (*Exchange, error) {
+	return r.beginExchange(name, mutation, true)
+}
+func (r *Runtime) beginExchange(name string, mutation, remoteOnly bool) (*Exchange, error) {
 	mount, _, err := r.Resolve(name)
 	if err != nil {
 		return nil, err
@@ -153,12 +143,15 @@ func (r *Runtime) BeginExchange(name string, mutation bool) (*Exchange, error) {
 	if mutation && mount.ReadOnly {
 		return nil, os.ErrPermission
 	}
-	selected := []Mount{mount}
+	selected := []workerconfig.Mount{mount}
 	if mount.Name == "" {
 		selected = r.mounts
 	}
-	x := &Exchange{leases: map[string]client.Lease{}, grants: map[string]Mount{}}
+	x := &Exchange{leases: map[string]client.Lease{}, grants: map[string]workerconfig.Mount{}}
 	for _, grant := range selected {
+		if remoteOnly && grant.RemoteClient != "" {
+			grant.Client = grant.RemoteClient
+		}
 		x.grants[grant.Name] = grant
 		if x.leases[grant.Client] != nil {
 			continue

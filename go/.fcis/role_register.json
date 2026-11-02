@@ -2,214 +2,6 @@
   "schema_version": 10,
   "units": [
     {
-      "path": "contracts/plugin/descriptor",
-      "names": [
-        "worker_plugin_descriptor"
-      ],
-      "role": "protocol_spec"
-    },
-    {
-      "path": "contracts/worker",
-      "names": [
-        "worker_control_values"
-      ],
-      "role": "protocol_spec"
-    },
-    {
-      "path": "contracts/plugin/descriptor/admission",
-      "names": [
-        "worker_descriptor_admission"
-      ],
-      "role": "effect_tool",
-      "role_stratum": "handler_adapter",
-      "effect_family": "configuration",
-      "effect_operation": {
-        "name": "plugin_descriptor_admission",
-        "mechanisms": [
-          "codec"
-        ],
-        "controls": []
-      }
-    },
-    {
-      "path": "contracts/plugin/client",
-      "names": [
-        "worker_storage_client_port"
-      ],
-      "role": "effect_tool",
-      "internal_port_kind": "effect",
-      "effect_family": "storage",
-      "port_name": "storage_client",
-      "port_operations": [
-        "Stat",
-        "List",
-        "Open",
-        "Put",
-        "Delete",
-        "Close",
-        "Descriptor",
-        "Prepare",
-        "Validate",
-        "Publish",
-        "Abort",
-        "Resolve",
-        "Bytes",
-        "Pin",
-        "Version",
-        "Release"
-      ]
-    },
-    {
-      "path": "contracts/plugin/policy",
-      "names": [
-        "worker_admission_policy_port"
-      ],
-      "role": "effect_tool",
-      "internal_port_kind": "effect",
-      "effect_family": "network",
-      "port_name": "proxy_admission_policy",
-      "port_operations": [
-        "Admit",
-        "Close"
-      ]
-    },
-    {
-      "path": "contracts/plugin/protocol",
-      "names": [
-        "worker_protocol_port"
-      ],
-      "role": "effect_tool",
-      "internal_port_kind": "effect",
-      "effect_family": "network",
-      "port_name": "streaming_protocol",
-      "port_operations": [
-        "Handle",
-        "Close"
-      ]
-    },
-    {
-      "path": "nativeclient",
-      "names": [
-        "worker_native_storage_streams"
-      ],
-      "role": "effect_facility",
-      "effect_family": "storage",
-      "effect_operation": {
-        "name": "native_client_stream_lifecycle",
-        "mechanisms": [
-          "runtime"
-        ],
-        "controls": [
-          "backpressure",
-          "cancellation",
-          "drain",
-          "lifecycle",
-          "shutdown"
-        ]
-      }
-    },
-    {
-      "path": "pluginruntime",
-      "names": [
-        "worker_client_generations"
-      ],
-      "role": "effect_facility",
-      "effect_family": "storage",
-      "effect_operation": {
-        "name": "typed_client_generation_lifecycle",
-        "mechanisms": [
-          "runtime"
-        ],
-        "controls": [
-          "drain",
-          "lifecycle",
-          "shutdown"
-        ]
-      }
-    },
-    {
-      "path": "management",
-      "names": [
-        "worker_control_sdk"
-      ],
-      "role": "effect_tool",
-      "role_stratum": "application_support",
-      "effect_family": "network",
-      "effect_operation": {
-        "name": "worker_management_request",
-        "mechanisms": [
-          "network",
-          "codec"
-        ],
-        "controls": [
-          "cancellation"
-        ]
-      }
-    },
-    {
-      "path": "management/httpapi",
-      "names": [
-        "worker_management_http"
-      ],
-      "role": "front_door",
-      "role_stratum": "entry",
-      "entry_type": [
-        "server"
-      ],
-      "sources": [
-        {
-          "path": "binding.go",
-          "role_stratum": "entry"
-        },
-        {
-          "path": "entry.go",
-          "role_stratum": "entry"
-        },
-        {
-          "path": "interface.go",
-          "role_stratum": "entry"
-        },
-        {
-          "path": "routes.go",
-          "role_stratum": "entry"
-        }
-      ]
-    },
-    {
-      "path": "secrets",
-      "names": [
-        "worker_operator_secrets"
-      ],
-      "role": "effect_tool",
-      "role_stratum": "primitive_wrapper",
-      "effect_family": "storage",
-      "effect_operation": {
-        "name": "private_operator_secret_read",
-        "mechanisms": [
-          "file"
-        ],
-        "controls": []
-      }
-    },
-    {
-      "path": "worker",
-      "names": [
-        "worker_bootstrap"
-      ],
-      "role": "front_door",
-      "role_stratum": "assembly",
-      "subsystem": "worker_runtime_bootstrap"
-    },
-    {
-      "path": "cmd/network-data-plane-worker",
-      "names": [
-        "worker_cli"
-      ],
-      "role": "front_door",
-      "role_stratum": "assembly",
-      "subsystem": "worker_cli"
-    },
-    {
       "path": "gateway",
       "names": [
         "storage_gateway_access"
@@ -236,13 +28,13 @@
       ]
     },
     {
-      "path": "cmd/remote-storage-gateway",
+      "path": "worker/runtime",
       "names": [
-        "storage_gateway_assembly"
+        "gateway_worker_runtime_assembly"
       ],
       "role": "front_door",
       "role_stratum": "assembly",
-      "subsystem": "storage_gateway",
+      "subsystem": "storage_gateway_worker",
       "route_axes": [
         "remote_storage_access"
       ],
@@ -251,11 +43,11 @@
       ],
       "sources": [
         {
-          "path": "main.go",
+          "path": "assembly.go",
           "role_stratum": "assembly"
         },
         {
-          "path": "assembly.go",
+          "path": "lifecycle.go",
           "role_stratum": "assembly"
         },
         {
@@ -265,7 +57,7 @@
       ]
     },
     {
-      "path": "storage/rcloneclient",
+      "path": "plugins/client/rclone",
       "names": [
         "rclone_storage_client_preparation"
       ],
@@ -299,7 +91,7 @@
       ]
     },
     {
-      "path": "plugins/rclone",
+      "path": "plugins/client/rclone/entry",
       "names": [
         "rclone_plugin_publication_entry"
       ],
@@ -317,6 +109,209 @@
       "role": "front_door",
       "role_stratum": "assembly",
       "subsystem": "rclone_native_plugin"
+    },
+    {
+      "path": "contracts/worker",
+      "names": [
+        "gateway_worker_configuration"
+      ],
+      "role": "protocol_spec"
+    },
+    {
+      "path": "contracts/vfs",
+      "names": [
+        "gateway_vfs_configuration"
+      ],
+      "role": "protocol_spec"
+    },
+    {
+      "path": "contracts/control/broker",
+      "names": [
+        "gateway_metadata_control_contract"
+      ],
+      "role": "protocol_spec"
+    },
+    {
+      "path": "cmd/storage-worker",
+      "names": [
+        "storage_worker_process_assembly"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "entry_type": [
+        "direct"
+      ],
+      "subsystem": "storage_worker_process"
+    },
+    {
+      "path": "worker",
+      "names": [
+        "storage_worker_process_box"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "application_support",
+      "effect_family": "process",
+      "effect_operation": {
+        "name": "manage_worker_process",
+        "mechanisms": [
+          "process",
+          "network",
+          "codec"
+        ],
+        "controls": [
+          "lifecycle",
+          "cancellation",
+          "health",
+          "shutdown",
+          "drain"
+        ]
+      }
+    },
+    {
+      "path": "control/ttrpc",
+      "names": [
+        "gateway_metadata_transport"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "handler_adapter",
+      "effect_family": "network",
+      "effect_operation": {
+        "name": "gateway_control_rpc",
+        "mechanisms": [
+          "network",
+          "codec"
+        ],
+        "controls": [
+          "cancellation",
+          "backpressure",
+          "lifecycle",
+          "shutdown"
+        ]
+      }
+    },
+    {
+      "path": "controlplane",
+      "names": [
+        "gateway_instance_management"
+      ],
+      "role": "use_flow",
+      "axis": "gateway_management"
+    },
+    {
+      "path": "controlplane/httpapi",
+      "names": [
+        "gateway_management_http_entry"
+      ],
+      "role": "front_door",
+      "role_stratum": "entry",
+      "entry_type": [
+        "server"
+      ],
+      "route_axes": [
+        "gateway_management"
+      ]
+    },
+    {
+      "path": "vfs",
+      "names": [
+        "independent_vfs_access"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "handler_adapter",
+      "effect_family": "storage",
+      "effect_operation": {
+        "name": "cached_data_plane_filesystem",
+        "mechanisms": [
+          "network",
+          "file"
+        ],
+        "controls": [
+          "cancellation",
+          "backpressure",
+          "lifecycle",
+          "shutdown",
+          "drain"
+        ]
+      }
+    },
+    {
+      "path": "cmd/storage-vfs",
+      "names": [
+        "independent_vfs_process_assembly"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "entry_type": [
+        "direct"
+      ],
+      "subsystem": "storage_materializer_process"
+    },
+    {
+      "path": "plugins/transfer/reapi",
+      "names": [
+        "reapi_encoded_session"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "application_support",
+      "effect_family": "network",
+      "effect_operation": {
+        "name": "reapi_encoded_transfer",
+        "mechanisms": [
+          "codec"
+        ],
+        "controls": [
+          "backpressure",
+          "cancellation",
+          "lifecycle",
+          "drain"
+        ]
+      }
+    },
+    {
+      "path": "cmd/plugin-reapi",
+      "names": [
+        "reapi_native_plugin_assembly"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "subsystem": "reapi_native_plugin",
+      "entry_type": [
+        "direct"
+      ]
+    },
+    {
+      "path": "vfs/runtime",
+      "names": [
+        "independent_vfs_assembly"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "subsystem": "storage_gateway_materializer",
+      "entry_type": [
+        "direct"
+      ]
+    },
+    {
+      "path": "vfs/httpapi",
+      "names": [
+        "independent_vfs_dav_entry"
+      ],
+      "role": "front_door",
+      "role_stratum": "entry",
+      "entry_type": [
+        "server"
+      ]
+    },
+    {
+      "path": "plugins/transfer/reapi/entry",
+      "names": [
+        "reapi_schema_publication_entry"
+      ],
+      "role": "front_door",
+      "role_stratum": "entry",
+      "entry_type": [
+        "direct"
+      ]
     }
   ]
 }

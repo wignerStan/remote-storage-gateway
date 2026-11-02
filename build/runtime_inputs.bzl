@@ -1,7 +1,8 @@
 """Admit only explicit, digest-checked public runtime programs and trust roots."""
 _COMPOSITIONS = {
-    "gateway": struct(variable = "GATEWAY_IMAGE_INPUTS", names = ["remote-storage-gateway", "client-openlist.so", "client-rclone.so", "ca-certificates.crt"]),
-    "control-plane": struct(variable = "CONTROL_PLANE_IMAGE_INPUTS", names = ["openlist-control-plane", "ca-certificates.crt"]),
+    "gateway": struct(variable = "GATEWAY_IMAGE_INPUTS", names = ["storage-worker", "client-openlist.so", "client-rclone.so", "transfer-reapi.so", "ca-certificates.crt"]),
+    "control-plane": struct(variable = "CONTROL_PLANE_IMAGE_INPUTS", names = ["openlist-control-plane", "storage-worker", "storage-vfs", "client-openlist.so", "client-rclone.so", "transfer-reapi.so", "ca-certificates.crt"]),
+    "vfs": struct(variable = "VFS_IMAGE_INPUTS", names = ["storage-vfs", "ca-certificates.crt"]),
 }
 def _runtime_inputs_impl(ctx):
     composition = _COMPOSITIONS[ctx.attr.composition]
@@ -31,6 +32,6 @@ def _runtime_inputs_impl(ctx):
 runtime_inputs = repository_rule(
     implementation = _runtime_inputs_impl,
     local = True,
-    environ = ["GATEWAY_IMAGE_INPUTS", "CONTROL_PLANE_IMAGE_INPUTS"],
-    attrs = {"composition": attr.string(default = "gateway", values = ["gateway", "control-plane"])},
+    environ = ["GATEWAY_IMAGE_INPUTS", "CONTROL_PLANE_IMAGE_INPUTS", "VFS_IMAGE_INPUTS"],
+    attrs = {"composition": attr.string(default = "gateway", values = ["gateway", "control-plane", "vfs"])},
 )

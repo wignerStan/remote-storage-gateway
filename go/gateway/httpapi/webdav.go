@@ -2,7 +2,7 @@ package httpapi
 
 import (
 	"context"
-	"github.com/wignerStan/network-data-plane-worker/go/gateway"
+	"github.com/wignerStan/remote-storage-gateway/go/gateway"
 	"golang.org/x/net/webdav"
 	"os"
 )

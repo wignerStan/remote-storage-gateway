@@ -13,3 +13,4 @@ pull(
 local_inputs = use_repo_rule("//build:runtime_inputs.bzl", "runtime_inputs")
 local_inputs(name = "runtime_inputs")
 local_inputs(name = "control_plane_inputs", composition = "control-plane")
+local_inputs(name = "vfs_inputs", composition = "vfs")

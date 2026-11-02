@@ -5,7 +5,9 @@
     "storage/local-materialization",
     "plugins/storage-client",
     "code/upstream-extraction",
-    "build/images"
+    "build/images",
+    "plugins/encoded-transfer",
+    "process/worker-management"
   ],
   "types": [
     "build",

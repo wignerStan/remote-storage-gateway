@@ -20,7 +20,7 @@ import (
 	process "github.com/wignerStan/infra/go/process/exec"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
-	"github.com/wignerStan/network-data-plane-worker/go/gateway"
+	workerconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/worker"
 )
 
 type options struct{ config, secretsDir, stateDir, domain, instance, namespace, secret, deployment string }
@@ -144,7 +144,7 @@ func synchronize(ctx context.Context, o options, run runner) (bool, error) {
 		return false, err
 	}
 	defer clear(config)
-	var cfg gateway.Config
+	var cfg workerconfig.RuntimeConfig
 	if admission.StrictJSON(config, &cfg) != nil || cfg.TLS == nil || cfg.TLS.CertificateFile != "/run/gateway-secrets/tls.crt" || cfg.Worker.SecretFiles[cfg.TLS.PrivateKeySecret] != "/run/gateway-secrets/tls-key" || len(cfg.Worker.SecretFiles) > 256 {
 		return false, errors.New("gateway TLS references invalid")
 	}

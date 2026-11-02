@@ -4,9 +4,10 @@ platform(name = "linux_x86_64", constraint_values = ["@platforms//os:linux", "@p
 image_layer(
     name = "gateway_programs",
     srcs = {
-        "/opt/gateway/remote-storage-gateway": "@runtime_inputs//:remote-storage-gateway",
+        "/opt/gateway/storage-worker": "@runtime_inputs//:storage-worker",
         "/opt/gateway/client-openlist.so": "@runtime_inputs//:client-openlist.so",
         "/opt/gateway/client-rclone.so": "@runtime_inputs//:client-rclone.so",
+        "/opt/gateway/transfer-reapi.so": "@runtime_inputs//:transfer-reapi.so",
     },
     default_metadata = file_metadata(mode = "0555", uid = 1001, gid = 1001),
     include_runfiles = False,
@@ -22,7 +23,7 @@ image_manifest(
     base = "@gateway_runtime",
     layers = [":gateway_programs", ":gateway_trust"],
     user = "1001:1001",
-    entrypoint = ["/opt/gateway/remote-storage-gateway"],
+    entrypoint = ["/opt/gateway/storage-worker"],
     cmd = ["-config", "/run/gateway-secrets/gateway.json"],
     working_dir = "/",
     env = {"SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt"},
@@ -32,6 +33,11 @@ image_layer(
     name = "control_plane_program",
     srcs = {
         "/opt/control-plane/openlist": "@control_plane_inputs//:openlist-control-plane",
+        "/opt/gateway/storage-worker": "@control_plane_inputs//:storage-worker",
+        "/opt/gateway/storage-vfs": "@control_plane_inputs//:storage-vfs",
+        "/opt/gateway/client-openlist.so": "@control_plane_inputs//:client-openlist.so",
+        "/opt/gateway/client-rclone.so": "@control_plane_inputs//:client-rclone.so",
+        "/opt/gateway/transfer-reapi.so": "@control_plane_inputs//:transfer-reapi.so",
         "/opt/openlist/.keep": "@control_plane_inputs//:_working_directory",
     },
     default_metadata = file_metadata(mode = "0555", uid = 0, gid = 0),
@@ -52,6 +58,30 @@ image_manifest(
     entrypoint = ["/opt/control-plane/openlist"],
     cmd = ["server", "--data", "/opt/openlist/data", "--config", "/opt/openlist/data/config.json"],
     working_dir = "/opt/openlist",
+    env = {"SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt"},
+    labels = {"org.opencontainers.image.source": "https://github.com/wignerStan/remote-storage-gateway"},
+)
+
+image_layer(
+    name = "vfs_program",
+    srcs = {"/opt/gateway/storage-vfs": "@vfs_inputs//:storage-vfs"},
+    default_metadata = file_metadata(mode = "0555", uid = 1001, gid = 1001),
+    include_runfiles = False,
+)
+image_layer(
+    name = "vfs_trust",
+    srcs = {"/etc/ssl/certs/ca-certificates.crt": "@vfs_inputs//:ca-certificates.crt"},
+    default_metadata = file_metadata(mode = "0644", uid = 0, gid = 0),
+    include_runfiles = False,
+)
+image_manifest(
+    name = "vfs_image",
+    base = "@gateway_runtime",
+    layers = [":vfs_program", ":vfs_trust"],
+    user = "1001:1001",
+    entrypoint = ["/opt/gateway/storage-vfs"],
+    cmd = ["--config", "/run/gateway-secrets/vfs.json"],
+    working_dir = "/",
     env = {"SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt"},
     labels = {"org.opencontainers.image.source": "https://github.com/wignerStan/remote-storage-gateway"},
 )

@@ -8,7 +8,7 @@ control-plane code is not on the payload path.
 Build with the workspace described in the repository README:
 
 ```sh
-make INFRA_ROOT=/path/to/reviewed/infra BUILD_DIR=/tmp/trade-remote-gateway-build plugin gateway rclone
+make INFRA_ROOT=/path/to/reviewed/infra BUILD_DIR=/tmp/trade-remote-gateway-build plugin worker vfs rclone transfer
 ```
 
 The ELF SHA256 approves executable bytes; the descriptor SHA256 approves exact
@@ -53,7 +53,8 @@ The private JSON configuration embeds the Worker-owned bootstrap directly:
 
 Secret files must be regular, owner-only files (0400/0600), at most64KiB.
 Provider instances can resolve only the credential references selected in the
-operator's initial client assignments. Ingress authentication and TLS-key
+operator's initial client assignments or explicit `client_secret_refs` preapproval.
+Reserved ingress/TLS references and their path/inode aliases are rejected. Ingress authentication and TLS-key
 references stay outside that resolver and cannot be granted by desired state.
 Ingress passwords need at least16bytes. The initialized deployment terminates
 TLS directly in the data-plane L7 server. Configurations and
@@ -142,7 +143,7 @@ slots at64; exhausted capacity fails closed and requires a drained process
 replacement. This is not unlimited in-process Go code unloading.
 
 The native OCI recipes use rules_img and Buildbarn, with local fallback disabled.
-Reviewed binary/DSO/frontend/CA inputs stay outside the source tree. Both images
+Reviewed binary/DSO/frontend/CA inputs stay outside the source tree. All three images
 include their programs and trust bundle, run as1001:1001 and export complete OCI
 archives. See the monorepo candidate receipt under `docs/validation/` and `build/README.md`.
 The supplied deployments use verified image digests, private Secret volumes and
@@ -159,25 +160,50 @@ The control-plane binary embeds the pinned frontend built from source. Its
 deployment must omit `OPENLIST_DIST_DIR`, and an existing persisted config's
 `dist_dir` must be empty before selecting the embedded-UI candidate. The supplied
 YAML is a deployment template; the candidate image receipt is not a rollout.
-Keep the existing PVC and administrator identity.
+Keep the existing PVC and administrator identity. The managed template has a
+separate Deployment/Service identity and requires an explicit PVC selection; it
+does not silently replace existing HTTP/S3 endpoints. Reusing a database requires
+retiring its previous writer and completing endpoint migration. This candidate
+does not implement a legacy-compatible S3 frontend.
 
-For `client.rclone`, omit `materialization` to stream directly from the remote
-without a local cache. To enable the optional read cache, mount writable
-regenerable storage and set its public configuration, for example:
+`client.rclone` streams remotely. Its former `materialization` option is rejected.
+Materialization now runs only in the independent `storage-vfs` process.
 
-```json
-{
-  "materialization": {
-    "directory": "/var/cache/storage-gateway",
-    "max_bytes": 1073741824,
-    "max_age_seconds": 3600
-  }
-}
-```
+The Control Plane loads `OPENLIST_GATEWAY_PROCESSES_FILE`. Its `workers` list
+contains executable paths and passive Worker process configuration; optional
+`vfs` entries contain a separate executable and VFS process configuration.
+`runtime_directory` can create a private child of an existing runtime volume.
+The supplied managed deployment uses `/run/gateway/control`.
 
-The directory must be writable by UID1001; the supplied read-only-root deployment
-does not provision this optional volume. Each generation creates a private
-subdirectory, and retirement removes it after owned work settles. `max_bytes`
-is an eviction target, not a hard disk limit; a deployment volume can enforce a
-separate capacity boundary. Writes still commit directly to the remote. The
-cache is not a backup and does not implement hot/cold placement.
+A VFS entry names `worker_instance_id` and `worker_control_socket`; its
+`data_endpoint` selects `/remote-dav/<mount>/`. The manager derives the real
+origin from the ready Worker's typed Info response, so a Worker can bind port0.
+Standalone VFS config requires that complete observed Data Plane URL. VFS rejects
+provider URLs, foreign worker identities and recursive cache paths.
+
+VFS has separate `local_username` / `local_password_file` and outbound
+`data_username` / `data_password_file`. Its local listener is loopback-only.
+`directory`, `max_bytes` and `max_age_seconds` govern the regenerable cache.
+The byte target controls eviction; the deployment volume separately bounds disk
+capacity. This remains distinct from backup, retention and hot/cold placement.
+
+An optional `activate_client` contains an exact Worker-owned Selection. After VFS
+is ready the manager compares against the observed generation and publishes that
+selection. Its mount must be read-only and bind a distinct `remote_client`;
+activation of writable or recursive assignments fails closed. Public cache reads
+traverse Worker `/dav`; remote cache misses traverse its `/remote-dav` route.
+The source-built process test verifies cache hits without extra origin reads and
+both actual child reaps. It does not claim write-through cache support.
+
+`/api/admin/control/instances` and its manifest/descriptor/observed/client routes
+manage local children over ttrpc. Legacy configured remote management targets
+remain separate from these local instances. Entries generate schema through the
+existing schema effect tool; no server or provider owns another copy of it.
+
+For encoded transfer, `encoded.artifact` selects the independently installed
+`transfer-reapi.so`. The operator supplies a finite logical upstream inventory,
+source/target IDs and metadata allowlist. The Control Plane grants method and
+budget decisions; Worker resolves an approved upstream locally. TLS and ingress
+authentication apply to the exposed gRPC listener. Official REAPI and ByteStream
+method/cardinality descriptors belong to the concrete codec plugin, while Core
+owns frame leases, native admission and mechanical carrier operations.

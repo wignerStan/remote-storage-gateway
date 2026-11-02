@@ -3,7 +3,7 @@ package main
 
 import (
 	"github.com/wignerStan/network-data-plane-worker/go/nativeclient/provider"
-	"github.com/wignerStan/network-data-plane-worker/go/plugins/rclone"
+	"github.com/wignerStan/remote-storage-gateway/go/plugins/client/rclone/entry"
 )
 
 var buildDigest string

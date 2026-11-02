@@ -4,12 +4,13 @@ product_root=$1
 infra_root=$2
 build_root=$3
 mise=$4
+data_plane_root=$5
 case "$build_root" in /tmp/trade-*|/var/tmp/trade-*) ;; *) echo 'Build directory must be /tmp/trade-* or /var/tmp/trade-*' >&2; exit 1 ;; esac
 workspace_dir="$build_root/bootstrap"
 mkdir -p "$workspace_dir"
 # Only bootstrap the build tool. The Go source tool derives the complete actual
 # module inventory and writes the final build workspace independently.
-set -- "$product_root/go" "$infra_root/go"
+set -- "$product_root/go" "$infra_root/go" "$data_plane_root/go"
 for relative in runtime/nativeplugin runtime/pluginlifecycle; do
     if test -f "$infra_root/go/$relative/go.mod"; then
         set -- "$@" "$infra_root/go/$relative"
@@ -27,3 +28,8 @@ for relative in runtime/nativeplugin runtime/pluginlifecycle; do
             "-replace=github.com/wignerStan/infra/go/$relative@v0.0.0=$infra_root/go/$relative" "$workspace_dir/go.work"
     fi
 done
+
+# Explicit development source selection; read version from the package owner.
+data_plane_version=$(cd "$product_root/go" && GOWORK=off "$mise" exec go@1.27.3 -- go mod edit -json | jq -er '.Require[] | select(.Path == "github.com/wignerStan/network-data-plane-worker/go") | .Version')
+GOWORK=off "$mise" exec go@1.27.3 -- go work edit \
+    "-replace=github.com/wignerStan/network-data-plane-worker/go@$data_plane_version=$data_plane_root/go" "$workspace_dir/go.work"
