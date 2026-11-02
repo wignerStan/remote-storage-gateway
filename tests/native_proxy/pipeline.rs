@@ -1,7 +1,7 @@
 //! Installed hooks run through the actual Pingora carrier, including lazy bodies.
 use super::*;
+use network_data_plane_worker::proxy::{ProxyContract, RequestFacts};
 use pingora_http::{RequestHeader, ResponseHeader};
-use pingora_worker::proxy::{ProxyContract, RequestFacts};
 use proxy_pingora::worker::surface::{Callbacks, DialDecision, PoolDecision, PoolPhase};
 use std::sync::Mutex;
 use stream_transfer::chunk::ChunkTransform;

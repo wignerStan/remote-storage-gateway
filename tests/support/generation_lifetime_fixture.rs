@@ -95,7 +95,7 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
     assert!(
         Command::new("cc")
             .args(["-shared", "-fPIC", "-std=c11", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
             .arg(input)
             .arg("-o")
             .arg(&path)

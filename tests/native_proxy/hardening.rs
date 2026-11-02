@@ -10,7 +10,7 @@ fn artifact(dir: &Path, kind: &str, payload: &str, deny: bool) -> std::path::Pat
     assert!(
         Command::new("cc")
             .args(["-shared", "-fPIC", "-std=c11", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
             .arg("-DTEST_PLUGIN_KIND=INFRA_PLUGIN_OBJECT")
             .arg(format!("-DTEST_RESPONSE_REPLY={}", u8::from(deny)))
             .arg(format!(
@@ -71,7 +71,7 @@ async fn complete_success_and_errors_require_explicit_response_approval() {
                 socket.write_all(&payload.as_bytes()[5..]).await.unwrap();
             }).await;
             let dir=tempfile::tempdir().unwrap(); let artifact=artifact(dir.path(),kind,payload,deny);
-            let proxy=pingora_worker::assembly::assemble(serde_json::from_value(config(origin.address,&artifact,grant)).unwrap()).await.unwrap();
+            let proxy=network_data_plane_worker::assembly::assemble(serde_json::from_value(config(origin.address,&artifact,grant)).unwrap()).await.unwrap();
             let worker=serve_engine(proxy.clone()).await; let mut client=TcpStream::connect(worker.address).await.unwrap();
             post(&mut client,2).await; client.write_all(b"{}").await.unwrap();
             let mut response=Vec::new(); let _=client.read_to_end(&mut response).await;
@@ -95,9 +95,10 @@ async fn inspection_assembly_deadline_expires_while_client_is_idle() {
         let artifact = artifact(dir.path(), "chat_completion.response", "{}", false);
         let mut cfg = config(origin.address, &artifact, false);
         cfg["inspection"] = json!({"message_timeout_ms":80});
-        let proxy = pingora_worker::assembly::assemble(serde_json::from_value(cfg).unwrap())
-            .await
-            .unwrap();
+        let proxy =
+            network_data_plane_worker::assembly::assemble(serde_json::from_value(cfg).unwrap())
+                .await
+                .unwrap();
         let worker = serve_engine(proxy.clone()).await;
         let mut client = TcpStream::connect(worker.address).await.unwrap();
         post(&mut client, 100).await;
@@ -127,9 +128,10 @@ async fn global_request_budget_rejects_another_waiting_body() {
         let artifact = artifact(dir.path(), "chat_completion.response", "{}", false);
         let mut cfg = config(origin.address, &artifact, false);
         cfg["inspection"] = json!({"max_requests":1});
-        let proxy = pingora_worker::assembly::assemble(serde_json::from_value(cfg).unwrap())
-            .await
-            .unwrap();
+        let proxy =
+            network_data_plane_worker::assembly::assemble(serde_json::from_value(cfg).unwrap())
+                .await
+                .unwrap();
         let worker = serve_engine(proxy.clone()).await;
         let mut first = TcpStream::connect(worker.address).await.unwrap();
         post(&mut first, 100).await;
@@ -165,7 +167,7 @@ async fn idle_websockets_release_buffers_but_partial_messages_reserve_them() {
         let artifact = artifact(dir.path(), "response.text", "unused", false);
         let cfg = json!({"upstream":format!("http://{}",origin.address),"inspection":{"max_buffered_bytes":8*1024*1024+8*1024*1024+512*1024},
             "callbacks":[{"binding":"direct", "path":artifact,"package":"worker.metadata.test","message_codec":"websocket.v1"}]});
-        let proxy = pingora_worker::assembly::assemble(serde_json::from_value(cfg).unwrap()).await.unwrap();
+        let proxy = network_data_plane_worker::assembly::assemble(serde_json::from_value(cfg).unwrap()).await.unwrap();
         let worker = serve_engine(proxy.clone()).await;
         async fn upgrade(address: SocketAddr) -> (TcpStream, Vec<u8>) {
             let mut client = TcpStream::connect(address).await.unwrap();
@@ -213,7 +215,7 @@ async fn reply_capable_custom_codec_cannot_omit_its_upstream_frame_guard() {
         let dir = tempfile::tempdir().unwrap();
         let library = artifact(dir.path(), "response.text", "unused", false);
         let cfg = json!({"upstream":format!("http://{}",origin.address),"callbacks":[{"binding":"direct", "path":library,"package":"worker.metadata.test","message_codec":"test.reply","message_responses":true}]});
-        let proxy = pingora_worker::assembly::assemble_with_codecs(serde_json::from_value(cfg).unwrap(), vec![Arc::new(MissingGuard)]).await.unwrap();
+        let proxy = network_data_plane_worker::assembly::assemble_with_codecs(serde_json::from_value(cfg).unwrap(), vec![Arc::new(MissingGuard)]).await.unwrap();
         let worker = serve_engine(proxy.clone()).await;
         let mut client = TcpStream::connect(worker.address).await.unwrap();
         client.write_all(b"GET /socket HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();

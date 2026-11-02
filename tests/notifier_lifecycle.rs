@@ -1,3 +1,4 @@
+#![cfg(feature = "l7")]
 //! Real HTTP sessions use the managed callback sequence and native pull streams.
 //! Foreign ABI bodies are deliberately absent: only native leases own these streams.
 use bytes::{Bytes, BytesMut};

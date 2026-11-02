@@ -37,7 +37,7 @@ async fn proxy_with_fault(
         "timeout_ms":1000,"shutdown_timeout_ms":2000,
         "config":{"version":1,"decision":"forward","upstream":"connect","path":"/backend-api/codex/responses"}
     })).collect::<Vec<_>>();
-    pingora_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{origin}"),"io_timeout_ms":io_timeout_ms,"callbacks":callbacks})).unwrap()).await.unwrap()
+    network_data_plane_worker::assembly::assemble(serde_json::from_value(json!({"upstream":format!("http://{origin}"),"io_timeout_ms":io_timeout_ms,"callbacks":callbacks})).unwrap()).await.unwrap()
 }
 
 async fn post(address: SocketAddr) -> TcpStream {

@@ -1,3 +1,4 @@
+#![cfg(feature = "l7")]
 //! Real executable upgrades use Pingora's native listener FD transfer on Linux.
 #![cfg(target_os = "linux")]
 
@@ -32,7 +33,7 @@ impl Process {
     fn spawn(directory: &Path, name: &str, config: &Path, upgrade: bool) -> Self {
         let stdout = directory.join(format!("{name}.stdout"));
         let stderr = directory.join(format!("{name}.stderr"));
-        let mut command = Command::new(env!("CARGO_BIN_EXE_pingora-worker"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_network-data-plane-worker"));
         command.arg("--config").arg(config);
         if upgrade {
             command.arg("--upgrade");
@@ -511,7 +512,7 @@ impl NativeCall {
         let mut command = Command::new("cc");
         command
             .args(["-shared", "-fPIC", "-std=c11", "-Wall", "-Wextra", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
             .arg(format!("-DTEST_MARKERS=\"{}\"", markers.display()))
             .arg(format!("-DTEST_RELEASE=\"{}\"", release.display()));
         if fail_init {

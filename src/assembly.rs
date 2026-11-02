@@ -143,7 +143,7 @@ pub async fn assemble(config: Config) -> Result<NativeProxy, String> {
 }
 
 fn default_codecs() -> Vec<Arc<dyn proxy_pingora::http_ingress::message_codec::CodecPlugin>> {
-    let mut codecs = llm_protocols::codec::builtins();
+    let mut codecs = llm_message_codec::builtins();
     codecs.push(Arc::new(
         proxy_pingora::http_ingress::message_codec::WebSocketCodec,
     ));

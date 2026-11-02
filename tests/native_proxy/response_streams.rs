@@ -17,7 +17,7 @@ fn artifact(
     assert!(
         Command::new("cc")
             .args(["-shared", "-fPIC", "-std=c11", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
             .arg("-DTEST_PLUGIN_KIND=INFRA_PLUGIN_OBJECT")
             .arg(format!("-DTEST_RESPONSE_REPLY={}", u8::from(deny)))
             .arg(format!(
@@ -148,7 +148,7 @@ async fn sse_delta_bypasses_notifiers_while_complete_terminals_and_errors_requir
                 }).await;
                 let dir=tempfile::tempdir().unwrap();
                 let library=artifact(dir.path(),codec,request_kind,kind,payload,deny);
-                let proxy=pingora_worker::assembly::assemble(serde_json::from_value(config(origin.address,&library,codec,grant)).unwrap()).await.unwrap();
+                let proxy=network_data_plane_worker::assembly::assemble(serde_json::from_value(config(origin.address,&library,codec,grant)).unwrap()).await.unwrap();
                 let worker=serve_engine(proxy.clone()).await;
                 let mut client=TcpStream::connect(worker.address).await.unwrap();
                 client.write_all(format!("POST {path} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await.unwrap();
@@ -219,7 +219,7 @@ async fn upstream_websocket_messages_gate_independently_and_client_wire_stays_ma
                     }
                 }).await;
                 let dir=tempfile::tempdir().unwrap();let library=artifact(dir.path(),"openai.responses.v1","response.create",kind,payload,deny);
-                let proxy=pingora_worker::assembly::assemble(serde_json::from_value(config(origin.address,&library,"openai.responses.v1",grant)).unwrap()).await.unwrap();
+                let proxy=network_data_plane_worker::assembly::assemble(serde_json::from_value(config(origin.address,&library,"openai.responses.v1",grant)).unwrap()).await.unwrap();
                 let worker=serve_engine(proxy.clone()).await;let mut client=TcpStream::connect(worker.address).await.unwrap();
                 client.write_all(b"GET /v1/responses HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();
                 assert!(head(&mut client).await.starts_with(b"HTTP/1.1 101"));client.write_all(&client_frame).await.unwrap();

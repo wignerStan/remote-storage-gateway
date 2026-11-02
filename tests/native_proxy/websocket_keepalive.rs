@@ -1,6 +1,6 @@
 //! Real native duplex loop, including idle CONNECT transport and split wire frames.
 use super::*;
-use pingora_worker::keepalive::WebSocketKeepalive;
+use network_data_plane_worker::keepalive::WebSocketKeepalive;
 const REQUEST: &[u8] = b"GET /socket HTTP/1.1\r\nHost: local\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
 const RESPONSE: &[u8] = b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
 fn config(origin: SocketAddr, upstream: bool, downstream: bool) -> ProxyConfig {

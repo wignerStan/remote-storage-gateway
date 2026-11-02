@@ -1,3 +1,4 @@
+#![cfg(feature = "l7")]
 //! Real carrier completion reaches the independently configured file sink.
 use diagnostic_output::runtime::{FileLogConfig, LoggingConfig, build_logging};
 use pingora_core::{protocols::http::ServerSession, server::ShutdownWatch};

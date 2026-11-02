@@ -57,7 +57,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "admission-gate"
-version = "0.3.4"
+version = "0.4.0"
 
 [[package]]
 name = "ahash"
@@ -122,6 +122,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "annotate-snippets"
+version = "0.12.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a5b0a5ab8561c603f16c3b78c24a386b1f70e7fc1b1b1e8c15738828e4a176"
+dependencies = [
+ "anstyle",
+ "memchr",
+ "unicode-width",
 ]
 
 [[package]]
@@ -194,6 +205,12 @@ checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
 dependencies = [
  "rustversion",
 ]
+
+[[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
 name = "arrayvec"
@@ -696,9 +713,9 @@ dependencies = [
  "figment",
  "file-access",
  "serde",
+ "serde-saphyr",
  "serde_ignored",
  "serde_json",
- "serde_yaml_ng",
  "sha2",
  "thiserror 2.0.20",
  "toml",
@@ -756,6 +773,12 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "core_detect"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 
 [[package]]
 name = "cpp_demangle"
@@ -1112,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "diagnostic-output"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "admission-gate",
  "serde_json",
@@ -1178,6 +1201,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
+name = "encoding_rs"
+version = "0.8.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89253175e704ab869b04f9db224d38630e0211a53841a79181deae0889e169f5"
+dependencies = [
+ "cfg-if",
+ "core_detect",
+ "multiversion_no_op",
+ "rustversion",
+ "scopeguard",
+ "simdutf8",
+]
+
+[[package]]
+name = "encoding_rs_io"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fba3fe847045ecff794b9c138293a80db914678c453ad63fbf0c6a9eb6e00b22"
+dependencies = [
+ "encoding_rs",
+]
+
+[[package]]
 name = "env_home"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1221,9 +1267,6 @@ checksum = "8cb01cd46b0cf372153850f4c6c272d9cbea2da513e07538405148f95bd789f3"
 dependencies = [
  "atomic",
  "serde",
- "serde_json",
- "serde_yaml",
- "toml",
  "uncased",
  "version_check",
 ]
@@ -1234,6 +1277,7 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
+ "libc",
  "tempfile",
  "thiserror 2.0.20",
 ]
@@ -1479,6 +1523,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "granit-parser"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da55feca5d1625466bae068f9fd4b87892caeae70c3fe671ddb0f50d41aebf37"
+dependencies = [
+ "arraydeque",
+ "smallvec",
+]
+
+[[package]]
 name = "grpc-channel"
 version = "0.1.0"
 dependencies = [
@@ -1623,26 +1677,6 @@ dependencies = [
  "http",
  "stream-transfer",
  "tokio",
-]
-
-[[package]]
-name = "http-worker-config"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "http-worker-config-grpc"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "http-worker-config",
- "prost",
- "tokio-stream",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
 ]
 
 [[package]]
@@ -1995,15 +2029,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
-name = "llm-protocols"
+name = "llm-message-codec"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "llm-protocols",
  "mime",
  "pingora-error",
  "pingora-http",
- "proxy-pingora",
  "proxy-protocols",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "llm-protocols"
+version = "0.1.0"
+dependencies = [
  "serde",
  "serde_json",
 ]
@@ -2133,6 +2175,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
+name = "multiversion_no_op"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
+
+[[package]]
+name = "native-plugin-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "neli"
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2174,8 +2226,6 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "http-worker-config",
- "http-worker-config-grpc",
  "network-sockets",
  "prost",
  "serde",
@@ -2185,6 +2235,53 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "network-data-plane-worker"
+version = "0.1.0"
+dependencies = [
+ "action-execution",
+ "action-router",
+ "admission-gate",
+ "async-trait",
+ "bytes",
+ "configuration",
+ "diagnostic-output",
+ "event-stamp",
+ "futures-util",
+ "h2",
+ "http",
+ "http-bridge",
+ "hyper-util",
+ "llm-message-codec",
+ "network-actions",
+ "network-local-control",
+ "network-sockets",
+ "pingora-core",
+ "pingora-error",
+ "pingora-http",
+ "pingora-proxy",
+ "plugin-abi",
+ "plugin-lifecycle",
+ "plugin-loading",
+ "plugin-registry",
+ "proxy-pingora",
+ "proxy-protocols",
+ "serde",
+ "serde_json",
+ "stream-transfer",
+ "tempfile",
+ "test-support",
+ "text-processing",
+ "tokio",
+ "tonic",
+ "tower",
+ "tracing",
+ "url",
+ "wasm-sandbox",
+ "wat",
+ "zstd",
 ]
 
 [[package]]
@@ -2205,6 +2302,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "file-access",
+ "rustix",
  "socket2",
  "tokio",
 ]
@@ -2249,6 +2347,12 @@ name = "no_debug"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f23a60c850e1144fc1dd9435152e0cfdc7dd18725350b4243584118013a52a4"
+
+[[package]]
+name = "nohash-hasher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 
 [[package]]
 name = "nom"
@@ -2748,53 +2852,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pingora-worker"
-version = "0.1.0"
-dependencies = [
- "action-execution",
- "action-router",
- "admission-gate",
- "async-trait",
- "bytes",
- "configuration",
- "diagnostic-output",
- "event-stamp",
- "futures-util",
- "h2",
- "http",
- "http-bridge",
- "hyper-util",
- "llm-protocols",
- "network-actions",
- "network-local-control",
- "network-sockets",
- "pingora-core",
- "pingora-error",
- "pingora-http",
- "pingora-proxy",
- "plugin-abi",
- "plugin-lifecycle",
- "plugin-loading",
- "plugin-registry",
- "proxy-pingora",
- "proxy-protocols",
- "serde",
- "serde_json",
- "stream-transfer",
- "tempfile",
- "test-support",
- "text-processing",
- "tokio",
- "tonic",
- "tower",
- "tracing",
- "url",
- "wasm-sandbox",
- "wat",
- "zstd",
-]
-
-[[package]]
 name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2807,6 +2864,7 @@ dependencies = [
  "c-abi",
  "cc",
  "libloading",
+ "native-plugin-protocol",
 ]
 
 [[package]]
@@ -2824,10 +2882,10 @@ name = "plugin-loading"
 version = "0.1.0"
 dependencies = [
  "action-execution",
- "action-router",
  "bytes",
  "file-access",
  "libc",
+ "native-plugin-protocol",
  "plugin-abi",
  "plugin-schema",
  "serde",
@@ -3034,7 +3092,10 @@ dependencies = [
  "bytes",
  "compression",
  "futures",
+ "http",
  "pin-project-lite",
+ "pingora-error",
+ "pingora-http",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -3470,6 +3531,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-saphyr"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a253edfdea34032da21af84e16fcc94f4c7a6ba237f9f3bc2dbf43cea8535c44"
+dependencies = [
+ "annotate-snippets",
+ "base64",
+ "encoding_rs_io",
+ "granit-parser",
+ "nohash-hasher",
+ "num-traits",
+ "serde_core",
+ "smallvec",
+ "zmij",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3558,19 +3636,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml_ng"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
-dependencies = [
- "indexmap 2.14.2",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-
-[[package]]
 name = "sfv"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3620,11 +3685,13 @@ dependencies = [
 
 [[package]]
 name = "shell-runner"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "command-group",
+ "libc",
  "os_pipe",
  "regex",
+ "rustix",
  "serde",
  "shlex 1.3.0",
  "thiserror 2.0.20",
@@ -3654,6 +3721,12 @@ dependencies = [
  "errno",
  "libc",
 ]
+
+[[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "slab"
@@ -3853,7 +3926,7 @@ dependencies = [
 
 [[package]]
 name = "text-processing"
-version = "0.3.4"
+version = "0.4.3"
 dependencies = [
  "serde",
  "serde_json",

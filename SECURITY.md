@@ -1,7 +1,7 @@
 # Worker security and deployment policy
 
 The worker installs explicitly selected trusted native callbacks or optional
-untrusted Wasm Objects. The [common plugin security model](../infra/rust/crates/plugins/SECURITY.md)
+untrusted Wasm Objects. The [common plugin security model](../../infra/rust/crates/plugins/SECURITY.md)
 defines artifact trust, memory/resource limits, native authority, scoped dependency
 dispatch and the unimplemented future guest Tool bridge. This document defines
 what the worker actually exposes and what its operator must protect.

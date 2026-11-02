@@ -1,9 +1,10 @@
+#![cfg(feature = "l7")]
 //! Actual native Pingora engine: protocol selection, reuse and lazy byte flow.
+use network_data_plane_worker::proxy::{NativeProxy, ProxyConfig};
 use pingora_core::{
     apps::HttpServerApp, protocols::http::ServerSession, server::configuration::ServerConf,
 };
 use pingora_proxy::HttpProxy;
-use pingora_worker::proxy::{NativeProxy, ProxyConfig};
 use proxy_pingora::worker::WorkerControl;
 use std::{
     future::Future,
@@ -109,7 +110,11 @@ async fn worker(config: ProxyConfig) -> Listening {
 async fn worker_with_callbacks(
     config: ProxyConfig,
     callbacks: Vec<
-        Arc<dyn proxy_pingora::worker::surface::Callbacks<pingora_worker::proxy::ProxyContract>>,
+        Arc<
+            dyn proxy_pingora::worker::surface::Callbacks<
+                    network_data_plane_worker::proxy::ProxyContract,
+                >,
+        >,
     >,
 ) -> Listening {
     worker_with_control(config, Arc::new(WorkerControl::default()), callbacks).await
@@ -118,7 +123,11 @@ async fn worker_with_control(
     config: ProxyConfig,
     control: Arc<WorkerControl>,
     callbacks: Vec<
-        Arc<dyn proxy_pingora::worker::surface::Callbacks<pingora_worker::proxy::ProxyContract>>,
+        Arc<
+            dyn proxy_pingora::worker::surface::Callbacks<
+                    network_data_plane_worker::proxy::ProxyContract,
+                >,
+        >,
     >,
 ) -> Listening {
     let proxy = NativeProxy::new(config, control, callbacks).unwrap();
@@ -525,7 +534,7 @@ async fn native_operation_drop_cancels_and_duplicate_logging_finishes_once() {
 #[tokio::test]
 async fn native_operation_completion_failure_preserves_delivered_status() {
     use diagnostic_output::operations::Operations;
-    use pingora_worker::proxy::{ProxyContract, RequestFacts};
+    use network_data_plane_worker::proxy::{ProxyContract, RequestFacts};
     use proxy_pingora::worker::surface::Callbacks;
     struct FailCompletion;
     #[async_trait::async_trait]
@@ -569,11 +578,11 @@ async fn native_operation_completion_failure_preserves_delivered_status() {
     assert_eq!(value.status_classes[2], 1);
 }
 #[cfg(unix)]
-#[path = "native_proxy/session_exit.rs"]
-mod session_exit;
-#[cfg(unix)]
 #[path = "native_proxy/generation_lifetime.rs"]
 mod generation_lifetime;
+#[cfg(unix)]
+#[path = "native_proxy/session_exit.rs"]
+mod session_exit;
 
 #[path = "native_proxy/stress.rs"]
 mod stress;

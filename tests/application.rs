@@ -1,3 +1,4 @@
+#![cfg(feature = "l7")]
 //! Real process assembly, native callback loading, logging and signal shutdown.
 #![cfg(unix)]
 use network_actions::proto::{CallRequest, actions_client::ActionsClient};
@@ -25,7 +26,7 @@ impl Process {
     fn spawn(directory: &Path, args: &[&str]) -> Self {
         let stdout = directory.join("stdout.log");
         let stderr = directory.join("stderr.log");
-        let child = Command::new(env!("CARGO_BIN_EXE_pingora-worker"))
+        let child = Command::new(env!("CARGO_BIN_EXE_network-data-plane-worker"))
             .args(args)
             .stdout(Stdio::from(fs::File::create(&stdout).unwrap()))
             .stderr(Stdio::from(fs::File::create(&stderr).unwrap()))
@@ -136,7 +137,7 @@ fn callback_artifact_with_identity(directory: &Path, kind: &str, language: &str)
     assert!(
         Command::new("cc")
             .args(["-shared", "-fPIC", "-std=c11", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
             .arg(format!(
                 "-DTEST_PLUGIN_KIND={}",
                 if kind == "object" {

@@ -1,11 +1,11 @@
 //! Opt-in real ProxyHttp upgraded upload hooks inside the existing native engine.
 use super::*;
 use bytes::Bytes;
+use network_data_plane_worker::proxy::{ProxyContract, RequestFacts};
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::{Error, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
-use pingora_worker::proxy::{ProxyContract, RequestFacts};
 use proxy_pingora::worker::surface::{CallbackHook, Callbacks};
 use std::sync::{Mutex, atomic::AtomicBool};
 

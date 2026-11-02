@@ -14,7 +14,7 @@ fn artifact(directory: &Path, action: &str) -> std::path::PathBuf {
     assert!(
         Command::new("cc")
             .args(["-shared", "-fPIC", "-std=c11", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
             .arg("-DTEST_PLUGIN_KIND=INFRA_PLUGIN_OBJECT")
             .arg(format!("-DTEST_WEBSOCKET_REPLY={action}"))
             .arg(root.join("tests/fixtures/metadata_callback.c"))
@@ -60,7 +60,9 @@ async fn assembled_object_checks_complete_messages_and_forwards_original_wire() 
                     "config":{"version":1,"decision":"continue"}}]
             }))
             .unwrap();
-            let proxy = pingora_worker::assembly::assemble(config).await.unwrap();
+            let proxy = network_data_plane_worker::assembly::assemble(config)
+                .await
+                .unwrap();
             let worker = serve_engine(proxy.clone()).await;
             let mut client = TcpStream::connect(worker.address).await.unwrap();
             let mut preread = REQUEST.to_vec();
@@ -106,7 +108,9 @@ async fn configured_codec_rejects_extensions_before_downstream_upgrade() {
                 "message_codec":"websocket.v1", "config":{"version":1,"decision":"continue"}}]
         }))
         .unwrap();
-        let proxy = pingora_worker::assembly::assemble(config).await.unwrap();
+        let proxy = network_data_plane_worker::assembly::assemble(config)
+            .await
+            .unwrap();
         let worker = serve_engine(proxy.clone()).await;
         let mut client = TcpStream::connect(worker.address).await.unwrap();
         client.write_all(REQUEST).await.unwrap();

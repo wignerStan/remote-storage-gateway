@@ -47,7 +47,7 @@ async fn axis(path: &std::path::Path, reply: Value, seen: Arc<Mutex<Vec<Value>>>
         _registration: registration,
     }
 }
-fn config(upstream: SocketAddr, endpoint: &str) -> pingora_worker::config::Config {
+fn config(upstream: SocketAddr, endpoint: &str) -> network_data_plane_worker::config::Config {
     serde_json::from_value(json!({
         "upstream":format!("http://{upstream}"),
         "axis_bindings":{"request_policy":{"endpoint":endpoint}},
@@ -99,9 +99,10 @@ async fn default_remote_axis_projects_grants_and_replaces_client_without_reinsta
             Arc::clone(&seen),
         )
         .await;
-        let proxy = pingora_worker::assembly::assemble(config(origin.address, &first.endpoint))
-            .await
-            .unwrap();
+        let proxy =
+            network_data_plane_worker::assembly::assemble(config(origin.address, &first.endpoint))
+                .await
+                .unwrap();
         let worker = serve_engine(proxy.clone()).await;
         assert!(request(worker.address).await.ends_with(b"first"));
         assert!(
@@ -157,10 +158,12 @@ async fn remote_reply_cannot_widen_header_grant_or_contract_version() {
         ] {
             let directory = tempfile::tempdir().unwrap();
             let remote = axis(&directory.path().join("axis.sock"), reply, Arc::default()).await;
-            let proxy =
-                pingora_worker::assembly::assemble(config(origin.address, &remote.endpoint))
-                    .await
-                    .unwrap();
+            let proxy = network_data_plane_worker::assembly::assemble(config(
+                origin.address,
+                &remote.endpoint,
+            ))
+            .await
+            .unwrap();
             let worker = serve_engine(proxy.clone()).await;
             assert!(!request(worker.address).await.starts_with(b"HTTP/1.1 200"));
             drop(worker);
@@ -203,19 +206,21 @@ async fn plugin_ingress_membership(shared: bool) {
         let host_endpoint = format!("unix://{}", directory.path().join("host.sock").display());
         let mut config = config(origin.address, &remote.endpoint);
         config.plugin_ingress = Some(if shared {
-            pingora_worker::config::PluginControl::Shared {
-                facility: pingora_worker::config::SharedControl::Management,
+            network_data_plane_worker::config::PluginControl::Shared {
+                facility: network_data_plane_worker::config::SharedControl::Management,
             }
         } else {
-            pingora_worker::config::PluginControl::Dedicated {
+            network_data_plane_worker::config::PluginControl::Dedicated {
                 listen: plugin_endpoint.clone(),
             }
         });
-        config.management = Some(pingora_worker::config::Management {
-            protocol: pingora_worker::config::ControlProtocol::LocalControl,
+        config.management = Some(network_data_plane_worker::config::Management {
+            protocol: network_data_plane_worker::config::ControlProtocol::LocalControl,
             listen: host_endpoint.clone(),
         });
-        let proxy = pingora_worker::assembly::assemble(config).await.unwrap();
+        let proxy = network_data_plane_worker::assembly::assemble(config)
+            .await
+            .unwrap();
         let worker = serve_engine(proxy.clone()).await;
         let connect = |endpoint: String| async move {
             network_local_control::client::RemoteBindings::connect(
@@ -382,7 +387,7 @@ async fn denied_remote_metadata_prevents_message_callback_and_upstream_dispatch(
         cfg.axis_bindings.get_mut("request_policy").unwrap().max_message_bytes = 1048576;
         cfg.callbacks[0].hooks = vec!["pre_routing".into()];
         cfg.callbacks[0].message_codec = Some("openai.chat_completions.v1".into());
-        let proxy = pingora_worker::assembly::assemble(cfg).await.unwrap();
+        let proxy = network_data_plane_worker::assembly::assemble(cfg).await.unwrap();
         let worker = serve_engine(proxy.clone()).await;
         let mut client = TcpStream::connect(worker.address).await.unwrap();
         let body = br#"{"messages":[],"model":"test"}"#;

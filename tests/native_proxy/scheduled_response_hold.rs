@@ -75,7 +75,7 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
     assert!(
         Command::new("cc")
             .args(["-shared", "-fPIC", "-std=c11", "-I"])
-            .arg(root.join("../infra/rust/crates/interop/plugin-abi/include"))
+            .arg(root.join("../../infra/rust/crates/interop/plugin-abi/include"))
             .arg(source_path)
             .arg("-o")
             .arg(&path)
@@ -87,7 +87,7 @@ static uint32_t call(uint64_t state, uint64_t handle, InfraBytes method, InfraBy
 }
 
 async fn proxy(origin: SocketAddr, dir: &Path, hold: &str, http: bool) -> NativeProxy {
-    pingora_worker::assembly::assemble(serde_json::from_value(json!({
+    network_data_plane_worker::assembly::assemble(serde_json::from_value(json!({
         "upstream":format!("http://{origin}"), "callbacks":[{
             "binding":"direct", "path":artifact(dir, hold, http), "package":"worker.sessions.test",
             "message_codec":"openai.responses.v1", "message_actions":true,

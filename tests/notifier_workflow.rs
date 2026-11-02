@@ -1,3 +1,4 @@
+#![cfg(feature = "l7")]
 //! A host-selected callback sequence, real network effect, and readable BDD evidence.
 use diagnostic_output::CredentialPolicy;
 use network_sockets::{DialRequest, DialTarget};

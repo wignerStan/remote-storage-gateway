@@ -1,8 +1,9 @@
+#![cfg(feature = "l7")]
 use action_execution::{
     Action, Binding, Context, Contract, ResponseMode, Schema, Source, StreamHandler,
 };
 use network_actions::proto;
-use pingora_worker::{
+use network_data_plane_worker::{
     assembly::control::{self as entry, ControlServer},
     composition::mount_axis,
 };
@@ -70,7 +71,7 @@ async fn host(schema: &[Resource]) -> (Composition, Arc<ControlServer>) {
         &mut composition,
         ENTRY,
         entry::Registration {
-            protocol: pingora_worker::config::ControlProtocol::Http,
+            protocol: network_data_plane_worker::config::ControlProtocol::Http,
             worker_control: Some(Arc::default()),
             logging_health: None,
             endpoint: network_sockets::LocalEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
