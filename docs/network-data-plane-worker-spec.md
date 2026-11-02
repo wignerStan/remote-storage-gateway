@@ -619,8 +619,8 @@ The default is one attempt. Retry requires explicit replayability proof:
 The Go `management` package owns the bounded HTTP SDK and fixed route
 registrations for `network-data-plane-worker/management/v1`:
 
-The `management/httpapi` adapter registers typed handlers through the existing
-Infra Huma HTTP binding, independently of Gin. Huma derives operation and component schemas from
+The `management/httpapi` boundary registers typed handlers directly with Huma's
+official `humagin` adapter, independently of Gin. Huma derives schemas from
 the boundary DTOs. `/v1/openapi.json` and `/v1/schemas` publish generated schemas;
 the actual OpenAPI operation set determines route discovery. Provider payload
 streams are outside the management DTO port. Descriptor responses use the

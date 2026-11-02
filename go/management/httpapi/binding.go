@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/danielgtaylor/huma/v2"
-	"github.com/wignerStan/infra/go/code/schema"
-	infrahttpapi "github.com/wignerStan/infra/go/network/httpapi"
+	"github.com/danielgtaylor/huma/v2/adapters/humagin"
+	"github.com/gin-gonic/gin"
+	"github.com/wignerStan/infra/go/config/codec"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	workercontract "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"github.com/wignerStan/network-data-plane-worker/go/management"
@@ -78,17 +79,21 @@ func NewHandler(o Options) (*Handler, error) {
 	if err != nil || len(b) > descriptor.MaxBytes {
 		return nil, errors.New("oversized manifest")
 	}
-	mux := http.NewServeMux()
-	config := schema.OpenAPIConfig("Network data-plane Worker management", "1")
+	engine := gin.New()
+	engine.RedirectTrailingSlash = false
+	engine.RedirectFixedPath = false
+	engine.HandleMethodNotAllowed = true
+	config := huma.DefaultConfig("Network data-plane Worker management", "1")
+	config.CreateHooks = nil
 	config.OpenAPIPath = "/v1/openapi"
 	config.SchemasPath = "/v1/schemas"
 	config.DocsPath = ""
-	api, err := infrahttpapi.NewAPI(infrahttpapi.APIConfig{Mux: mux, Config: config, MaxBodyBytes: descriptor.MaxBytes})
-	if err != nil {
-		return nil, err
-	}
+	strictJSON := huma.DefaultJSONFormat
+	strictJSON.Unmarshal = codec.DecodeJSONValue
+	config.Formats = map[string]huma.Format{"application/json": strictJSON, "json": strictJSON}
+	api := humagin.New(engine, config)
 	h.api = api
-	h.router = mux
+	h.router = engine
 	h.register()
 	return h, nil
 }
