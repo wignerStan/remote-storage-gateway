@@ -243,6 +243,9 @@
       "role": "front_door",
       "role_stratum": "assembly",
       "subsystem": "storage_gateway",
+      "route_axes": [
+        "remote_storage_access"
+      ],
       "entry_type": [
         "direct"
       ],
