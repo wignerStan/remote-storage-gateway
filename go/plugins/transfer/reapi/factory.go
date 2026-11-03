@@ -3,6 +3,7 @@
 package reapi
 
 import (
+	longrunning "cloud.google.com/go/longrunning/autogen/longrunningpb"
 	"context"
 	"errors"
 
@@ -33,6 +34,11 @@ func NewFactory(d descriptor.Descriptor) (*Factory, error) {
 	f := &Factory{record: record, methods: map[string]encoded.Shape{}}
 	f.add(remote.File_build_bazel_remote_execution_v2_remote_execution_proto)
 	f.add(bs.File_google_bytestream_bytestream_proto)
+	// REAPI execution operations can be polled through the standard Operations
+	// GetOperation RPC. Other Operations methods are optional, not implied grants.
+	operations := longrunning.File_google_longrunning_operations_proto.Services().ByName("Operations")
+	get := operations.Methods().ByName("GetOperation")
+	f.methods["/"+string(operations.FullName())+"/"+string(get.Name())] = encoded.Shape{}
 	return f, nil
 }
 func (f *Factory) add(file protoreflect.FileDescriptor) {

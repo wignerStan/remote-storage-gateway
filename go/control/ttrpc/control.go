@@ -9,7 +9,7 @@ import (
 	"net"
 	"time"
 
-	carrier "github.com/wignerStan/infra/go/network/actions/ttrpc"
+	carrier "github.com/wignerStan/infra/go/network/rpc/ttrpc"
 	clock "github.com/wignerStan/infra/go/time/clock"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
@@ -33,7 +33,7 @@ func limits() carrier.Limits {
 type WorkerClient struct{ wire *carrier.Client }
 
 func DialWorker(ctx context.Context, path string) (*WorkerClient, error) {
-	c, e := carrier.Dial(ctx, path, limits())
+	c, e := carrier.Dial(ctx, path, carrier.Protocol{Service: broker.WorkerRPCService}, limits())
 	if e != nil {
 		return nil, e
 	}
@@ -115,7 +115,7 @@ type DecisionClient struct {
 }
 
 func DialDecision(ctx context.Context, path string, metadataNames []string) (*DecisionClient, error) {
-	c, e := carrier.Dial(ctx, path, limits())
+	c, e := carrier.Dial(ctx, path, carrier.Protocol{Service: broker.DecisionRPCService}, limits())
 	if e != nil {
 		return nil, e
 	}
@@ -174,7 +174,7 @@ func NewWorkerServer(control broker.WorkerControl) (*Server, error) {
 	if control == nil {
 		return nil, broker.ErrInvalid
 	}
-	s, e := carrier.NewServer(&workerEntry{control}, limits())
+	s, e := carrier.NewServer(&workerEntry{control}, carrier.Protocol{Service: broker.WorkerRPCService}, limits())
 	if e != nil {
 		return nil, e
 	}
@@ -274,7 +274,7 @@ func NewDecisionServer(service broker.DecisionBroker, o DecisionOptions) (*Serve
 	if service == nil || o.Principal == nil {
 		return nil, broker.ErrInvalid
 	}
-	s, e := carrier.NewServer(&decisionEntry{service, o.Principal, names(o.MetadataNames)}, limits())
+	s, e := carrier.NewServer(&decisionEntry{service, o.Principal, names(o.MetadataNames)}, carrier.Protocol{Service: broker.DecisionRPCService}, limits())
 	if e != nil {
 		return nil, e
 	}
@@ -306,53 +306,6 @@ func (e *decisionEntry) Dispatch(ctx context.Context, method string, b []byte, s
 	}
 	if broker.ValidateDecision(in, out) != nil {
 		return carrier.ErrInvalid
-	}
-	return emitJSON(emit, out)
-}
-
-const vfsInfoMethod = "vfs.info"
-
-type VFSClient struct{ wire *carrier.Client }
-
-func DialVFS(ctx context.Context, path string) (*VFSClient, error) {
-	c, e := carrier.Dial(ctx, path, limits())
-	if e != nil {
-		return nil, e
-	}
-	return &VFSClient{c}, nil
-}
-func (c *VFSClient) Close(ctx context.Context) error { return c.wire.Close(ctx) }
-func (c *VFSClient) Info(ctx context.Context) (broker.InstanceInfo, error) {
-	var out broker.InstanceInfo
-	b, e := call(ctx, c.wire, vfsInfoMethod, struct{}{})
-	if e == nil {
-		e = decode(b, &out)
-	}
-	if e == nil && (out.Contract != broker.Contract || out.ID == "") {
-		e = broker.ErrInvalid
-	}
-	return out, e
-}
-func NewVFSServer(control broker.VFSControl) (*Server, error) {
-	if control == nil {
-		return nil, broker.ErrInvalid
-	}
-	s, e := carrier.NewServer(&vfsEntry{control}, limits())
-	if e != nil {
-		return nil, e
-	}
-	return &Server{s}, nil
-}
-
-type vfsEntry struct{ control broker.VFSControl }
-
-func (e *vfsEntry) Dispatch(ctx context.Context, method string, b []byte, stream bool, emit func([]byte) error) error {
-	if stream || method != vfsInfoMethod || decode(b, &struct{}{}) != nil {
-		return carrier.ErrInvalid
-	}
-	out, err := e.control.Info(ctx)
-	if err != nil {
-		return status(err)
 	}
 	return emitJSON(emit, out)
 }

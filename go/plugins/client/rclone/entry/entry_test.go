@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/wignerStan/infra/go/config/codec"
@@ -40,6 +41,9 @@ func TestEntryDerivesConcreteConfigurationSchemas(t *testing.T) {
 		{"webdav", rcloneclient.WebDAVConfiguration{WebDAVPublicConfig: rcloneclient.WebDAVPublicConfig{URL: "https://fixture.invalid/dav/"}}, "url", []string{"password"}},
 		{"webdav-streaming", rcloneclient.WebDAVConfiguration{WebDAVPublicConfig: rcloneclient.WebDAVPublicConfig{URL: "https://fixture.invalid/dav/"}}, "url", []string{"password"}},
 		{"drive", rcloneclient.DriveConfiguration{Token: "{}"}, "token", []string{"token", "client_secret"}},
+		{"archive-s3", rcloneclient.S3ArchiveConfiguration{S3Configuration: rcloneclient.S3Configuration{S3PublicConfig: rcloneclient.S3PublicConfig{Region: "fixture", Bucket: "packs"}, AccessKeyID: "fixture-access", SecretAccessKey: "fixture-secret"}, ArchivePath: "pack.zip"}, "archive_path", []string{"access_key_id", "secret_access_key", "session_token"}},
+		{"archive-webdav", rcloneclient.WebDAVArchiveConfiguration{WebDAVConfiguration: rcloneclient.WebDAVConfiguration{WebDAVPublicConfig: rcloneclient.WebDAVPublicConfig{URL: "https://fixture.invalid/dav/"}}, ArchivePath: "pack.zip"}, "archive_path", []string{"password"}},
+		{"archive-drive", rcloneclient.DriveArchiveConfiguration{DriveConfiguration: rcloneclient.DriveConfiguration{Token: "{}"}, ArchivePath: "pack.zip"}, "archive_path", []string{"token", "client_secret"}},
 	}
 	if len(value.Implementations) != len(cases) || value.PluginID != rcloneclient.PluginID || value.BuildDigest != buildDigest {
 		t.Fatalf("unexpected entry identity: %+v", value)
@@ -92,7 +96,7 @@ func TestEntryDistinguishesOrdinaryAndStreamingWebDAV(t *testing.T) {
 	value := published(t)
 	for _, implementation := range value.Implementations {
 		has := slices.Contains(implementation.Capabilities, "unknown-size-put")
-		if has != (implementation.ID != "webdav") {
+		if has != (implementation.ID != "webdav" && !strings.HasPrefix(implementation.ID, "archive-")) {
 			t.Errorf("%s unknown-size-put=%v", implementation.ID, has)
 		}
 	}

@@ -18,16 +18,17 @@ type ControlPlaneRoute struct {
 	Upstream string `json:"upstream"`
 }
 type RuntimeConfig struct {
-	LocalDataSocket  string             `json:"local_data_socket,omitempty"`
-	Encoded          *EncodedOptions    `json:"encoded,omitempty"`
-	ClientSecretRefs []string           `json:"client_secret_refs,omitempty"`
-	Listen           string             `json:"listen"`
-	Username         string             `json:"username"`
-	AuthSecret       string             `json:"auth_secret"`
-	Worker           dp.Bootstrap       `json:"worker"`
-	Mounts           []Mount            `json:"mounts"`
-	TLS              *TLSOptions        `json:"tls,omitempty"`
-	ControlPlane     *ControlPlaneRoute `json:"control_plane,omitempty"`
+	StorageIPCSocket   string             `json:"storage_ipc_socket,omitempty"`
+	StorageOfferSocket string             `json:"storage_offer_socket,omitempty"`
+	Encoded            *EncodedOptions    `json:"encoded,omitempty"`
+	ClientSecretRefs   []string           `json:"client_secret_refs,omitempty"`
+	Listen             string             `json:"listen"`
+	Username           string             `json:"username"`
+	AuthSecret         string             `json:"auth_secret"`
+	Worker             dp.Bootstrap       `json:"worker"`
+	Mounts             []Mount            `json:"mounts"`
+	TLS                *TLSOptions        `json:"tls,omitempty"`
+	ControlPlane       *ControlPlaneRoute `json:"control_plane,omitempty"`
 }
 
 // ProcessConfig adds child-control metadata to the same runtime JSON shape.

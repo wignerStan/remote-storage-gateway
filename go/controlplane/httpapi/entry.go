@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/wignerStan/infra/go/code/schema/api"
+	api "github.com/wignerStan/infra/go/network/http/openapi"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	dp "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"github.com/wignerStan/remote-storage-gateway/go/contracts/control/broker"

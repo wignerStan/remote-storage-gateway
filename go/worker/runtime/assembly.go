@@ -8,7 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/gin-gonic/gin"
-	schemaapi "github.com/wignerStan/infra/go/code/schema/api"
+	schemaapi "github.com/wignerStan/infra/go/network/http/openapi"
+	openapigin "github.com/wignerStan/infra/go/network/http/openapi/gin"
 	"github.com/wignerStan/infra/go/network/proxy/l7"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
 	"github.com/wignerStan/network-data-plane-worker/go/management/httpapi"
@@ -142,8 +143,6 @@ func assemble(ctx context.Context, c workerconfig.RuntimeConfig) (runtime *Runti
 	}
 	routes, err := schemaapi.Compose(schemaapi.Config{
 		Title: "Network data-plane Worker management", Version: "1",
-		OpenAPIPath: "/v1/openapi", SchemasPath: "/v1/schemas",
-		Guard: entry.Guard, Headers: map[string]string{"Cache-Control": "no-store"},
 	}, entry.RegisterRoutes)
 	if err != nil {
 		return nil, err
@@ -155,7 +154,7 @@ func assemble(ctx context.Context, c workerconfig.RuntimeConfig) (runtime *Runti
 	if err = engine.SetTrustedProxies(nil); err != nil {
 		return nil, err
 	}
-	if err = schemaapi.MountGin(engine, nil, routes); err != nil {
+	if err = openapigin.Mount(engine, nil, routes, openapigin.Options{OpenAPIPath: "/v1/openapi", SchemasPath: "/v1/schemas", Guard: entry.Guard, Headers: map[string]string{"Cache-Control": "no-store"}}); err != nil {
 		return nil, err
 	}
 	r.control = engine

@@ -120,7 +120,11 @@ func serveWebDAV(w http.ResponseWriter, q *http.Request, r *gateway.Runtime, pre
 			q.Body = &cancelBody{ReadCloser: q.Body, cancel: cancel}
 		}
 	}
-	dav.ServeHTTP(w, q)
+	if q.Method == http.MethodGet || q.Method == http.MethodHead {
+		w.Header().Set("Content-Type", contentType(q.URL.Path))
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+	}
+	serveDAVResponse(w, q, dav)
 	return
 }
 

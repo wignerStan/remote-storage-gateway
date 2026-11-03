@@ -50,6 +50,33 @@ type DriveConfiguration struct {
 	ClientSecret string `json:"client_secret,omitempty" writeOnly:"true"`
 }
 
+// Archive implementations bind one immutable ZIP to a read-only namespace.
+// The underlying backend credentials retain the same secret declarations.
+type S3ArchivePublicConfig struct {
+	S3PublicConfig
+	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+}
+type S3ArchiveConfiguration struct {
+	S3Configuration
+	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+}
+type WebDAVArchivePublicConfig struct {
+	WebDAVPublicConfig
+	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+}
+type WebDAVArchiveConfiguration struct {
+	WebDAVConfiguration
+	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+}
+type DriveArchivePublicConfig struct {
+	DrivePublicConfig
+	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+}
+type DriveArchiveConfiguration struct {
+	DriveConfiguration
+	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+}
+
 // Factory retains the descriptor published by the plugin entry. Configuration
 // types and provider behavior stay here; schema publication stays with entry.
 type Factory struct{ published descriptor.Descriptor }
@@ -101,17 +128,33 @@ func endpoint(value string) bool {
 	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https") && u.User == nil && u.RawQuery == "" && u.Fragment == ""
 }
 
+// Prepare decodes the operator-supplied public configuration and resolves only
+// the secrets declared by the exact plugin descriptor before backend admission.
 func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Candidate, error) {
 	if err := admission.Validate(f.Descriptor()); err != nil {
 		return nil, port.ErrInvalid
 	}
 	values := map[string]string{}
 	var root string
-	backend := input.ImplementationID
-	switch input.ImplementationID {
+	backend := strings.TrimPrefix(input.ImplementationID, "archive-")
+	archived := backend != input.ImplementationID
+	if archived && input.ImplementationID != "archive-s3" && input.ImplementationID != "archive-webdav" && input.ImplementationID != "archive-drive" {
+		return nil, port.ErrUnsupported
+	}
+	var archivePath string
+	switch backend {
 	case "s3":
 		var config S3PublicConfig
-		if admission.StrictJSON(input.Public, &config) != nil || config.Region == "" || config.Bucket == "" || strings.Contains(config.Bucket, "/") || config.Endpoint != "" && !endpoint(config.Endpoint) {
+		var decode error
+		if archived {
+			var ac S3ArchivePublicConfig
+			decode = admission.StrictJSON(input.Public, &ac)
+			config = ac.S3PublicConfig
+			archivePath = ac.ArchivePath
+		} else {
+			decode = admission.StrictJSON(input.Public, &config)
+		}
+		if decode != nil || config.Region == "" || config.Bucket == "" || strings.Contains(config.Bucket, "/") || config.Endpoint != "" && !endpoint(config.Endpoint) {
 			return nil, port.ErrInvalid
 		}
 		access, err := credential(ctx, input.Secrets, "access_key_id", true)
@@ -134,7 +177,16 @@ func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Ca
 	case "webdav", "webdav-streaming":
 		backend = "webdav"
 		var config WebDAVPublicConfig
-		if admission.StrictJSON(input.Public, &config) != nil || !endpoint(config.URL) {
+		var decode error
+		if archived {
+			var ac WebDAVArchivePublicConfig
+			decode = admission.StrictJSON(input.Public, &ac)
+			config = ac.WebDAVPublicConfig
+			archivePath = ac.ArchivePath
+		} else {
+			decode = admission.StrictJSON(input.Public, &config)
+		}
+		if decode != nil || !endpoint(config.URL) {
 			return nil, port.ErrInvalid
 		}
 		password, err := credential(ctx, input.Secrets, "password", false)
@@ -149,7 +201,16 @@ func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Ca
 		root = config.Root
 	case "drive":
 		var config DrivePublicConfig
-		if admission.StrictJSON(input.Public, &config) != nil {
+		var decode error
+		if archived {
+			var ac DriveArchivePublicConfig
+			decode = admission.StrictJSON(input.Public, &ac)
+			config = ac.DrivePublicConfig
+			archivePath = ac.ArchivePath
+		} else {
+			decode = admission.StrictJSON(input.Public, &config)
+		}
+		if decode != nil {
 			return nil, port.ErrInvalid
 		}
 		token, err := credential(ctx, input.Secrets, "token", true)
@@ -165,11 +226,18 @@ func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Ca
 	default:
 		return nil, port.ErrUnsupported
 	}
-	store, err := cloud.New(ctx, cloud.Config{Backend: backend, Root: root, Parameters: values})
+	var archive *cloud.ArchiveOptions
+	if archived {
+		if archivePath == "" || backend == "webdav-streaming" {
+			return nil, port.ErrInvalid
+		}
+		archive = &cloud.ArchiveOptions{Path: archivePath}
+	}
+	store, err := cloud.New(ctx, cloud.Config{Backend: backend, Root: root, Parameters: values, Archive: archive})
 	if err != nil {
 		return nil, failure(err)
 	}
-	return &candidate{client: &Client{store: store}}, nil
+	return &candidate{client: &Client{store: store, readOnly: archived}}, nil
 }
 
 type candidate struct {

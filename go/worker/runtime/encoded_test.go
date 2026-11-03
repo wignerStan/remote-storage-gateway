@@ -58,6 +58,19 @@ func (b *encodedBackend) Read(_ *bs.ReadRequest, s bs.ByteStream_ReadServer) err
 	close(b.stopped)
 	return s.Context().Err()
 }
+func (*encodedBackend) Write(s bs.ByteStream_WriteServer) error {
+	if e := s.SendHeader(metadata.Pairs("worker-origin-header", "early")); e != nil {
+		return e
+	}
+	r, e := s.Recv()
+	if e != nil {
+		return e
+	}
+	if !r.FinishWrite {
+		return status.Error(codes.InvalidArgument, "fixture expects final chunk")
+	}
+	return s.SendAndClose(&bs.WriteResponse{CommittedSize: int64(len(r.Data))})
+}
 func TestEncodedWorkerListenerTLSBrokerAuthenticationAndJoinedClose(t *testing.T) {
 	artifact := os.Getenv("REMOTE_GATEWAY_REAPI_PLUGIN")
 	if artifact == "" {
@@ -244,6 +257,22 @@ func TestEncodedWorkerListenerTLSBrokerAuthenticationAndJoinedClose(t *testing.T
 	}
 	if decisions.Load() != 1 || origin.calls.Load() != 1 {
 		t.Fatal("transfer not decided once by metadata broker")
+	}
+	upload, e := bs.NewByteStreamClient(conn).Write(auth)
+	if e != nil {
+		t.Fatal(e)
+	}
+	initial, e := upload.Header()
+	if e != nil || len(initial.Get("worker-origin-header")) != 1 {
+		t.Fatal("Worker withheld initial upstream headers until body", initial, e)
+	}
+	uploadBody := []byte("early-header-body")
+	if e = upload.Send(&bs.WriteRequest{ResourceName: "uploads/header-fixture", Data: uploadBody, FinishWrite: true}); e != nil {
+		t.Fatal(e)
+	}
+	committed, e := upload.CloseAndRecv()
+	if e != nil || committed.CommittedSize != int64(len(uploadBody)) {
+		t.Fatal(committed, e)
 	}
 	stream, e := bs.NewByteStreamClient(conn).Read(auth, &bs.ReadRequest{ResourceName: "blocked"})
 	if e != nil {

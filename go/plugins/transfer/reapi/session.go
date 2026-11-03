@@ -14,6 +14,7 @@ type session struct {
 	started, closed     bool
 	requests, responses uint64
 	deferred            *encoded.Event
+	headersSent         bool
 }
 
 func (s *session) action(kind encoded.Kind, side encoded.Side) encoded.Action {
@@ -64,23 +65,31 @@ func (s *session) Step(ctx context.Context, e encoded.Event) (actions []encoded.
 	}
 	switch e.Kind {
 	case encoded.Open:
-		return []encoded.Action{s.action(encoded.Receive, encoded.Downstream), s.action(encoded.Receive, encoded.Upstream)}, nil
+		return []encoded.Action{s.action(encoded.ReceiveHeaders, encoded.Upstream), s.action(encoded.Receive, encoded.Downstream), s.action(encoded.Receive, encoded.Upstream)}, nil
+	case encoded.ReceiveHeaders:
+		if e.Headers == 0 {
+			return nil, errors.New("missing initial headers")
+		}
+		a := s.action(encoded.Headers, 0)
+		a.Result = e.Headers
+		s.pending[a.ID] = a
+		return []encoded.Action{a}, nil
 	case encoded.Headers:
+		s.headersSent = true
 		if s.deferred == nil {
-			return nil, errors.New("missing header continuation")
+			return nil, nil
 		}
 		event := *s.deferred
 		s.deferred = nil
 		return s.received(event)
 	case encoded.Receive:
-		if e.Headers != 0 {
+		if e.Side == encoded.Upstream && !s.headersSent {
+			if s.deferred != nil {
+				return nil, errors.New("duplicate pending response")
+			}
 			copy := e
-			copy.Headers = 0
 			s.deferred = &copy
-			a := s.action(encoded.Headers, 0)
-			a.Result = e.Headers
-			s.pending[a.ID] = a
-			return []encoded.Action{a}, nil
+			return nil, nil
 		}
 		return s.received(e)
 	case encoded.Send:
@@ -103,7 +112,13 @@ func (s *session) Step(ctx context.Context, e encoded.Event) (actions []encoded.
 func (s *session) received(e encoded.Event) ([]encoded.Action, error) {
 	if e.EOF {
 		if e.Side == encoded.Downstream {
+			if !s.shape.ClientStreaming && s.requests != 1 {
+				return nil, &encoded.Failure{Code: 3, Message: "exactly one request message required"}
+			}
 			return []encoded.Action{s.action(encoded.HalfClose, encoded.Upstream)}, nil
+		}
+		if !s.shape.ServerStreaming && s.responses != 1 {
+			return nil, &encoded.Failure{Code: 13, Message: "upstream omitted unary response"}
 		}
 		return s.finish(e), nil
 	}

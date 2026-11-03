@@ -13,6 +13,10 @@ import (
 )
 
 const Contract = "remote-storage-gateway/control-broker/v1"
+
+// Explicit protobuf service identities separate the two metadata-only sockets.
+const WorkerRPCService = "remote_storage_gateway.control.v1.Worker"
+const DecisionRPCService = "remote_storage_gateway.control.v1.Decisions"
 const MaxMetadataBytes = 8 << 10
 const MaxMetadataEntries = 32
 const MaxTTLSeconds = 300
@@ -26,11 +30,13 @@ var (
 )
 
 type InstanceInfo struct {
-	LocalDataSocket string `json:"local_data_socket,omitempty"`
-	Contract        string `json:"contract"`
-	ID              string `json:"id"`
-	Ready           bool   `json:"ready"`
-	DataEndpoint    string `json:"data_endpoint"`
+	StorageSocket string `json:"storage_socket,omitempty"`
+	OfferSocket   string `json:"offer_socket,omitempty"`
+	Incarnation   string `json:"incarnation,omitempty"`
+	Contract      string `json:"contract"`
+	ID            string `json:"id"`
+	Ready         bool   `json:"ready"`
+	DataEndpoint  string `json:"data_endpoint"`
 }
 
 // WorkerControl is the control plane's finite management surface for one child.
@@ -80,9 +86,4 @@ func (d Decision) ExpiresAt(start time.Time, deadline time.Time) time.Time {
 		return deadline
 	}
 	return expiry
-}
-
-// VFSControl is metadata-only; the independent materializer owns its data port.
-type VFSControl interface {
-	Info(context.Context) (InstanceInfo, error)
 }
