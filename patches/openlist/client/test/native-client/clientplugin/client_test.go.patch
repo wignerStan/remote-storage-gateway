@@ -1,0 +1,191 @@
+diff --git a/clientplugin/client_test.go b/clientplugin/client_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..299f04ddea224c03aa723097b331c2f5301a1434
+--- /dev/null
++++ b/clientplugin/client_test.go
+@@ -0,0 +1,185 @@
++package clientplugin_test
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/OpenListTeam/OpenList/v4/clientplugin"
++	"github.com/OpenListTeam/OpenList/v4/pluginentry"
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
++	"golang.org/x/net/webdav"
++)
++
++var digest = "sha256:" + strings.Repeat("1", 64)
++
++type emptySecrets struct{}
++
++func (emptySecrets) Resolve(context.Context, string) (port.Secret, error) {
++	return nil, port.ErrNotFound
++}
++func TestPassiveDescriptorAndTypedValidation(t *testing.T) {
++	f, e := pluginentry.NewFactory(digest)
++	if e != nil {
++		t.Fatal(e)
++	}
++	a, e := admission.Encode(f.Descriptor())
++	if e != nil {
++		t.Fatal(e)
++	}
++	b, _ := admission.Encode(f.Descriptor())
++	if a.Digest != b.Digest {
++		t.Fatal("descriptor digest changed")
++	}
++	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		t.Error("prepare/descriptor must not initialize a provider")
++		w.WriteHeader(500)
++	}))
++	defer s.Close()
++	public, _ := json.Marshal(clientplugin.WebDAVPublicConfig{Address: s.URL})
++	candidate, e := f.Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: public, Secrets: emptySecrets{}})
++	if e != nil {
++		t.Fatal(e)
++	}
++	if _, e = candidate.Publish(); e == nil {
++		t.Fatal("published without validation")
++	}
++	if e = candidate.Abort(context.Background()); e != nil {
++		t.Fatal(e)
++	}
++	for _, bad := range []string{`{"address":"` + s.URL + `","password":"must-not-be-public"}`, `{"address":"` + s.URL + `","unknown":true}`, `{"address":"` + s.URL + `","address":"` + s.URL + `"}`} {
++		if _, e = f.Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: []byte(bad)}); e == nil {
++			t.Fatal("accepted invalid public fields")
++		}
++	}
++}
++
++type notifyBody struct {
++	io.ReadCloser
++	once *sync.Once
++	seen chan struct{}
++}
++
++func (n notifyBody) Read(b []byte) (int, error) {
++	k, e := n.ReadCloser.Read(b)
++	if k > 0 {
++		n.once.Do(func() { close(n.seen) })
++	}
++	return k, e
++}
++
++type repeatReader byte
++
++func (r repeatReader) Read(b []byte) (int, error) {
++	for i := range b {
++		b[i] = byte(r)
++	}
++	return len(b), nil
++}
++func TestWebDAVStreamRangeUnknownSizeAndCancellation(t *testing.T) {
++	root := t.TempDir()
++	seen := make(chan struct{})
++	var once sync.Once
++	handler := &webdav.Handler{FileSystem: webdav.Dir(root), LockSystem: webdav.NewMemLS()}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method == http.MethodPut {
++			r.Body = notifyBody{r.Body, &once, seen}
++		}
++		handler.ServeHTTP(w, r)
++	}))
++	defer server.Close()
++	public, _ := json.Marshal(clientplugin.WebDAVPublicConfig{Address: server.URL})
++	factory, e := pluginentry.NewFactory(digest)
++	if e != nil {
++		t.Fatal(e)
++	}
++	ca, e := factory.Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: public, Secrets: emptySecrets{}})
++	if e != nil {
++		t.Fatal(e)
++	}
++	if e = ca.Validate(context.Background()); e != nil {
++		t.Fatal(e)
++	}
++	c, e := ca.Publish()
++	if e != nil {
++		t.Fatal(e)
++	}
++	defer c.Close(context.Background())
++	const size = 12 << 20
++	reader, writer := io.Pipe()
++	continueBody := make(chan struct{})
++	produced := make(chan error, 1)
++	go func() {
++		_, e := io.CopyN(writer, repeatReader('x'), 64<<10)
++		if e == nil {
++			<-continueBody
++			_, e = io.CopyN(writer, repeatReader('x'), size-(64<<10))
++		}
++		writer.CloseWithError(e)
++		produced <- e
++	}()
++	uploaded := make(chan error, 1)
++	go func() {
++		_, e := c.Put(context.Background(), port.PutRequest{Path: "/large.bin", Body: reader, Size: -1, ContentType: "application/octet-stream"})
++		uploaded <- e
++	}()
++	select {
++	case <-seen:
++	case <-time.After(5 * time.Second):
++		close(continueBody)
++		reader.Close()
++		t.Fatal("server received no data before body completion")
++	}
++	close(continueBody)
++	if e = <-produced; e != nil {
++		t.Fatal(e)
++	}
++	if e = <-uploaded; e != nil {
++		t.Fatal(e)
++	}
++	info, e := c.Stat(context.Background(), port.ObjectRef{Path: "/large.bin"})
++	if e != nil || info.Size != size {
++		t.Fatalf("stat %+v %v", info, e)
++	}
++	plan, e := c.Open(context.Background(), port.OpenRequest{Path: "/large.bin", Offset: 100, Length: 17})
++	if e != nil {
++		t.Fatal(e)
++	}
++	data, e := io.ReadAll(plan.Body)
++	plan.Body.Close()
++	if e != nil || string(data) != strings.Repeat("x", 17) {
++		t.Fatalf("range %q %v", data, e)
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	plan, e = c.Open(ctx, port.OpenRequest{Path: "/large.bin", Length: -1})
++	if e != nil {
++		t.Fatal(e)
++	}
++	cancel()
++	_, e = io.Copy(io.Discard, plan.Body)
++	plan.Body.Close()
++	if !errors.Is(e, context.Canceled) {
++		t.Fatalf("read not canceled: %v", e)
++	}
++	for _, p := range []string{"../escape", "/a/../escape", "a\\escape", "/"} {
++		if e = c.Delete(context.Background(), port.ObjectRef{Path: p}); e == nil {
++			t.Fatalf("allowed invalid delete %q", p)
++		}
++	}
++	if e = c.Delete(context.Background(), port.ObjectRef{Path: "/large.bin"}); e != nil {
++		t.Fatal(e)
++	}
++	if _, e = os.Stat(filepath.Join(root, "large.bin")); !os.IsNotExist(e) {
++		t.Fatal("delete did not reach backend")
++	}
++}

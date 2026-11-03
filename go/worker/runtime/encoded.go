@@ -19,7 +19,7 @@ import (
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/encoded"
 	encodedgrpc "github.com/wignerStan/network-data-plane-worker/go/encodedruntime/grpc"
 	"github.com/wignerStan/network-data-plane-worker/go/encodedruntime/nativebridge"
-	control "github.com/wignerStan/remote-storage-gateway/go/control/ttrpc"
+
 	g "google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -33,7 +33,7 @@ type encodedOrigin struct {
 type encodedBridge struct {
 	carrier *encodedgrpc.Handler
 	runtime *nativebridge.Runtime
-	broker  *control.DecisionClient
+	broker  decisionClient
 	origins map[string]*encodedOrigin
 	once    sync.Once
 	done    chan struct{}
@@ -45,7 +45,7 @@ func (r *Runtime) prepareEncoded(ctx context.Context) (err error) {
 	if cfg == nil {
 		return nil
 	}
-	if r.tlsConfig == nil || r.process.BrokerSocket == "" || cfg.SourceID == "" || cfg.TargetID == "" || len(cfg.Upstreams) == 0 || len(cfg.Upstreams) > 32 {
+	if r.tlsConfig == nil || r.process.BrokerSocket == "" && r.process.RemoteBroker == nil || cfg.SourceID == "" || cfg.TargetID == "" || len(cfg.Upstreams) == 0 || len(cfg.Upstreams) > 32 {
 		return errors.New("invalid encoded routing configuration")
 	}
 	bridge := &encodedBridge{origins: map[string]*encodedOrigin{}, done: make(chan struct{})}
@@ -58,7 +58,7 @@ func (r *Runtime) prepareEncoded(ctx context.Context) (err error) {
 	if err != nil {
 		return errors.New("approved encoded plugin unavailable")
 	}
-	bridge.broker, err = control.DialDecision(ctx, r.process.BrokerSocket, cfg.MetadataNames)
+	bridge.broker, err = r.decisionClient(ctx, cfg.MetadataNames)
 	if err != nil {
 		return errors.New("decision broker unavailable")
 	}

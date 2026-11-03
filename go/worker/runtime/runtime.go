@@ -10,6 +10,7 @@ import (
 	"github.com/wignerStan/network-data-plane-worker/go/pluginruntime"
 	"github.com/wignerStan/network-data-plane-worker/go/worker"
 	workerconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/worker"
+	controlgrpc "github.com/wignerStan/remote-storage-gateway/go/control/grpc"
 	control "github.com/wignerStan/remote-storage-gateway/go/control/ttrpc"
 	"github.com/wignerStan/remote-storage-gateway/go/gateway"
 	"net/http"
@@ -37,6 +38,7 @@ type Runtime struct {
 	httpServer        *l7.Server
 	storageIPC        *storageBridge
 	controlServer     *control.Server
+	remoteServer      *controlgrpc.Server
 	started, retiring bool
 	closeDone         chan struct{}
 	closeErr          error

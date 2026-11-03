@@ -43,7 +43,15 @@ image_layer(
     name = "control_plane_program",
     srcs = {
         "/opt/control-plane/openlist": ":native_release/openlist-control-plane",
-        "/opt/gateway/storage-worker": ":native_release/storage-worker",
+        "/opt/openlist/.keep": "//build:working_directory",
+    },
+    default_metadata = file_metadata(mode = "0555", uid = 0, gid = 0),
+    include_runfiles = False,
+)
+image_layer(
+    name = "bundle_programs",
+    srcs = {
+        "/opt/gateway/gateway": ":native_release/gateway",
         "/opt/materializer/rclone": ":native_release/rclone",
         "/opt/gateway/client-openlist.so": ":native_release/client-openlist.so",
         "/opt/gateway/client-rclone.so": ":native_release/client-rclone.so",
@@ -51,9 +59,20 @@ image_layer(
         "/opt/openlist/.keep": "//build:working_directory",
     },
     default_metadata = file_metadata(mode = "0555", uid = 0, gid = 0),
-    file_metadata = {"/opt/openlist/.keep": file_metadata(mode = "0444", uid = 0, gid = 0)},
     include_runfiles = False,
 )
+image_manifest(
+    name = "bundle_image",
+    base = "@gateway_runtime",
+    layers = [":bundle_programs", ":gateway_trust"],
+    user = "1001:1001",
+    entrypoint = ["/opt/gateway/gateway"],
+    cmd = ["manager", "--config", "/run/control-secrets/bundle.json"],
+    working_dir = "/opt/openlist",
+    env = {"SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt"},
+    labels = {"org.opencontainers.image.source": "https://github.com/wignerStan/remote-storage-gateway"},
+)
+
 image_layer(
     name = "control_plane_trust",
     srcs = {"/etc/ssl/certs/ca-certificates.crt": "@build_inputs//:runtime/ca-certificates.crt"},

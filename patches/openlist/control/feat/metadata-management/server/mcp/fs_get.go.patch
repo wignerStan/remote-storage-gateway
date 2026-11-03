@@ -1,0 +1,12 @@
+diff --git a/server/mcp/fs_get.go b/server/mcp/fs_get.go
+index c975695fdeecb4743699b0c98402a33256d6a735..3dd355b086842eaf36d22c636171ee5d08a41d51 100644
+--- a/server/mcp/fs_get.go
++++ b/server/mcp/fs_get.go
+@@ -80,6 +80,7 @@ func (s *Server) callFSGet(c *gin.Context, raw json.RawMessage) (any, *rpcError)
+ 	mountDetails, _ := model.GetStorageDetails(obj)
+ 	return handles.FsGetResp{
+ 		ObjResp: handles.ObjResp{
++			ID:           obj.GetID(),
+ 			Name:         obj.GetName(),
+ 			Size:         obj.GetSize(),
+ 			IsDir:        obj.IsDir(),

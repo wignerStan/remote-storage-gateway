@@ -1,0 +1,138 @@
+diff --git a/clientplugin/native_test.go b/clientplugin/native_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c849b2ebce0d33a18940d8cca518481764e7f8b
+--- /dev/null
++++ b/clientplugin/native_test.go
+@@ -0,0 +1,132 @@
++package clientplugin_test
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"runtime"
++	"strings"
++	"testing"
++	"time"
++
++	infraexec "github.com/wignerStan/infra/go/process/exec"
++	native "github.com/wignerStan/infra/go/plugins/native"
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
++	"github.com/wignerStan/network-data-plane-worker/go/nativeclient"
++	"golang.org/x/net/webdav"
++)
++
++func TestSeparateSharedLibraryClientLifecycle(t *testing.T) {
++	_, source, _, _ := runtime.Caller(0)
++	root := filepath.Dir(filepath.Dir(source))
++	so := filepath.Join(t.TempDir(), "openlist-client.so")
++	digest := "sha256:" + strings.Repeat("1", 64)
++	spec := infraexec.NewSpec(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-buildmode=c-shared", "-buildvcs=false", "-ldflags", "-X main.buildDigest="+digest, "-o", so, "./cmd/openlist-client-plugin").WithTimeout(3 * time.Minute).WithEnv(infraexec.EnvInheritAllButRedacted())
++	spec.Dir = root
++	out, e := infraexec.RunContext(context.Background(), spec)
++	if e != nil {
++		t.Fatalf("build separate plugin: %v %s%s", e, out.StdoutString(), out.StderrString())
++	}
++	raw, e := native.Load(so, native.Expected{Package: "client.openlist", Variant: nativeclient.Variant, Kind: native.Tool, Language: native.Go, UnloadPolicy: native.Retain}, native.Limits{MaxInput: 1 << 20, MaxReply: 1 << 20, MaxInflight: 16, Timeout: 10 * time.Second})
++	if e != nil {
++		t.Fatal(e)
++	}
++	b, e := raw.Call(context.Background(), nativeclient.Describe, []byte(`{}`))
++	if e != nil {
++		t.Fatal(e)
++	}
++	r, e := admission.Decode(b)
++	if e != nil {
++		t.Fatal(e)
++	}
++	if e = raw.Close(context.Background()); e != nil {
++		t.Fatal(e)
++	}
++	data, e := os.ReadFile(so)
++	if e != nil {
++		t.Fatal(e)
++	}
++	hash := sha256.Sum256(data)
++	factory, e := nativeclient.NewFactory(context.Background(), nativeclient.Artifact{Path: so, SHA256: hex.EncodeToString(hash[:]), DescriptorDigest: r.Digest, PluginID: "client.openlist", Language: "go"})
++	if e != nil {
++		t.Fatal(e)
++	}
++	dir := t.TempDir()
++	dav := &webdav.Handler{FileSystem: webdav.Dir(dir), LockSystem: webdav.NewMemLS()}
++	if e = os.WriteFile(filepath.Join(dir, "blocked"), []byte("pending read"), 0600); e != nil {
++		t.Fatal(e)
++	}
++	upstreamCancelled := make(chan struct{})
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method == http.MethodGet && r.URL.Path == "/blocked" {
++			w.Header().Set("Content-Length", "12")
++			w.Header().Set("Content-Range", "bytes 0-11/12")
++			w.WriteHeader(http.StatusPartialContent)
++			w.(http.Flusher).Flush()
++			<-r.Context().Done()
++			close(upstreamCancelled)
++			return
++		}
++		dav.ServeHTTP(w, r)
++	}))
++	defer server.Close()
++	config, _ := json.Marshal(map[string]string{"address": server.URL})
++	candidate, e := factory.Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: config})
++	if e != nil {
++		t.Fatal(e)
++	}
++	if e = candidate.Validate(context.Background()); e != nil {
++		t.Fatal(e)
++	}
++	client, e := candidate.Publish()
++	if e != nil {
++		t.Fatal(e)
++	}
++	if _, e = client.Put(context.Background(), port.PutRequest{Path: "/native.txt", Body: strings.NewReader("native shared library"), Size: -1}); e != nil {
++		t.Fatal(e)
++	}
++	plan, e := client.Open(context.Background(), port.OpenRequest{Path: "/native.txt", Offset: 7, Length: 6})
++	if e != nil {
++		t.Fatal(e)
++	}
++	body, e := io.ReadAll(plan.Body)
++	plan.Body.Close()
++	if e != nil || string(body) != "shared" {
++		t.Fatalf("native range=%q error=%v", body, e)
++	}
++	blocked, e := client.Open(context.Background(), port.OpenRequest{Path: "/blocked", Length: -1})
++	if e != nil {
++		t.Fatal(e)
++	}
++	readDone := make(chan error, 1)
++	go func() { var b [1]byte; _, err := blocked.Body.Read(b[:]); readDone <- err }()
++	if e = blocked.Body.Close(); e != nil {
++		t.Fatal(e)
++	}
++	select {
++	case err := <-readDone:
++		if err == nil {
++			t.Fatal("cancelled read succeeded")
++		}
++	case <-time.After(5 * time.Second):
++		t.Fatal("native pending read did not join")
++	}
++	select {
++	case <-upstreamCancelled:
++	case <-time.After(5 * time.Second):
++		t.Fatal("native reader close did not cancel provider HTTP request")
++	}
++	if e = client.Close(context.Background()); e != nil {
++		t.Fatal(e)
++	}
++	if _, e = client.Stat(context.Background(), port.ObjectRef{Path: "/native.txt"}); e == nil {
++		t.Fatal("closed native client accepted request")
++	}
++}

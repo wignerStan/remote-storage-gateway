@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"sync"
 	"time"
 
 	carrier "github.com/wignerStan/infra/go/network/rpc/ttrpc"
@@ -163,13 +164,25 @@ type replaceRequest struct {
 // Server owns the finite metadata dispatcher. The assembly owns private Unix
 // socket creation and identity binding; it never authenticates an instance ID
 // supplied in a request as a peer identity.
-type Server struct{ wire *carrier.Server }
+type Server struct {
+	wire *carrier.Server
+	done chan struct{}
+	once sync.Once
+}
 
-func (s *Server) Serve(listener net.Listener) error { return s.wire.Serve(listener) }
+func (s *Server) finish()                           { s.once.Do(func() { close(s.done) }) }
+func (s *Server) Done() <-chan struct{}             { return s.done }
+func (s *Server) Serve(listener net.Listener) error { defer s.finish(); return s.wire.Serve(listener) }
 func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 	return s.wire.ServeConn(ctx, conn)
 }
-func (s *Server) Close(ctx context.Context) error { return s.wire.Close(ctx) }
+func (s *Server) Close(ctx context.Context) error {
+	err := s.wire.Close(ctx)
+	if err == nil {
+		s.finish()
+	}
+	return err
+}
 func NewWorkerServer(control broker.WorkerControl) (*Server, error) {
 	if control == nil {
 		return nil, broker.ErrInvalid
@@ -178,7 +191,7 @@ func NewWorkerServer(control broker.WorkerControl) (*Server, error) {
 	if e != nil {
 		return nil, e
 	}
-	return &Server{s}, nil
+	return &Server{wire: s, done: make(chan struct{})}, nil
 }
 
 type workerEntry struct{ control broker.WorkerControl }
@@ -278,7 +291,7 @@ func NewDecisionServer(service broker.DecisionBroker, o DecisionOptions) (*Serve
 	if e != nil {
 		return nil, e
 	}
-	return &Server{s}, nil
+	return &Server{wire: s, done: make(chan struct{})}, nil
 }
 
 type decisionEntry struct {

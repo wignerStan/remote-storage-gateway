@@ -1,0 +1,11 @@
+diff --git a/internal/conf/gateway.go b/internal/conf/gateway.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..abcfb0bd2d08e1a37bf18e3371080d08eae57520
+--- /dev/null
++++ b/internal/conf/gateway.go
+@@ -0,0 +1,5 @@
++package conf
++
++// GatewayManaged selects metadata-only execution for the process-manager host.
++// Legacy standalone behavior remains available when no process file is selected.
++func GatewayManaged() bool { return Conf != nil && Conf.GatewayControlFile != "" }

@@ -1,3 +1,8 @@
 /target/
 /plugins/*.so
 /.cargo/config.toml
+
+/build/openlist/
+/build/openlist-ui/
+/third_party/openlist/
+/third_party/openlist-ui/

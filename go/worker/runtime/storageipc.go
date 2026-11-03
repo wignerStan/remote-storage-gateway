@@ -18,7 +18,7 @@ import (
 
 type storageBridge struct {
 	server *transport.Server
-	broker *control.DecisionClient
+	broker decisionClient
 }
 
 // prepareStorageIPC admits only operator-assigned raw mount clients. The control
@@ -28,7 +28,7 @@ func (r *Runtime) prepareStorageIPC(ctx context.Context) (_ *storageBridge, err 
 	if p == "" && q == "" {
 		return nil, nil
 	}
-	if p == "" || q == "" || r.process.InstanceID == "" || r.process.BrokerSocket == "" || r.Manager == nil {
+	if p == "" || q == "" || r.process.InstanceID == "" || r.process.BrokerSocket == "" && r.process.RemoteBroker == nil || r.Manager == nil {
 		return nil, broker.ErrInvalid
 	}
 	seen := map[string]bool{filepath.Clean(r.process.ControlSocket): true, filepath.Clean(r.process.BrokerSocket): true}
@@ -54,7 +54,7 @@ func (r *Runtime) prepareStorageIPC(ctx context.Context) (_ *storageBridge, err 
 			_ = bridge.close(context.Background())
 		}
 	}()
-	bridge.broker, err = control.DialDecision(ctx, r.process.BrokerSocket, nil)
+	bridge.broker, err = r.decisionClient(ctx, nil)
 	if err != nil {
 		return nil, broker.ErrUnavailable
 	}
