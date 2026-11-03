@@ -1,0 +1,17 @@
+syntax = "proto3";
+package remote_storage_gateway.control.v1;
+option go_package = "github.com/wignerStan/remote-storage-gateway/go/contracts/control/rpc;rpc";
+// JSON contains only the bounded Worker-owned metadata contract. Descriptor
+// bytes remain exact. Object content and provider secrets have no RPC here.
+message Empty {}
+message Metadata { bytes json = 1; }
+message DescriptorRequest { string digest = 1; }
+message ReplaceRequest { string name = 1; bytes json = 2; }
+service Worker {
+ rpc Info(Empty) returns (Metadata);
+ rpc Manifest(Empty) returns (Metadata);
+ rpc Observed(Empty) returns (Metadata);
+ rpc Descriptor(DescriptorRequest) returns (Metadata);
+ rpc Replace(ReplaceRequest) returns (Metadata);
+}
+service Decisions { rpc Decide(Metadata) returns (Metadata); }

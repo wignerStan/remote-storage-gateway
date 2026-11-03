@@ -96,8 +96,9 @@ run_go() {
             "$stage/tools/go/bin/go" build -mod=readonly -p=4 -trimpath -buildvcs=false "$@"
     )
 }
-run_go openlist 0 go.work -ldflags "-X github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=${values[ui_version]} -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=${values[product_commit]}" -o "$out/openlist-control-plane" .
-run_go gateway/go 1 go.work -tags dataplane_l7 -o "$out/storage-worker" ./cmd/storage-worker
+run_go openlist 0 go.work -tags infra_grpc -ldflags "-X github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=${values[ui_version]} -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=${values[product_commit]}" -o "$out/openlist-control-plane" .
+run_go gateway/go 1 go.work -tags dataplane_l7,infra_grpc -o "$out/storage-worker" ./cmd/storage-worker
+run_go openlist 1 go.work -tags dataplane_l7,infra_grpc -ldflags "-X github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=${values[ui_version]} -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=${values[product_commit]}" -o "$out/gateway" ./cmd/gateway-bundle
 run_go openlist 1 go.work -buildmode=c-shared -ldflags "-X main.buildDigest=${values[gateway_digest]}" -o "$out/client-openlist.so" ./cmd/openlist-client-plugin
 run_go gateway/go 1 go.work -buildmode=c-shared -ldflags "-X main.buildDigest=${values[gateway_digest]}" -o "$out/client-rclone.so" ./cmd/plugin-rclone
 run_go gateway/go 1 go.work -buildmode=c-shared -ldflags "-X main.buildDigest=${values[gateway_digest]}" -o "$out/transfer-reapi.so" ./cmd/plugin-reapi
@@ -107,6 +108,6 @@ chmod 0755 "$out/rclone"
 # The standalone producer is a declared action input, not another Go compilation.
 # c-shared also generates C headers, which are not release outputs.
 rm -f "$out/client-openlist.h" "$out/client-rclone.h" "$out/transfer-reapi.h"
-for artifact in openlist-control-plane storage-worker client-openlist.so client-rclone.so transfer-reapi.so gateway-admin rclone; do
+for artifact in gateway openlist-control-plane storage-worker client-openlist.so client-rclone.so transfer-reapi.so gateway-admin rclone; do
     [[ -s "$out/$artifact" ]] || fail "missing output $artifact"
 done

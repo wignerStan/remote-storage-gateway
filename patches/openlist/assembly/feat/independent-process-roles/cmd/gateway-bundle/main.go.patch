@@ -1,0 +1,52 @@
+diff --git a/cmd/gateway-bundle/main.go b/cmd/gateway-bundle/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5aef2f3869d935652e3f2e0029c7c67be3ff584b
+--- /dev/null
++++ b/cmd/gateway-bundle/main.go
+@@ -0,0 +1,46 @@
++//go:build dataplane_l7 && infra_grpc
++
++// gateway is one executable with isolated manager, control-plane and worker roles.
++//
++package main
++
++import (
++	"context"
++	"fmt"
++	openlist "github.com/OpenListTeam/OpenList/v4/cmd"
++	"github.com/wignerStan/remote-storage-gateway/go/manager"
++	workerentry "github.com/wignerStan/remote-storage-gateway/go/worker/entry"
++	"os"
++	"os/signal"
++	"syscall"
++)
++
++func run() error {
++	if len(os.Args) < 2 {
++		return fmt.Errorf("usage: gateway manager|control-plane|worker [arguments]")
++	}
++	if os.Args[1] == "control-plane" {
++		if os.Getenv("OPENLIST_GATEWAY_CONTROL_FILE") == "" {
++			return fmt.Errorf("control-plane requires metadata-only gateway control configuration")
++		}
++		openlist.RootCmd.SetArgs(os.Args[2:])
++		openlist.Execute()
++		return nil
++	}
++	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
++	defer stop()
++	switch os.Args[1] {
++	case "manager":
++		return manager.Run(ctx, os.Args[2:])
++	case "worker":
++		return workerentry.Run(ctx, os.Args[2:])
++	default:
++		return fmt.Errorf("unknown gateway role")
++	}
++}
++func main() {
++	if err := run(); err != nil {
++		fmt.Fprintln(os.Stderr, err)
++		os.Exit(1)
++	}
++}

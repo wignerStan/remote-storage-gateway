@@ -1,6 +1,7 @@
 """One offline Go release action, with outputs in the shared REAPI CAS."""
 
 _OUTPUTS = {
+    "bundle": "%{name}/gateway",
     "control_plane": "%{name}/openlist-control-plane",
     "worker": "%{name}/storage-worker",
     "openlist_plugin": "%{name}/client-openlist.so",
@@ -29,7 +30,7 @@ def _release_impl(ctx):
         env = {"PATH": "/usr/bin:/bin"},
         use_default_shell_env = False,
         mnemonic = "GatewayGoRelease",
-        progress_message = "Compiling six Gateway release artifacts on Buildbarn",
+        progress_message = "Compiling Gateway bundle, components and plugins on Buildbarn",
     )
     return [DefaultInfo(files = depset(outputs))]
 

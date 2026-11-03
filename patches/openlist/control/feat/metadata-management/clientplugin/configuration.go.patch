@@ -1,0 +1,42 @@
+diff --git a/clientplugin/configuration.go b/clientplugin/configuration.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1fa389e769b9c7242ad77a8b26caa4b85d7f8e40
+--- /dev/null
++++ b/clientplugin/configuration.go
+@@ -0,0 +1,36 @@
++package clientplugin
++
++// S3PublicConfig is the non-secret provider configuration accepted by Prepare.
++// Public field definitions are reused by the full published schema model.
++type S3PublicConfig struct {
++	Endpoint       string `json:"endpoint" minLength:"1"`
++	Bucket         string `json:"bucket" minLength:"1"`
++	Region         string `json:"region" minLength:"1"`
++	Root           string `json:"root_folder_path,omitempty"`
++	ForcePathStyle bool   `json:"force_path_style,omitempty"`
++}
++
++// S3Configuration describes this concrete plugin's complete configuration.
++// Secret values travel through Worker secret references, never public JSON.
++type S3Configuration struct {
++	S3PublicConfig
++	AccessKeyID     string `json:"access_key_id" writeOnly:"true" minLength:"1"`
++	SecretAccessKey string `json:"secret_access_key" writeOnly:"true" minLength:"1"`
++	SessionToken    string `json:"session_token,omitempty" writeOnly:"true"`
++}
++
++// WebDAVPublicConfig is the non-secret WebDAV provider configuration.
++type WebDAVPublicConfig struct {
++	Address  string `json:"address" minLength:"1"`
++	Root     string `json:"root_folder_path,omitempty"`
++	Username string `json:"username,omitempty"`
++}
++
++// WebDAVConfiguration publishes only the fields implemented by this provider.
++type WebDAVConfiguration struct {
++	WebDAVPublicConfig
++	Password string `json:"password,omitempty" writeOnly:"true"`
++}
++
++type s3Config = S3PublicConfig
++type davConfig = WebDAVPublicConfig

@@ -1,0 +1,30 @@
+diff --git a/clientplugin/webdav_metadata.go b/clientplugin/webdav_metadata.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..41c49e31fb575033097c5627638b467b602c0b84
+--- /dev/null
++++ b/clientplugin/webdav_metadata.go
+@@ -0,0 +1,24 @@
++package clientplugin
++
++import (
++	"io"
++	"net/http"
++)
++
++// PROPFIND is metadata. Bound the legacy XML parser without limiting streamed GETs.
++type metadataTransport struct{ base http.RoundTripper }
++
++func (t metadataTransport) RoundTrip(r *http.Request) (*http.Response, error) {
++	resp, e := t.base.RoundTrip(r)
++	if e == nil && r.Method == "PROPFIND" {
++		resp.Body = &metadataBody{ReadCloser: resp.Body, reader: io.LimitReader(resp.Body, 4<<20)}
++	}
++	return resp, e
++}
++
++type metadataBody struct {
++	io.ReadCloser
++	reader io.Reader
++}
++
++func (b *metadataBody) Read(p []byte) (int, error) { return b.reader.Read(p) }

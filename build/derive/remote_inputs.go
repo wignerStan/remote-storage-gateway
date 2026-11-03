@@ -113,11 +113,12 @@ func (b *builder) remoteInputs() error {
 		Roots: roots, GeneratedDirectory: inputDir, GoBinary: goProgram, GoEnv: map[string]string{"GOOS": "linux", "GOARCH": "amd64"}, AllowModuleDownloads: true,
 		Profiles: []buildinputs.Profile{
 			{Workspace: filepath.Join(b.output, "go.work"), Stage: "go.work", Targets: []buildinputs.Target{
-				{Directory: filepath.Join(b.root, "go"), Package: "./cmd/storage-worker", Tags: []string{"dataplane_l7"}, CGOEnabled: true},
+				{Directory: filepath.Join(b.root, "go"), Package: "./cmd/storage-worker", Tags: []string{"dataplane_l7", "infra_grpc"}, CGOEnabled: true},
 				{Directory: filepath.Join(b.root, "go"), Package: "./cmd/plugin-rclone", CGOEnabled: true},
 				{Directory: filepath.Join(b.root, "go"), Package: "./cmd/plugin-reapi", CGOEnabled: true},
 				{Directory: filepath.Join(b.root, "go"), Package: "./cmd/gateway-admin", CGOEnabled: true},
-				{Directory: b.sourcePath("openlist"), Package: ".", CGOEnabled: false},
+				{Directory: b.sourcePath("openlist"), Package: ".", Tags: []string{"infra_grpc"}, CGOEnabled: false},
+				{Directory: b.sourcePath("openlist"), Package: "./cmd/gateway-bundle", Tags: []string{"dataplane_l7", "infra_grpc"}, CGOEnabled: true},
 				{Directory: b.sourcePath("openlist"), Package: "./cmd/openlist-client-plugin", CGOEnabled: true},
 			}},
 			{Workspace: filepath.Join(b.output, "materializer/go.work"), Stage: "go-native.work", Targets: []buildinputs.Target{

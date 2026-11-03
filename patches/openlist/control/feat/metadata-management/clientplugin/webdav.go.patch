@@ -1,0 +1,127 @@
+diff --git a/clientplugin/webdav.go b/clientplugin/webdav.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..baf20f2aa03581d9c33b9b865c325248cc9ff099
+--- /dev/null
++++ b/clientplugin/webdav.go
+@@ -0,0 +1,121 @@
++package clientplugin
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"path"
++	"strings"
++	"time"
++
++	dav "github.com/OpenListTeam/OpenList/v4/pkg/gowebdav"
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++)
++
++type davClient struct {
++	client    *dav.Client
++	root      string
++	transport *http.Transport
++}
++
++func newWebDAV(c davConfig, password string) *davClient {
++	t := http.DefaultTransport.(*http.Transport).Clone()
++	d := dav.NewClient(c.Address, c.Username, password)
++	d.SetTransport(metadataTransport{base: t})
++	d.SetInterceptor(func(_ string, r *http.Request) {
++		if c.Username != "" {
++			r.SetBasicAuth(c.Username, password)
++		}
++	})
++	root, _ := clean(c.Root)
++	return &davClient{d, root, t}
++}
++func (d *davClient) key(p string) (string, error) {
++	p, e := clean(p)
++	if e != nil {
++		return "", e
++	}
++	return path.Join("/", d.root, p), nil
++}
++func (d *davClient) Stat(ctx context.Context, q port.ObjectRef) (port.ObjectInfo, error) {
++	k, e := d.key(q.Path)
++	if e != nil {
++		return port.ObjectInfo{}, e
++	}
++	f, e := d.client.WithContext(ctx).Stat(k)
++	if dav.IsErrNotFound(e) {
++		return port.ObjectInfo{}, port.ErrNotFound
++	}
++	if e != nil {
++		return port.ObjectInfo{}, providerError(e)
++	}
++	return port.ObjectInfo{Path: objectPath(q.Path), Size: f.Size(), IsDir: f.IsDir(), ModTime: f.ModTime()}, nil
++}
++func (d *davClient) List(ctx context.Context, q port.ListRequest) (port.ListResult, error) {
++	if q.Cursor != "" || q.Limit < 0 {
++		return port.ListResult{}, port.ErrUnsupported
++	}
++	k, e := d.key(q.Path)
++	if e != nil {
++		return port.ListResult{}, e
++	}
++	files, e := d.client.WithContext(ctx).ReadDir(k)
++	if e != nil {
++		return port.ListResult{}, providerError(e)
++	}
++	if q.Limit > 0 && len(files) > q.Limit {
++		return port.ListResult{}, port.ErrUnsupported
++	}
++	out := port.ListResult{Objects: make([]port.ObjectInfo, 0, len(files))}
++	for _, f := range files {
++		out.Objects = append(out.Objects, port.ObjectInfo{Path: objectPath(path.Join(q.Path, f.Name())), Size: f.Size(), IsDir: f.IsDir(), ModTime: f.ModTime()})
++	}
++	return out, nil
++}
++func (d *davClient) Open(ctx context.Context, q port.OpenRequest) (port.ReadPlan, error) {
++	info, e := d.Stat(ctx, port.ObjectRef{Path: q.Path})
++	if e != nil {
++		return port.ReadPlan{}, e
++	}
++	if info.IsDir {
++		return port.ReadPlan{}, port.ErrInvalid
++	}
++	n, e := checkedRange(q, info.Size)
++	if e != nil {
++		return port.ReadPlan{}, e
++	}
++	if n == 0 {
++		return port.ReadPlan{Info: info, Body: io.NopCloser(strings.NewReader(""))}, nil
++	}
++	k, _ := d.key(q.Path)
++	body, e := d.client.WithContext(ctx).ReadStreamRange(k, q.Offset, n)
++	if e != nil {
++		return port.ReadPlan{}, providerError(e)
++	}
++	return port.ReadPlan{Info: info, Body: body}, nil
++}
++func (d *davClient) Put(ctx context.Context, q port.PutRequest) (port.PutResult, error) {
++	if q.Body == nil || q.Size < -1 || len(q.Metadata) > 0 {
++		return port.PutResult{}, port.ErrInvalid
++	}
++	k, e := d.key(q.Path)
++	if e != nil || strings.Trim(q.Path, "/") == "" {
++		return port.PutResult{}, port.ErrInvalid
++	}
++	body := &uploadReader{reader: checkedBody(q.Body, q.Size)}
++	e = d.client.WithContext(ctx).WriteStream(k, body, 0644, func(r *http.Request) { r.ContentLength = q.Size; r.Header.Set("Content-Type", q.ContentType) })
++	if e != nil {
++		return port.PutResult{}, providerError(e)
++	}
++	return port.PutResult{Info: port.ObjectInfo{Path: objectPath(q.Path), Size: body.bytes.Load(), ModTime: time.Now().UTC(), ContentType: q.ContentType}}, nil
++}
++func (d *davClient) Delete(ctx context.Context, q port.ObjectRef) error {
++	k, e := d.key(q.Path)
++	if e != nil || strings.Trim(q.Path, "/") == "" {
++		return port.ErrInvalid
++	}
++	return providerError(d.client.WithContext(ctx).Remove(k))
++}
++func (d *davClient) Close(context.Context) error { closeTransport(d.transport); return nil }
++
++var _ port.Client = (*davClient)(nil)

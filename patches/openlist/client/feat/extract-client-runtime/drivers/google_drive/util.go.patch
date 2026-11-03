@@ -1,0 +1,57 @@
+diff --git a/drivers/google_drive/util.go b/drivers/google_drive/util.go
+index e4f5f1a079c72d2a1819c94f893bbec84dd93d0d..5204d70d6f4dd06474d30fc5ec7ef05668e0fcff 100644
+--- a/drivers/google_drive/util.go
++++ b/drivers/google_drive/util.go
+@@ -332,23 +332,24 @@ func (d *GoogleDrive) batchGetTargetFilesInfo(targetIds []string) map[string]Fil
+ 	return result
+ }
+ 
+-func (d *GoogleDrive) chunkUpload(ctx context.Context, file model.FileStreamer, url string, up driver.UpdateProgress) error {
++func (d *GoogleDrive) chunkUpload(ctx context.Context, file model.FileStreamer, url string, up driver.UpdateProgress) (File, error) {
+ 	defaultChunkSize := d.ChunkSize * 1024 * 1024
+ 	ss, err := stream.NewStreamSectionReader(file, int(defaultChunkSize), &up)
+ 	if err != nil {
+-		return err
++		return File{}, err
+ 	}
+ 
+ 	var offset int64 = 0
++	var lastFile File
+ 	url += "?includeItemsFromAllDrives=true&supportsAllDrives=true"
+ 	for offset < file.GetSize() {
+ 		if utils.IsCanceled(ctx) {
+-			return ctx.Err()
++			return File{}, ctx.Err()
+ 		}
+ 		chunkSize := min(file.GetSize()-offset, defaultChunkSize)
+ 		reader, err := ss.GetSectionReader(offset, chunkSize)
+ 		if err != nil {
+-			return err
++			return File{}, err
+ 		}
+ 		limitedReader := driver.NewLimitedUploadStream(ctx, reader)
+ 		err = retry.Do(func() error {
+@@ -379,6 +380,9 @@ func (d *GoogleDrive) chunkUpload(ctx context.Context, file model.FileStreamer,
+ 				}
+ 				return fmt.Errorf("%s: %v", e.Error.Message, e.Error.Errors)
+ 			}
++			if res.StatusCode == http.StatusOK || res.StatusCode == http.StatusCreated {
++				utils.Json.Unmarshal(bytes, &lastFile)
++			}
+ 			up(float64(offset+chunkSize) / float64(file.GetSize()) * 100)
+ 			return nil
+ 		},
+@@ -388,11 +392,11 @@ func (d *GoogleDrive) chunkUpload(ctx context.Context, file model.FileStreamer,
+ 			retry.Delay(time.Second))
+ 		ss.FreeSectionReader(reader)
+ 		if err != nil {
+-			return err
++			return File{}, err
+ 		}
+ 		offset += chunkSize
+ 	}
+-	return nil
++	return lastFile, nil
+ }
+ 
+ func (d *GoogleDrive) getAbout(ctx context.Context) (*AboutResp, error) {

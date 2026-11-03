@@ -1,0 +1,125 @@
+# Separate role profile. Supply exact image digests, private typed config and
+# workload certificates. Default is one stable Worker identity, not HPA.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: storage-worker, namespace: selfhost}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: storage-worker}}
+  template:
+    metadata: {labels: {app: storage-worker}}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext: {runAsUser: 1001, runAsGroup: 1001, fsGroup: 1001}
+      initContainers:
+        - name: private-role-files
+          image: docker.io/library/debian@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+          command: [/bin/sh, -ec, "mkdir /private/config /private/workload; cp /config/* /private/config/; cp /workload/* /private/workload/; chmod 0700 /private/config /private/workload; chmod 0600 /private/config/* /private/workload/*; chown -R 1001:1001 /private/config /private/workload"]
+          securityContext: {runAsUser: 0, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL], add: [CHOWN]}}
+          volumeMounts:
+            - {name: input-configuration, mountPath: /config, readOnly: true}
+            - {name: input-workload, mountPath: /workload, readOnly: true}
+            - {name: private, mountPath: /private}
+      containers:
+        - name: worker
+          image: WORKER_IMAGE_DIGEST
+          command: [/opt/gateway/storage-worker, --config, /run/gateway-secrets/worker.json]
+          ports: [{name: https, containerPort: 8443}, {name: control-grpc, containerPort: 9443}]
+          readinessProbe: {tcpSocket: {port: control-grpc}, periodSeconds: 5}
+          securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            - {name: private, mountPath: /run/gateway-secrets, subPath: config, readOnly: true}
+            - {name: private, mountPath: /run/workload, subPath: workload, readOnly: true}
+            - {name: runtime, mountPath: /run/gateway}
+            - {name: temporary, mountPath: /tmp}
+      volumes:
+        - {name: input-configuration, secret: {secretName: storage-worker-config, defaultMode: 0400}}
+        - {name: input-workload, secret: {secretName: storage-worker-identity, defaultMode: 0400}}
+        - {name: private, emptyDir: {medium: Memory, sizeLimit: 1Mi}}
+        - {name: runtime, emptyDir: {medium: Memory, sizeLimit: 4Mi}}
+        - {name: temporary, emptyDir: {sizeLimit: 256Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: storage-worker, namespace: selfhost}
+spec:
+  selector: {app: storage-worker}
+  ports: [{name: https, port: 443, targetPort: https}, {name: control-grpc, port: 9443, targetPort: control-grpc}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: storage-control, namespace: selfhost}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: storage-control}}
+  template:
+    metadata: {labels: {app: storage-control}}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext: {runAsUser: 1001, runAsGroup: 1001, fsGroup: 1001}
+      initContainers:
+        - name: private-role-files
+          image: docker.io/library/debian@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+          command: [/bin/sh, -ec, "mkdir /private/config /private/workload; cp /config/* /private/config/; cp /workload/* /private/workload/; chmod 0700 /private/config /private/workload; chmod 0600 /private/config/* /private/workload/*; chown -R 1001:1001 /private/config /private/workload"]
+          securityContext: {runAsUser: 0, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL], add: [CHOWN]}}
+          volumeMounts:
+            - {name: input-configuration, mountPath: /config, readOnly: true}
+            - {name: input-workload, mountPath: /workload, readOnly: true}
+            - {name: private, mountPath: /private}
+      containers:
+        - name: control
+          image: CONTROL_PLANE_IMAGE_DIGEST
+          command: [/opt/control-plane/openlist, server, --data, /opt/openlist/data, --config, /opt/openlist/data/config.json]
+          env:
+            - {name: OPENLIST_GATEWAY_CONTROL_FILE, value: /run/control-secrets/control.json}
+            - {name: OPENLIST_CONTROL_TARGETS_FILE, value: /run/control-secrets/targets.json}
+            - {name: OPENLIST_ADDR, value: '0.0.0.0'}
+            - {name: OPENLIST_HTTP_PORT, value: '5244'}
+            - {name: OPENLIST_HTTPS_PORT, value: '-1'}
+            - {name: OPENLIST_ENABLE_H3, value: 'false'}
+          ports: [{name: http-private, containerPort: 5244}, {name: decisions-grpc, containerPort: 9444}]
+          readinessProbe: {httpGet: {path: /ping, port: http-private}, periodSeconds: 5}
+          securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            - {name: private, mountPath: /run/control-secrets, subPath: config, readOnly: true}
+            - {name: private, mountPath: /run/workload, subPath: workload, readOnly: true}
+            - {name: data, mountPath: /opt/openlist/data}
+            - {name: temporary, mountPath: /tmp}
+      volumes:
+        - {name: input-configuration, secret: {secretName: storage-control-config, defaultMode: 0400}}
+        - {name: input-workload, secret: {secretName: storage-control-identity, defaultMode: 0400}}
+        - {name: private, emptyDir: {medium: Memory, sizeLimit: 1Mi}}
+        - {name: data, persistentVolumeClaim: {claimName: CONTROL_PLANE_PVC}}
+        - {name: temporary, emptyDir: {sizeLimit: 256Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: storage-control, namespace: selfhost}
+spec:
+  selector: {app: storage-control}
+  ports: [{name: http-private, port: 5244, targetPort: http-private}, {name: decisions-grpc, port: 9444, targetPort: decisions-grpc}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: storage-private-control, namespace: selfhost}
+spec:
+  podSelector: {matchLabels: {app: storage-control}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app: storage-worker}}}]
+      ports: [{protocol: TCP, port: 5244}, {protocol: TCP, port: 9444}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: storage-worker-front-door, namespace: selfhost}
+spec:
+  podSelector: {matchLabels: {app: storage-worker}}
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{protocol: TCP, port: 8443}]
+    - from: [{podSelector: {matchLabels: {app: storage-control}}}]
+      ports: [{protocol: TCP, port: 9443}]

@@ -1,0 +1,19 @@
+diff --git a/internal/bootstrap/data/data.go b/internal/bootstrap/data/data.go
+index 33fc146caa9abb3b7af6305241cd84f3664df974..11cb26f548463ed85e386f145491f4c4d4ef0b00 100644
+--- a/internal/bootstrap/data/data.go
++++ b/internal/bootstrap/data/data.go
+@@ -1,12 +1,13 @@
+ package data
+ 
+ import "github.com/OpenListTeam/OpenList/v4/cmd/flags"
++import "github.com/OpenListTeam/OpenList/v4/internal/conf"
+ 
+ func InitData() {
+ 	initUser()
+ 	initSettings()
+ 	initTasks()
+-	if flags.Dev {
++	if flags.Dev && !conf.GatewayManaged() {
+ 		initDevData()
+ 		initDevDo()
+ 	}

@@ -17,6 +17,7 @@ import (
 	dp "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"github.com/wignerStan/remote-storage-gateway/go/contracts/control/broker"
 	workerconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/worker"
+	controlgrpc "github.com/wignerStan/remote-storage-gateway/go/control/grpc"
 	control "github.com/wignerStan/remote-storage-gateway/go/control/ttrpc"
 )
 
@@ -43,6 +44,9 @@ func New(ctx context.Context, c workerconfig.ProcessConfig) (*Runtime, error) {
 		if e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 			return nil, broker.ErrInvalid
 		}
+	}
+	if c.BrokerSocket != "" && c.RemoteBroker != nil {
+		return nil, broker.ErrInvalid
 	}
 	r, e := assemble(ctx, c.RuntimeConfig)
 	if e != nil {
@@ -138,20 +142,36 @@ func (r *Runtime) Start(ctx context.Context) error {
 		}
 		r.process.DataEndpoint = scheme + data.Addr().String()
 	}
+	if r.process.RPC != nil {
+		remote, err := controlgrpc.StartServer(ctx, *r.process.RPC, r, nil, nil)
+		if err != nil {
+			_ = server.Shutdown(context.Background())
+			if listener != nil {
+				listener.Close()
+			}
+			return err
+		}
+		r.remoteServer = remote
+	}
 	if entry != nil {
 		go func() { _ = entry.Serve(listener) }()
 	}
 	go func() {
-		if storage == nil {
-			<-server.Done()
-		} else {
-			select {
-			case <-server.Done():
-			case <-storage.server.Done():
-			}
+		var storageDone, remoteDone <-chan struct{}
+		if storage != nil {
+			storageDone = storage.server.Done()
+		}
+		if r.remoteServer != nil {
+			remoteDone = r.remoteServer.Done()
+		}
+		select {
+		case <-server.Done():
+		case <-storageDone:
+		case <-remoteDone:
 		}
 		close(r.stopped)
 	}()
+
 	return nil
 }
 func (r *Runtime) Done() <-chan struct{} { return r.stopped }
@@ -162,11 +182,14 @@ func (r *Runtime) Close(ctx context.Context) error {
 	r.closeOnce.Do(func() {
 		r.lifeMu.Lock()
 		r.retiring = true
-		server, storage, entry := r.httpServer, r.storageIPC, r.controlServer
+		server, storage, entry, remote := r.httpServer, r.storageIPC, r.controlServer, r.remoteServer
 		r.lifeMu.Unlock()
 		go func() {
 			var errs []error
 			errs = append(errs, r.closeEncoded(context.Background()))
+			if remote != nil {
+				errs = append(errs, remote.Close(context.Background()))
+			}
 			if entry != nil {
 				errs = append(errs, entry.Close(context.Background()))
 			}
@@ -214,6 +237,13 @@ func (r *Runtime) Info(context.Context) (broker.InstanceInfo, error) {
 	if ready && r.storageIPC != nil {
 		select {
 		case <-r.storageIPC.server.Done():
+			ready = false
+		default:
+		}
+	}
+	if ready && r.remoteServer != nil {
+		select {
+		case <-r.remoteServer.Done():
 			ready = false
 		default:
 		}

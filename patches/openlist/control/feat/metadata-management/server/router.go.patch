@@ -1,0 +1,79 @@
+diff --git a/server/router.go b/server/router.go
+index fe210e6eb56567ce01bcfc0a23cd567df4744a2d..39cf49abf41dd565c82d5bd60519467fd9010fc0 100644
+--- a/server/router.go
++++ b/server/router.go
+@@ -3,6 +3,8 @@ package server
+ import (
+ 	"github.com/OpenListTeam/OpenList/v4/cmd/flags"
+ 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
++	"github.com/OpenListTeam/OpenList/v4/internal/controlplane"
++	"github.com/OpenListTeam/OpenList/v4/internal/controlplane/httpapi"
+ 	"github.com/OpenListTeam/OpenList/v4/internal/message"
+ 	multipartPkg "github.com/OpenListTeam/OpenList/v4/internal/multipart"
+ 	"github.com/OpenListTeam/OpenList/v4/internal/sign"
+@@ -14,9 +16,16 @@ import (
+ 	"github.com/OpenListTeam/OpenList/v4/server/static"
+ 	"github.com/gin-contrib/cors"
+ 	"github.com/gin-gonic/gin"
++	schemaapi "github.com/wignerStan/infra/go/network/http/openapi"
++	openapigin "github.com/wignerStan/infra/go/network/http/openapi/gin"
++	gatewayentry "github.com/wignerStan/remote-storage-gateway/go/controlplane/httpapi"
+ )
+ 
+ func Init(e *gin.Engine) {
++	if conf.GatewayManaged() {
++		initManaged(e)
++		return
++	}
+ 	e.ContextWithFallback = true
+ 	if !utils.SliceContains([]string{"", "/"}, conf.URL.Path) {
+ 		e.GET("/", func(c *gin.Context) {
+@@ -29,6 +38,10 @@ func Init(e *gin.Engine) {
+ 		e.Use(middlewares.ForceHttps)
+ 	}
+ 	g.Any("/ping", func(c *gin.Context) {
++		if GatewayControl != nil && !GatewayControl.Ready() {
++			c.Status(503)
++			return
++		}
+ 		c.String(200, "pong")
+ 	})
+ 	g.GET("/favicon.ico", handles.Favicon)
+@@ -157,7 +170,7 @@ func Init(e *gin.Engine) {
+ 	fsAndShare(api.Group("/fs", middlewares.Auth(true)))
+ 	_task(auth.Group("/task", middlewares.AuthNotGuest))
+ 	_sharing(auth.Group("/share", middlewares.AuthNotGuest))
+-	admin(auth.Group("/admin", middlewares.AuthAdmin))
++	admin(e, auth.Group("/admin", middlewares.AuthAdmin))
+ 	if flags.Debug || flags.Dev {
+ 		debug(g.Group("/debug"))
+ 	}
+@@ -166,7 +179,9 @@ func Init(e *gin.Engine) {
+ 	})
+ }
+ 
+-func admin(g *gin.RouterGroup) {
++func admin(e *gin.Engine, g *gin.RouterGroup) {
++	registerControlRoutes(e, g)
++
+ 	meta := g.Group("/meta")
+ 	meta.GET("/list", handles.ListMetas)
+ 	meta.GET("/get", handles.GetMeta)
+@@ -365,3 +380,17 @@ func InitS3(e *gin.Engine) {
+ 	Cors(e)
+ 	S3Server(e.Group("/"))
+ }
++
++func registerControlRoutes(e *gin.Engine, g *gin.RouterGroup) {
++	management, managementErr := controlplane.Load(conf.Conf.ControlTargetsFile)
++	controlGroup := g.Group("/control")
++	entry := httpapi.NewEntry(management, managementErr)
++	table, err := schemaapi.Compose(httpapi.APIConfig(), entry.RegisterRoutes, gatewayentry.NewEntry(GatewayControl).RegisterRoutes)
++	if err != nil {
++		panic(err)
++	}
++	if err = openapigin.Mount(e, controlGroup, table, openapigin.Options{OpenAPIPath: "/openapi", SchemasPath: "/schemas", Errors: httpapi.ErrorPolicy()}); err != nil {
++		panic(err)
++	}
++
++}

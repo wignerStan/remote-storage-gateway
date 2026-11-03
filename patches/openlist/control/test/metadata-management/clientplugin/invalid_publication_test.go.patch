@@ -1,0 +1,57 @@
+diff --git a/clientplugin/invalid_publication_test.go b/clientplugin/invalid_publication_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..662ee1a46cf3340e8a7d8ae798a37db74af3110b
+--- /dev/null
++++ b/clientplugin/invalid_publication_test.go
+@@ -0,0 +1,51 @@
++package clientplugin_test
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"os"
++	"path/filepath"
++	"runtime"
++	"strings"
++	"testing"
++	"time"
++
++	infraexec "github.com/wignerStan/infra/go/process/exec"
++	"github.com/wignerStan/network-data-plane-worker/go/nativeclient"
++)
++
++func TestInvalidPublicationIdentityFailsWithoutAbortingHost(t *testing.T) {
++	if path := os.Getenv("OPENLIST_INVALID_PUBLICATION_PATH"); path != "" {
++		body, err := os.ReadFile(path)
++		if err != nil {
++			t.Fatal(err)
++		}
++		digest := sha256.Sum256(body)
++		if _, err = nativeclient.Inspect(context.Background(), path, hex.EncodeToString(digest[:]), "client.openlist", "go"); err == nil {
++			t.Fatal("unregistered publication was admitted")
++		}
++		return
++	}
++	_, source, _, _ := runtime.Caller(0)
++	root := filepath.Dir(filepath.Dir(source))
++	path := filepath.Join(t.TempDir(), "unregistered-openlist.so")
++	build := infraexec.NewSpec(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-buildmode=c-shared", "-buildvcs=false", "-o", path, "./cmd/openlist-client-plugin").WithTimeout(3 * time.Minute).WithEnv(infraexec.EnvInheritAllButRedacted())
++	build.Dir = root
++	out, err := infraexec.RunContext(context.Background(), build)
++	if err != nil {
++		t.Fatalf("build unregistered fixture: %v %s%s", err, out.StdoutString(), out.StderrString())
++	}
++	values := map[string]string{}
++	for _, item := range os.Environ() {
++		if key, value, ok := strings.Cut(item, "="); ok {
++			values[key] = value
++		}
++	}
++	values["OPENLIST_INVALID_PUBLICATION_PATH"] = path
++	child := infraexec.NewSpec(os.Args[0], "-test.run=^TestInvalidPublicationIdentityFailsWithoutAbortingHost$", "-test.v").WithTimeout(30 * time.Second).WithEnv(infraexec.EnvClean(values))
++	out, err = infraexec.RunContext(context.Background(), child)
++	if err != nil {
++		t.Fatalf("artifact rejection aborted its host: %v %s%s", err, out.StdoutString(), out.StderrString())
++	}
++}

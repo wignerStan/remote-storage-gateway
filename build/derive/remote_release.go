@@ -93,7 +93,7 @@ func (b *builder) collectRemote() error {
 	if err = os.MkdirAll(filepath.Join(b.output, "bin"), 0755); err != nil {
 		return err
 	}
-	for _, name := range []string{"openlist-control-plane", "storage-worker", "client-openlist.so", "client-rclone.so", "transfer-reapi.so", "gateway-admin", "rclone"} {
+	for _, name := range []string{"gateway", "openlist-control-plane", "storage-worker", "client-openlist.so", "client-rclone.so", "transfer-reapi.so", "gateway-admin", "rclone"} {
 		source := filepath.Join(bin, "native_release", name)
 		target := filepath.Join(b.output, "bin", name)
 		if err = copyInput(source, target); err != nil {
@@ -126,7 +126,7 @@ func (b *builder) remoteImages() error {
 	if _, err := b.admitRemoteSnapshot(); err != nil {
 		return err
 	}
-	if err := b.remoteBuild("--output_groups=+oci_tarball,+digest", "//:gateway_image", "//:control_plane_image", "@rclone_data_plane//:rclone_image"); err != nil {
+	if err := b.remoteBuild("--output_groups=+oci_tarball,+digest", "//:bundle_image", "//:gateway_image", "//:control_plane_image", "@rclone_data_plane//:rclone_image"); err != nil {
 		return err
 	}
 	_, err := b.admitRemoteSnapshot()

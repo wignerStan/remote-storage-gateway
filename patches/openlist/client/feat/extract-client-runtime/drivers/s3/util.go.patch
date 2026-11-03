@@ -1,0 +1,35 @@
+diff --git a/drivers/s3/util.go b/drivers/s3/util.go
+index cba8698fae60fede416f7a9d4f980d070a7523f6..05d975616d7b7c723a15b963c149536078eac089 100644
+--- a/drivers/s3/util.go
++++ b/drivers/s3/util.go
+@@ -11,11 +11,10 @@ import (
+ 
+ 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+ 	"github.com/OpenListTeam/OpenList/v4/internal/op"
++	"github.com/OpenListTeam/OpenList/v4/pkg/storage/s3session"
+ 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+ 	"github.com/aws/aws-sdk-go/aws"
+-	"github.com/aws/aws-sdk-go/aws/credentials"
+ 	"github.com/aws/aws-sdk-go/aws/request"
+-	"github.com/aws/aws-sdk-go/aws/session"
+ 	"github.com/aws/aws-sdk-go/service/s3"
+ 	log "github.com/sirupsen/logrus"
+ )
+@@ -39,13 +38,10 @@ func (d *S3) initSession() error {
+ 		}
+ 		accessKeyID, secretAccessKey, sessionToken = credentialsTmp.AccessKeyId, credentialsTmp.SecretAccessKey, credentialsTmp.SessionToken
+ 	}
+-	cfg := &aws.Config{
+-		Credentials:      credentials.NewStaticCredentials(accessKeyID, secretAccessKey, sessionToken),
+-		Region:           &d.Region,
+-		Endpoint:         &d.Endpoint,
+-		S3ForcePathStyle: aws.Bool(d.ForcePathStyle),
+-	}
+-	d.Session, err = session.NewSession(cfg)
++	d.Session, err = s3session.New(s3session.Config{
++		AccessKeyID: accessKeyID, SecretAccessKey: secretAccessKey, SessionToken: sessionToken,
++		Region: d.Region, Endpoint: d.Endpoint, ForcePathStyle: d.ForcePathStyle,
++	})
+ 	return err
+ }
+ 

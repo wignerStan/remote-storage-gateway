@@ -3,14 +3,15 @@ package controlplane
 import (
 	"context"
 	"errors"
+	cpconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/control"
 	"github.com/wignerStan/remote-storage-gateway/go/contracts/control/broker"
 	"testing"
 )
 
 func TestTransferPolicyIsExactBoundedAndAmbiguityDenies(t *testing.T) {
 	in := broker.TransferIntent{Principal: "worker-a", Authority: "cache.local", Method: "/google.bytestream.ByteStream/Read", SourceID: "cas", TargetID: "upstream"}
-	rule := Rule{InstanceID: in.Principal, Authority: in.Authority, SourceID: in.SourceID, TargetID: in.TargetID, Decision: broker.Decision{RouteID: "cas", WorkerDataEndpoint: "http://127.0.0.1:8080", ApprovedUpstreamID: "cas", TTLSeconds: 30, MaxMessageBytes: 1 << 20, MaxInflightBytes: 4 << 20, Methods: []string{in.Method}}}
-	rules := []Rule{rule}
+	rule := cpconfig.Rule{InstanceID: in.Principal, Authority: in.Authority, SourceID: in.SourceID, TargetID: in.TargetID, Decision: broker.Decision{RouteID: "cas", WorkerDataEndpoint: "http://127.0.0.1:8080", ApprovedUpstreamID: "cas", TTLSeconds: 30, MaxMessageBytes: 1 << 20, MaxInflightBytes: 4 << 20, Methods: []string{in.Method}}}
+	rules := []cpconfig.Rule{rule}
 	grant, e := resolve(rules, in)
 	if e != nil {
 		t.Fatal(e)
@@ -30,12 +31,12 @@ func TestTransferPolicyIsExactBoundedAndAmbiguityDenies(t *testing.T) {
 		t.Fatal("ambiguous policy admitted")
 	}
 	rule.Decision.TTLSeconds = 0
-	if _, e = resolve([]Rule{rule}, in); !errors.Is(e, broker.ErrDenied) {
+	if _, e = resolve([]cpconfig.Rule{rule}, in); !errors.Is(e, broker.ErrDenied) {
 		t.Fatal("unbounded grant admitted")
 	}
 }
 func TestManagerDefaultDeniesAndCloseIsIdempotent(t *testing.T) {
-	m, e := New(Config{})
+	m, e := New(cpconfig.Config{})
 	if e != nil {
 		t.Fatal(e)
 	}

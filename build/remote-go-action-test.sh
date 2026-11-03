@@ -60,8 +60,8 @@ rclone_version=v1.75.2
 ENV
 printf 'standalone materializer fixture\n' > "$work/materializer"
 (umask 077; cd "$work/exec" && SHOULD_NOT_LEAK=sentinel "$runner" "$work/inputs/source-map.tsv" "$work/inputs/build.env" "$work/ui.tar" "$work/output" "$work/materializer")
-[[ $(find "$work/output" -type f | wc -l) == 7 ]]
-[[ $(sed -n '2p' "$work/output/openlist-control-plane" "$work/output/storage-worker" "$work/output/"*.so "$work/output/gateway-admin" | sort -u | wc -l) == 1 ]]
+[[ $(find "$work/output" -type f | wc -l) == 8 ]]
+[[ $(sed -n '2p' "$work/output/gateway" "$work/output/openlist-control-plane" "$work/output/storage-worker" "$work/output/"*.so "$work/output/gateway-admin" | sort -u | wc -l) == 1 ]]
 grep -q -- '-buildmode=c-shared' "$work/output/client-openlist.so"
 grep -q -- 'dataplane_l7' "$work/output/storage-worker"
 cmp "$work/materializer" "$work/output/rclone"
@@ -87,4 +87,4 @@ cp "$work/original-env" "$work/inputs/build.env"
 first=$(head -1 "$work/inputs/payload.sha256"); payload=${first##* }
 printf 'corrupt\n' >> "$work/inputs/$payload"
 reject corruption 'payload hash mismatch'
-printf 'remote Go action contract: PASS (six compilations plus standalone materializer, isolated environment/cache cleanup, duplicate/path/env/hash rejection)\n'
+printf 'remote Go action contract: PASS (seven compilations plus standalone materializer, isolated environment/cache cleanup, duplicate/path/env/hash rejection)\n'

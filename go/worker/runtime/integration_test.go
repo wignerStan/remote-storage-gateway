@@ -51,14 +51,18 @@ func TestDynamicGatewayStreamingAndGeneration(t *testing.T) {
 	defer cancel()
 	_, source, _, _ := runtime.Caller(0)
 	root := filepath.Dir(filepath.Dir(filepath.Dir(source)))
-	so := filepath.Join(t.TempDir(), "openlist-client.so")
-	// The source builder binds this exact patched upstream module in go.work.
-	// Build its plugin rather than reaching into the retired editable fork.
-	spec := infraexec.NewSpec(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-buildmode=c-shared", "-buildvcs=false", "-ldflags", "-X main.buildDigest=sha256:"+strings.Repeat("2", 64), "-o", so, "github.com/OpenListTeam/OpenList/v4/cmd/openlist-client-plugin").WithTimeout(3 * time.Minute).WithEnv(infraexec.EnvInheritAllButRedacted())
-	spec.Dir = root
-	out, err := infraexec.RunContext(ctx, spec)
-	if err != nil {
-		t.Fatalf("build independent provider: %v %s%s", err, out.StdoutString(), out.StderrString())
+	so := os.Getenv("REMOTE_GATEWAY_OPENLIST_PLUGIN")
+	if so == "" {
+		so = filepath.Join(t.TempDir(), "openlist-client.so")
+		// The source builder binds this exact patched upstream module in go.work.
+		// Build its plugin rather than reaching into the retired editable fork.
+		spec := infraexec.NewSpec(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-buildmode=c-shared", "-buildvcs=false", "-ldflags", "-X main.buildDigest=sha256:"+strings.Repeat("2", 64), "-o", so, "github.com/OpenListTeam/OpenList/v4/cmd/openlist-client-plugin").WithTimeout(3 * time.Minute).WithEnv(infraexec.EnvInheritAllButRedacted())
+		spec.Dir = root
+		out, err := infraexec.RunContext(ctx, spec)
+		if err != nil {
+			t.Fatalf("build independent provider: %v %s%s", err, out.StdoutString(), out.StderrString())
+		}
+
 	}
 	elf, err := os.ReadFile(so)
 	if err != nil {

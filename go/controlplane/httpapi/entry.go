@@ -40,9 +40,13 @@ type ReplaceBody struct {
 	Selection dp.Selection `json:"selection"`
 }
 type Output[T any] struct{ Body T }
-type Entry struct{ manager *controlplane.Manager }
+type Registry interface {
+	Instances() []controlplane.Instance
+	Worker(string) (broker.WorkerControl, error)
+}
+type Entry struct{ manager Registry }
 
-func NewEntry(m *controlplane.Manager) *Entry { return &Entry{m} }
+func NewEntry(m Registry) *Entry { return &Entry{m} }
 func (e *Entry) Instances(context.Context, *Empty) (*Output[[]controlplane.Instance], error) {
 	if e.manager == nil {
 		return nil, reject(503)

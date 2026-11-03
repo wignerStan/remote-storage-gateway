@@ -1,0 +1,82 @@
+diff --git a/internal/op/storage.go b/internal/op/storage.go
+index 42b8c9d8e33eb6a6ee05ff818f1db385b17e70e4..8c081a2abccf735dba2d04d85ef218a39819fa43 100644
+--- a/internal/op/storage.go
++++ b/internal/op/storage.go
+@@ -3,6 +3,7 @@ package op
+ import (
+ 	"context"
+ 	"fmt"
++	"github.com/OpenListTeam/OpenList/v4/internal/conf"
+ 	"reflect"
+ 	"runtime"
+ 	"sort"
+@@ -46,6 +47,9 @@ func GetStorageByMountPath(mountPath string) (driver.Driver, error) {
+ // CreateStorage Save the storage to database so storage can get an id
+ // then instantiate corresponding driver and save it in memory
+ func CreateStorage(ctx context.Context, storage model.Storage) (uint, error) {
++	if conf.GatewayManaged() {
++		return 0, ErrManagedGateway
++	}
+ 	storage.Modified = time.Now()
+ 	storage.MountPath = utils.FixAndCleanPath(storage.MountPath)
+ 	var err error
+@@ -73,6 +77,9 @@ func CreateStorage(ctx context.Context, storage model.Storage) (uint, error) {
+ 
+ // LoadStorage load exist storage in db to memory
+ func LoadStorage(ctx context.Context, storage model.Storage) error {
++	if conf.GatewayManaged() {
++		return ErrManagedGateway
++	}
+ 	storage.MountPath = utils.FixAndCleanPath(storage.MountPath)
+ 	// check driver first
+ 	driverName := storage.Driver
+@@ -96,6 +103,9 @@ func getCurrentGoroutineStack() string {
+ 
+ // initStorage initialize the driver and store to storagesMap
+ func initStorage(ctx context.Context, storage model.Storage, storageDriver driver.Driver) (err error) {
++	if conf.GatewayManaged() {
++		return ErrManagedGateway
++	}
+ 	storageDriver.SetStorage(storage)
+ 	driverStorage := storageDriver.GetStorage()
+ 	defer func() {
+@@ -169,6 +179,9 @@ func IsUseOnlineAPI(storageDriver driver.Driver) bool {
+ }
+ 
+ func EnableStorage(ctx context.Context, id uint) error {
++	if conf.GatewayManaged() {
++		return ErrManagedGateway
++	}
+ 	storage, err := db.GetStorageById(id)
+ 	if err != nil {
+ 		return errors.WithMessage(err, "failed get storage")
+@@ -189,6 +202,9 @@ func EnableStorage(ctx context.Context, id uint) error {
+ }
+ 
+ func DisableStorage(ctx context.Context, id uint) error {
++	if conf.GatewayManaged() {
++		return ErrManagedGateway
++	}
+ 	storage, err := db.GetStorageById(id)
+ 	if err != nil {
+ 		return errors.WithMessage(err, "failed get storage")
+@@ -220,6 +236,9 @@ func DisableStorage(ctx context.Context, id uint) error {
+ // get old storage first
+ // drop the storage then reinitialize
+ func UpdateStorage(ctx context.Context, storage model.Storage) error {
++	if conf.GatewayManaged() {
++		return ErrManagedGateway
++	}
+ 	oldStorage, err := db.GetStorageById(storage.ID)
+ 	if err != nil {
+ 		return errors.WithMessage(err, "failed get old storage")
+@@ -260,6 +279,9 @@ func UpdateStorage(ctx context.Context, storage model.Storage) error {
+ }
+ 
+ func DeleteStorageById(ctx context.Context, id uint) error {
++	if conf.GatewayManaged() {
++		return ErrManagedGateway
++	}
+ 	storage, err := db.GetStorageById(id)
+ 	if err != nil {
+ 		return errors.WithMessage(err, "failed get storage")
