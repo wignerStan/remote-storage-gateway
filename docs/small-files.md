@@ -78,6 +78,11 @@ Metadata HEAD, PROPFIND, conditional GET and invalid ranges do not fetch file
 payloads to sniff MIME type. An extension-derived type or application/octet-stream
 is published by the DAV entry instead.
 
+Provider failures before any response payload produce `503` with `Retry-After`,
+including cache admission pressure. Real missing files, conditional responses
+and invalid ranges retain their normal statuses. Once streaming has begun, the
+entry preserves the committed response and never replays provider I/O.
+
 Creating an archive is a separate, explicit batch operation. Upstream
 [`rclone archive create`](https://rclone.org/commands/rclone_archive_create/)
 can publish ZIP to a remote. The Gateway does not silently pack/delete existing

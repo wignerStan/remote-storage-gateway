@@ -67,6 +67,16 @@ DB metadata and typed control routes; legacy mode remains a separate profile.
 The seventh patch follows Infra’s published `plugins/native` import in the
 extracted native test without rewriting the earlier patches.
 
+The eighth follows the purpose-specific schema owners: `config/schema` derives
+configuration, `network/http/openapi` admits typed HTTP declarations, and its
+`gin` facet mounts them. Entry keeps its route and rejection policy ownership.
+The serving package acquires no Huma dependency.
+
+The workspace explicitly admits Infra’s tracked Huma implementation through its
+existing source-relationship record and declared Go-module replacement. Module
+identity must match; adjacent or undeclared source is rejected. Its actual source
+bytes and ownership record contribute to the native build fingerprint.
+
 ## Build stages
 
 Initialize the exact submodules, then select the reviewed Infra checkout and an
