@@ -10,6 +10,32 @@ pull(
     platforms = ["linux/amd64"],
     layer_handling = "lazy",
 )
-local_inputs = use_repo_rule("//build:runtime_inputs.bzl", "runtime_inputs")
-local_inputs(name = "runtime_inputs")
-local_inputs(name = "control_plane_inputs", composition = "control-plane")
+bazel_dep(name = "aspect_rules_js", version = "3.5.1")
+bazel_dep(name = "rules_nodejs", version = "6.7.3")
+source_inputs = use_repo_rule("//build:source_inputs.bzl", "source_inputs")
+source_inputs(name = "build_inputs")
+node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
+node.toolchain(node_version = "24.11.0")
+use_repo(node, "nodejs_toolchains")
+register_toolchains("@nodejs_toolchains//:all")
+npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")
+npm.npm_translate_lock(
+    name = "ui_npm",
+    pnpm_lock = "@build_inputs//workspace/openlist-ui:pnpm-lock.yaml",
+    use_pnpm = "@build_inputs//:tools/pnpm/dist/pnpm.mjs",
+    update_pnpm_lock = False,
+    use_home_npmrc = False,
+    bins = {"vite": ["vite=bin/vite.js"]},
+    data = [
+        "@build_inputs//workspace/openlist-ui:package.json",
+        "@build_inputs//workspace/openlist-ui:pnpm-workspace.yaml",
+        "@build_inputs//workspace/openlist-ui:patches/vite-plugin-dynamic-base.patch",
+    ],
+    run_lifecycle_hooks = False,
+    custom_postinstalls = {"pngjs@5.0.0": "chmod -R a+X ."},
+    lifecycle_hooks_no_sandbox = False,
+)
+use_repo(npm, "ui_npm")
+
+bazel_dep(name = "rclone_data_plane", version = "0.1.0")
+local_path_override(module_name = "rclone_data_plane", path = "../rclone")

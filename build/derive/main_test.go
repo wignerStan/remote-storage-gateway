@@ -477,7 +477,7 @@ func TestNativeBuildIdentityTracksBackendPatchesAndRecipe(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
-	productInputs := map[string]string{"go/client.go": "package client\n", ".git-source-relationships/openlist.json": "product source\n", "patches/openlist/0001.patch": "OpenList patch\n", "build/toolchain.json": "tools\n", "Makefile": "flags\n"}
+	productInputs := map[string]string{"go/client.go": "package client\n", ".git-source-relationships/openlist.json": "product source\n", "patches/openlist/0001.patch": "OpenList patch\n", "build/toolchain.json": "tools\n", "Makefile": "flags\n", "BUILD.bazel": "actions\n", "MODULE.bazel": "modules\n", ".bazelrc": "remote\n"}
 	infraInputs := map[string]string{"go/storage/cloud/backend.go": "package cloud\n", "go/storage/vfs/cache.go": "package vfs\n", "third_party/huma/schema.go": "package huma\n"}
 	for _, input := range []struct {
 		root   string
