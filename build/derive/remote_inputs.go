@@ -73,6 +73,12 @@ func (b *builder) remoteInputs() error {
 	if _, err = b.verifyModuleSnapshot(version, series); err != nil {
 		return err
 	}
+	// The standalone source owner computes its own fingerprint. Never substitute
+	// an old binary receipt after source or build recipe changes.
+	native, err := b.nativeFingerprint()
+	if err != nil {
+		return err
+	}
 	inputDir := filepath.Join(b.output, "build-inputs")
 	if err := os.MkdirAll(inputDir, 0755); err != nil {
 		return err
@@ -123,6 +129,7 @@ func (b *builder) remoteInputs() error {
 			}},
 			{Workspace: filepath.Join(b.output, "materializer/go.work"), Stage: "go-native.work", Targets: []buildinputs.Target{
 				{Directory: filepath.Join(b.output, "materializer/source/rclone"), Package: ".", CGOEnabled: true},
+ {Directory:filepath.Join(b.materializer,"go"),Package:"./build/derive",CGOEnabled:true},
 			}},
 		},
 	})
@@ -138,12 +145,6 @@ func (b *builder) remoteInputs() error {
 		return err
 	}
 	uiVersion, err := readUIVersion(filepath.Join(b.sourcePath("openlist-ui"), "package.json"))
-	if err != nil {
-		return err
-	}
-	// The standalone source owner computes its own fingerprint. Never substitute
-	// an old binary receipt after source or build recipe changes.
-	native, err := b.nativeFingerprint()
 	if err != nil {
 		return err
 	}
