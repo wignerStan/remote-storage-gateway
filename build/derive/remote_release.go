@@ -68,7 +68,7 @@ func (b *builder) collectRemote() error {
 	}
 	// Owning the build prevents stale outputs being relabelled after a failed or
 	// differently configured external invocation. UI is explicitly top-level.
-	if err = b.remoteBuild("//:native_release", "//:ui_dist"); err != nil {
+	if err = b.remoteBuild("//:native_release", "//:ui_dist", "@rclone_data_plane//:native_rclone/rclone.json"); err != nil {
 		return err
 	}
 	if _, err = b.admitRemoteSnapshot(); err != nil {
@@ -115,7 +115,7 @@ func (b *builder) collectRemote() error {
 			return err
 		}
 	}
-	_, err = b.nativeTool("-binary", filepath.Join(b.output, "bin/rclone"), "collect-artifact")
+	_, err = b.nativeTool("-binary", filepath.Join(b.output, "bin/rclone"), "-binary-receipt", filepath.Join(bin, "external/rclone_data_plane+/native_rclone/rclone.json"), "collect-artifact")
 	return err
 }
 
