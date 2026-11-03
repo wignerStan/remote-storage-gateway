@@ -392,10 +392,9 @@ func buildEnvironment(overrides map[string]string) processexec.EnvPolicy {
 
 func (b *builder) command(dir, program string, args ...string) (string, error) {
 	s := processexec.NewSpec(program, args...).WithTimeout(30 * time.Minute).WithEnv(buildEnvironment(map[string]string{
-		"GOWORK": "off", "GOCACHE": filepath.Join(b.output, "go-cache"),
+		"GOWORK":             "off",
 		"GIT_OPTIONAL_LOCKS": "0",
-		"XDG_CACHE_HOME":     filepath.Join(b.output, "cache"), "npm_config_cache": filepath.Join(b.output, "npm-cache"),
-		"HUSKY": "0", "CI": "true",
+		"HUSKY":              "0", "CI": "true",
 	}))
 	s.Dir = dir
 	s.MaxStdout = 8 << 20
@@ -651,11 +650,19 @@ func (b *builder) run(stage string) error {
 			return e
 		}
 		return b.workspace()
+	case "remote-inputs":
+		return b.remoteInputs()
 	case "module-source":
 		return b.materializeRcloneModule()
 	case "ui":
-		return b.ui()
-	case "cp", "plugin", "test":
+		return b.remoteBuild("//:ui_dist")
+	case "cp", "plugin", "remote":
+		return b.collectRemote()
+	case "images":
+		return b.remoteImages()
+	case "collect":
+		return b.collectRemote()
+	case "test":
 		return b.compile(stage)
 	case "inputs":
 		return b.imageInputs()
@@ -971,178 +978,30 @@ func treeDigest(root string) (string, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
-func (b *builder) ui() error {
-	src := b.sourcePath("openlist-ui")
-	r, e := b.load("openlist-ui")
-	if e != nil {
-		return e
-	}
-	if e = b.verify(r); e != nil {
-		return e
-	}
-	if e = b.verifyDerived(r); e != nil {
-		return e
-	}
-	var pkg struct {
-		Version        string
-		PackageManager string `json:"packageManager"`
-	}
-	data, e := os.ReadFile(filepath.Join(src, "package.json"))
-	if e != nil {
-		return e
-	}
-	if e = json.Unmarshal(data, &pkg); e != nil {
-		return e
-	}
-	if pkg.PackageManager != "pnpm@"+b.tools.PNPM {
-		return errors.New("pinned UI package manager does not match toolchain")
-	}
-	base := []string{"exec", "node@" + b.tools.Node, "pnpm@" + b.tools.PNPM, "--", "pnpm"}
-	args := append(append([]string{}, base...), "install", "--frozen-lockfile", "--store-dir", filepath.Join(b.output, "pnpm-store"))
-	if _, e = b.command(src, b.mise, args...); e != nil {
-		return e
-	}
-	args = append(append([]string{}, base...), "run", "build")
-	if _, e = b.command(src, b.mise, args...); e != nil {
-		return e
-	}
-	// public/dist in the disposable derived source is the existing go:embed input.
-	dst := filepath.Join(b.sourcePath("openlist"), "public/dist")
-	if _, e = os.Stat(filepath.Join(src, "dist/index.html")); e != nil {
-		return fmt.Errorf("UI build produced no index.html: %w", e)
-	}
-	if e = os.RemoveAll(dst); e != nil {
-		return e
-	}
-	if e = copyTree(filepath.Join(src, "dist"), dst); e != nil {
-		return e
-	}
-	digest, e := treeDigest(dst)
-	if e != nil {
-		return e
-	}
-	lock, e := hashFile(filepath.Join(src, "pnpm-lock.yaml"))
-	if e != nil {
-		return e
-	}
-	return writeJSON(filepath.Join(b.output, "receipts/ui.json"), map[string]any{"upstream": r.Upstream, "version": pkg.Version, "pnpm_lock_sha256": lock, "dist_sha256": digest, "toolchain": b.tools, "embedded_input": dst})
-}
 func (b *builder) compile(stage string) error {
-	src := b.sourcePath("openlist")
-	if _, e := os.Stat(filepath.Join(b.output, "receipts/openlist-source.json")); e != nil {
-		return e
+	if stage != "test" {
+		return errors.New("product compilation requires Buildbarn")
 	}
-	work := filepath.Join(b.output, "go.work")
-	if _, e := os.Stat(work); e != nil {
-		return e
+	r, err := b.load("openlist")
+	if err != nil {
+		return err
 	}
-	if e := os.MkdirAll(filepath.Join(b.output, "bin"), 0755); e != nil {
-		return e
+	if err = b.verify(r); err != nil {
+		return err
 	}
-	args := []string{"exec", "go@" + b.tools.Go, "--", "go"}
-	var artifact string
-	var buildFingerprint string
-	r, e := b.load("openlist")
-	if e != nil {
-		return e
+	if err = b.verifyDerived(r); err != nil {
+		return err
 	}
-	if e = b.verify(r); e != nil {
-		return e
+	args := []string{"exec", "go@" + b.tools.Go, "--", "go", "test", "-race", "./clientplugin", "./pluginentry", "./pkg/gowebdav", "./pkg/storage/s3session", "./internal/controlplane/...", "./server"}
+	env := map[string]string{"GOWORK": filepath.Join(b.output, "go.work"), "CGO_ENABLED": "1", "CGO_CFLAGS": "-I" + filepath.Join(b.infra, "rust/crates/interop/native-plugin-protocol/include") + " -I" + filepath.Join(b.infra, "c/plugin-interop/include")}
+	spec := processexec.NewSpec(b.mise, args...).WithTimeout(30 * time.Minute).WithEnv(buildEnvironment(env))
+	spec.Dir, spec.MaxStdout, spec.MaxStderr = b.sourcePath("openlist"), 8<<20, 8<<20
+	result, err := processexec.RunContext(context.Background(), spec)
+	if err != nil {
+		return fmt.Errorf("derived tests failed: %w\n%s%s", err, result.Stdout, result.Stderr)
 	}
-	if e = b.verifyDerived(r); e != nil {
-		return e
-	}
-	if stage == "test" {
-		args = append(args, "test", "-race", "./clientplugin", "./pluginentry", "./pkg/gowebdav", "./pkg/storage/s3session", "./internal/controlplane/...", "./server")
-	} else if stage == "plugin" {
-		artifact = "client-openlist.so"
-		provenance, e := b.provenanceDigest()
-		if e != nil {
-			return e
-		}
-		buildFingerprint = "sha256:" + provenance
-		args = append(args, "build", "-trimpath", "-buildvcs=false", "-buildmode=c-shared", "-ldflags", "-X main.buildDigest=sha256:"+provenance, "-o", filepath.Join(b.output, "bin", artifact), "./cmd/openlist-client-plugin")
-	} else {
-		var ui struct {
-			DistSHA string `json:"dist_sha256"`
-			Version string `json:"version"`
-		}
-		data, e := os.ReadFile(filepath.Join(b.output, "receipts/ui.json"))
-		if e != nil {
-			return errors.New("build UI source before compiling embedded CP")
-		}
-		if e = json.Unmarshal(data, &ui); e != nil {
-			return e
-		}
-		actual, e := treeDigest(filepath.Join(src, "public/dist"))
-		if e != nil {
-			return e
-		}
-		if actual != ui.DistSHA {
-			return errors.New("embedded UI differs from reviewed build receipt")
-		}
-		artifact = "openlist-control-plane"
-		productID, e := b.git(b.root, "rev-parse", "HEAD")
-		if e != nil {
-			return e
-		}
-		dirty, e := b.git(b.root, "status", "--porcelain")
-		if e != nil {
-			return e
-		}
-		if dirty != "" {
-			productID += "-dirty"
-		}
-		flags := "-X github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=" + ui.Version + " -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=" + productID
-		args = append(args, "build", "-trimpath", "-buildvcs=false", "-ldflags", flags, "-o", filepath.Join(b.output, "bin", artifact), ".")
-	}
-	env := map[string]string{"GOWORK": work, "GOCACHE": filepath.Join(b.output, "go-cache"), "CGO_CFLAGS": "-I" + filepath.Join(b.infra, "rust/crates/interop/native-plugin-protocol/include") + " -I" + filepath.Join(b.infra, "c/plugin-interop/include")}
-	if stage == "cp" {
-		env["CGO_ENABLED"] = "0"
-	} else {
-		env["CGO_ENABLED"] = "1"
-	}
-	s := processexec.NewSpec(b.mise, args...).WithTimeout(30 * time.Minute).WithEnv(buildEnvironment(env))
-	s.Dir = src
-	s.MaxStdout = 8 << 20
-	s.MaxStderr = 8 << 20
-	o, e := processexec.RunContext(context.Background(), s)
-	if e != nil {
-		return fmt.Errorf("%s failed: %w\n%s%s", stage, e, o.Stdout, o.Stderr)
-	}
-	fmt.Print(string(o.Stdout))
-	if stage == "test" {
-		return nil
-	}
-	hash, e := hashFile(filepath.Join(b.output, "bin", artifact))
-	if e != nil {
-		return e
-	}
-	product, e := b.git(b.root, "rev-parse", "HEAD")
-	if e != nil {
-		return e
-	}
-	infra, e := b.git(b.infra, "rev-parse", "HEAD")
-	if e != nil {
-		return e
-	}
-	productDirty, e := b.git(b.root, "status", "--porcelain")
-	if e != nil {
-		return e
-	}
-	infraDirty, e := b.git(b.infra, "status", "--porcelain")
-	if e != nil {
-		return e
-	}
-	return writeJSON(filepath.Join(b.output, "receipts", artifact+".json"), map[string]any{"artifact": artifact, "sha256": hash, "derived_tree": r.ResultTree, "patch_digest": patchDigest(r), "build_digest": buildFingerprint, "product_commit": product, "product_dirty": productDirty != "", "infra_commit": infra, "infra_dirty": infraDirty != "", "toolchain": b.tools})
-}
-func patchDigest(r relationship) string {
-	h := sha256.New()
-	fmt.Fprintln(h, r.Upstream.Commit)
-	for _, p := range r.Patches {
-		fmt.Fprintf(h, "%d %s %s\n", p.Order, p.Path, p.SHA256)
-	}
-	return hex.EncodeToString(h.Sum(nil))
+	fmt.Print(string(result.Stdout))
+	return nil
 }
 
 func (b *builder) provenanceDigest() (string, error) {
@@ -1156,15 +1015,18 @@ func (b *builder) provenanceDigest() (string, error) {
 		}
 		fmt.Fprintf(h, "%s %s\n", name, digest)
 	}
-	recipe, e := hashFile(filepath.Join(b.root, "Makefile"))
-	if e != nil {
-		return "", e
+	for _, name := range []string{"Makefile", "BUILD.bazel", "MODULE.bazel", ".bazelrc"} {
+		recipe, e := hashFile(filepath.Join(b.root, name))
+		if e != nil {
+			return "", e
+		}
+		fmt.Fprintf(h, "%s %s\n", name, recipe)
 	}
 	infra, e := b.git(b.infra, "rev-parse", "HEAD")
 	if e != nil {
 		return "", e
 	}
-	fmt.Fprintf(h, "Makefile %s\ninfra %s\n", recipe, infra)
+	fmt.Fprintf(h, "infra %s\n", infra)
 	huma, e := sdkHuma(b.infra)
 	if e != nil {
 		return "", e
