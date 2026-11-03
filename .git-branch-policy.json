@@ -1,15 +1,5 @@
 {
-  "schema_version": "git-branch-policy/v1",
-  "domains": [
-    "storage/remote-gateway",
-    "storage/local-materialization",
-    "plugins/storage-client",
-    "code/upstream-extraction",
-    "build/images",
-    "plugins/encoded-transfer",
-    "process/worker-management",
-    "build/remote-execution"
-  ],
+  "schema_version": "git-branch-policy/v3",
   "types": [
     "build",
     "chore",
@@ -42,5 +32,7 @@
     "testing",
     "develop",
     "main"
-  ]
+  ],
+  "repository_owner": "repo",
+  "owners": {}
 }

@@ -35,7 +35,7 @@ func validateRemoteSnapshot(manifest remoteInputManifest, expected map[string]st
 
 func (b *builder) admitRemoteSnapshot() (remoteInputManifest, error) {
 	var manifest remoteInputManifest
-	if err := readJSON(filepath.Join(b.output, "build-inputs/manifest.json"), &manifest); err != nil {
+	if err := readJSONLimit(filepath.Join(b.output, "build-inputs/manifest.json"), &manifest, 128<<20); err != nil {
 		return manifest, err
 	}
 	digest, err := b.provenanceDigest()

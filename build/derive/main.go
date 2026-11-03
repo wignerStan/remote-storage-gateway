@@ -331,12 +331,23 @@ func main() {
 }
 
 func readJSON(path string, value any) error {
+	return readJSONLimit(path, value, 1<<20)
+}
+
+func readJSONLimit(path string, value any, limit int64) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	d := json.NewDecoder(io.LimitReader(f, 1<<20))
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if limit <= 0 || info.Size() > limit {
+		return fmt.Errorf("JSON exceeds %d byte limit: %s", limit, path)
+	}
+	d := json.NewDecoder(io.LimitReader(f, limit+1))
 	d.DisallowUnknownFields()
 	if err = d.Decode(value); err != nil {
 		return fmt.Errorf("decode %s: %w", path, err)

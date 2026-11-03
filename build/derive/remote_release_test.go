@@ -2,12 +2,42 @@ package main
 
 import (
 	"archive/tar"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	buildinputs "github.com/wignerStan/infra/go/code/buildsource"
 )
+
+func TestRemoteManifestHasItsOwnBoundedReader(t *testing.T) {
+	manifest := remoteInputManifest{Schema: "storage-gateway/build-inputs/v1", Config: map[string]string{"product_commit": "reviewed"}}
+	for i := 0; i < 12000; i++ {
+		manifest.Files = append(manifest.Files, buildinputs.File{Path: fmt.Sprintf("workspace/source/%06d.go", i), Source: "/admitted/source/module/version/path/package.go", SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Mode: "0644"})
+	}
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) <= 1<<20 {
+		t.Fatal("fixture must exceed the ordinary metadata bound")
+	}
+	file := filepath.Join(t.TempDir(), "manifest.json")
+	if err = os.WriteFile(file, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	var read remoteInputManifest
+	if err = readJSON(file, &read); err == nil {
+		t.Fatal("ordinary config bound was weakened")
+	}
+	if err = readJSONLimit(file, &read, 128<<20); err != nil || len(read.Files) != len(manifest.Files) {
+		t.Fatalf("real-size manifest unreadable: %d %v", len(read.Files), err)
+	}
+	if err = readJSONLimit(file, &read, int64(len(raw)-1)); err == nil {
+		t.Fatal("oversized manifest accepted")
+	}
+}
 
 func TestRemoteSnapshotRejectsRelabelledAndChangedInputs(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "source.go")
