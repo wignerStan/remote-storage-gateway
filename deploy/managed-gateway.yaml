@@ -58,8 +58,8 @@ spec:
             - {name: OPENLIST_HTTPS_PORT, value: '-1'}
             - {name: OPENLIST_FORCE_HTTPS, value: 'false'}
             - {name: OPENLIST_ENABLE_H3, value: 'false'}
-            - {name: HTTP_PROXY, value: 'http://172.16.0.1:10809'}
-            - {name: HTTPS_PROXY, value: 'http://172.16.0.1:10809'}
+            - {name: HTTP_PROXY, value: 'http://172.16.0.1:7897'}
+            - {name: HTTPS_PROXY, value: 'http://172.16.0.1:7897'}
             - {name: NO_PROXY, value: 'localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,incus.tail5ced8c.ts.net,CONTROL_ORIGIN_NO_PROXY'}
           securityContext:
             runAsUser: 1001
