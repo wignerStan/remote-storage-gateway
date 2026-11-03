@@ -8,6 +8,7 @@ import (
 	"fmt"
 	configsource "github.com/wignerStan/infra/go/config/source"
 	rclonebox "github.com/wignerStan/rclone/go/box"
+	"os"
 
 	"github.com/wignerStan/infra/go/process/supervisor"
 	"path/filepath"
@@ -54,6 +55,7 @@ type Manager struct {
 	boxes         map[string]*worker.Box
 	group         *supervisor.Group
 	clients       map[string]*control.WorkerClient
+	sockets       map[string]os.FileInfo
 	planes        map[string]*controlPlane
 	ready         bool
 	closed        bool
@@ -83,7 +85,7 @@ func New(c Config) (*Manager, error) {
 		return nil, broker.ErrInvalid
 	}
 	stop, cancel := context.WithCancel(context.Background())
-	m := &Manager{stop: stop, cancel: cancel, boxes: map[string]*worker.Box{}, clients: map[string]*control.WorkerClient{}, planes: map[string]*controlPlane{}, done: make(chan struct{})}
+	m := &Manager{stop: stop, cancel: cancel, boxes: map[string]*worker.Box{}, clients: map[string]*control.WorkerClient{}, sockets: map[string]os.FileInfo{}, planes: map[string]*controlPlane{}, done: make(chan struct{})}
 	// Own the complete config, including nested decision method slices and maps.
 	c, e := copyConfig(c)
 	if e != nil {
@@ -221,6 +223,9 @@ func (m *Manager) Start(ctx context.Context) (err error) {
 			return err
 		}
 	}
+	if err = m.admitSockets(); err != nil {
+		return err
+	}
 	roles := make([]supervisor.Role, 0, len(m.config.ControlPlanes)+len(m.config.Workers))
 	dependencies := make([]string, 0, len(m.config.ControlPlanes))
 	for _, spec := range m.config.ControlPlanes {
@@ -229,6 +234,7 @@ func (m *Manager) Start(ctx context.Context) (err error) {
 		if err != nil {
 			return err
 		}
+		m.watchSockets(&process, planeSockets(spec))
 		name := "control-plane/" + spec.ID
 		roles = append(roles, supervisor.Role{Name: name, Spec: process})
 		dependencies = append(dependencies, name)
@@ -238,6 +244,7 @@ func (m *Manager) Start(ctx context.Context) (err error) {
 		if err != nil {
 			return err
 		}
+		m.watchSockets(&process, workerSockets(spec))
 		roles = append(roles, supervisor.Role{Name: "worker/" + spec.Config.InstanceID, Depends: dependencies, Spec: process})
 	}
 	if len(roles) != 0 {
@@ -250,7 +257,12 @@ func (m *Manager) Start(ctx context.Context) (err error) {
 		m.mu.Unlock()
 	}
 	for _, s := range m.config.Materializers {
-		if err = m.startMaterializer(startup, s); err != nil {
+		err = m.startMaterializer(startup, s)
+		tracked := m.trackSockets([]string{s.Config.ControlSocket})
+		if err == nil {
+			err = tracked
+		}
+		if err != nil {
 			return fmt.Errorf("rclone %s: %w", s.Config.InstanceID, err)
 		}
 	}
@@ -412,6 +424,7 @@ func (m *Manager) beginClose() {
 				_ = plane.close(context.Background())
 			}
 			m.mu.Lock()
+			errs = append(errs, m.retireSockets())
 			m.closeErr = errors.Join(errs...)
 			m.closed = true
 			m.mu.Unlock()
