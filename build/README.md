@@ -131,15 +131,20 @@ module download automatically includes Infra's upstream patches. See the
 source assembly and the selected module version are distinct inputs.
 
 `build/toolchain.json` pins development tools managed by mise. Install those
-versions before building. Frontend dependencies use the pinned source's
-`pnpm-lock.yaml` and `pnpm install --frozen-lockfile`; Vite builds that source.
-The output is copied into the disposable OpenList `public/dist` before Go
-compiles its existing `go:embed all:dist`. A content receipt binds the assets to
+versions before building. Standard `aspect_rules_js` translates the pinned
+`pnpm-lock.yaml` into declared dependency inputs. Vite runs on Buildbarn with the
+declared Node/pnpm tools, without an install or network fetch in that action.
+Its deterministic dist archive feeds the remote Go compilation of the existing
+`go:embed all:dist`. Output collection restores that archive into the disposable
+OpenList `public/dist`. A content receipt binds the assets to
 the UI commit, lockfile and toolchain, and CP compilation rejects changed
 assets. No downloaded frontend release archive is a source-build result.
 
-All materialized sources, caches, receipts and binaries stay under the chosen
-`/tmp/trade-*` or `/var/tmp/trade-*` directory. A successful source receipt is
+Materialized sources, receipts and selected release outputs stay under the chosen
+`/tmp/trade-*` or `/var/tmp/trade-*` directory. Shared tool/module caches keep
+their existing common locations. Bazel uses the configured common user root;
+Buildbarn AC/CAS caches both compilation and image actions. Compiler scratch
+exists only inside its remote action and is removed on exit. A successful source receipt is
 published only after tree verification. Reusing the directory rechecks admitted
 source and rejects unrecorded code. A failed changed-input replay needs a fresh
 output directory rather than an automatic destructive reset.
@@ -163,17 +168,22 @@ trixie-slim index is pinned to
 `sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4`.
 The gateway image contains its program, both independent client `.so` files and
 the transfer plugin and public CA bundle. The CP-manager image additionally
-contains separate Worker/VFS child binaries and plugin artifacts. The VFS image
-contains its separate executable and CA bundle; there is no external frontend layer or `OPENLIST_DIST_DIR` override.
+contains separate Worker/VFS child binaries and plugin artifacts. The independent
+rclone repository owns the VFS image and its remote CLI compilation. Gateway
+consumes that declared output once; it does not compile a second CLI. There is
+no external frontend layer or `OPENLIST_DIST_DIR` override.
 
-Set `GATEWAY_IMAGE_INPUTS`, `CONTROL_PLANE_IMAGE_INPUTS` and `VFS_IMAGE_INPUTS` to external reviewed
-input directories. Each needs `inputs.json`, an exact filename-to-SHA-256 map.
-The repository rule verifies bytes and exposes only the allowlisted names.
-Never include operator configuration, credentials, databases or keys.
+`make prepare` generates source manifests referenced by `GATEWAY_BUILD_INPUTS`
+and `RCLONE_BUILD_INPUTS`. They map owned source paths to verified content hashes
+and modes without copying toolchains or module caches. The native compiler
+actions consume those inputs offline. Image layers consume their declared
+outputs directly; no local prebuilt-binary admission step is required. Operator
+configuration, credentials, databases and keys are never image inputs.
 
 ```sh
-bazel build --config=buildbarn --lockfile_mode=off \
-  --output_groups=+oci_tarball,+digest //:gateway_image //:control_plane_image
+make images INFRA_ROOT=/path/to/reviewed/infra \
+  DATA_PLANE_ROOT=/path/to/reviewed/data-plane-worker \
+  RCLONE_ROOT=/develop/network/rclone BUILD_DIR=/tmp/trade-remote-gateway-build
 ```
 
 Remote image actions have local fallback disabled. They use neither BuildKit,

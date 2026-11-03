@@ -121,10 +121,16 @@ It publishes only the Worker
 TLS port; CP and VFS bind loopback. Its readiness probe reaches the manager
 through the Worker and waits for completed activation and live children.
 
-Bazel `rules_img` builds the Worker, CP-manager and VFS images through Buildbarn.
-The CP image contains separate child binaries and native artifacts so it can
-manage them as processes. `make images` admits exact input hashes before image
-assembly. No Dockerfile builder daemon is used.
+Bazel builds Go binaries, native plugins, the embedded UI and OCI images through
+the shared Buildbarn executor and AC/CAS. `rules_img` assembles the Worker and
+CP-manager images; the independent rclone product owns its materializer image.
+The CP image includes separate child binaries and native artifacts. The rclone
+CLI is built once by its owning Bazel module and consumed as an action input.
+`make images` prepares checksummed source/toolchain inputs, then builds that same
+remote dependency graph. Remote Go compilation is offline and uses disposable
+action scratch space. It creates no persistent per-build Go or pnpm cache.
+Use the configured shared Bazel user root; do not override it per output directory.
+No Dockerfile builder daemon is used.
 
 Validation receipts under `docs/validation` describe their exact revisions.
 Older receipts and image candidates are historical evidence; they do not imply
