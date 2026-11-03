@@ -13,7 +13,47 @@ mkdir -p "$4"
 out=$(realpath "$4")
 inputs=$(dirname "$manifest")
 work=$(mktemp -d "$PWD/.remote-go.XXXXXXXX")
-trap 'rm -rf "$work"' EXIT
+copy_jobs=()
+copy_first_status=0
+join_copy_jobs() {
+    local pid status
+    for pid in "${copy_jobs[@]}"; do
+        if wait "$pid"; then
+            :
+        else
+            status=$?
+            if ((copy_first_status == 0)); then copy_first_status=$status; fi
+        fi
+    done
+    copy_jobs=()
+    return "$copy_first_status"
+}
+cleanup() {
+    local status=$? cleanup_status
+    trap - EXIT
+    trap '' INT TERM
+    if join_copy_jobs; then
+        :
+    elif ((status == 0)); then
+        status=$copy_first_status
+    fi
+    if rm -rf "$work"; then
+        :
+    else
+        cleanup_status=$?
+        if ((status == 0)); then status=$cleanup_status; fi
+    fi
+    exit "$status"
+}
+copy_source() {
+    # Only the parent owns scratch cleanup, after every copy process has joined.
+    trap - EXIT INT TERM
+    cp --reflink=auto --no-preserve=mode --no-target-directory -- "$1" "$2" || return "$?"
+    case "$3" in 644|0644) ;; *) chmod "$3" "$2" || return "$?";; esac
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 stage="$work/stage"
 mkdir -p "$stage" "$work/home" "$work/tmp" "$work/go-cache"
 declare -A paths=() verified=() values=() directories=()
@@ -45,9 +85,13 @@ while IFS=$'\t' read -r destination payload mode extra || [[ -n ${destination:-}
         mkdir -p "$parent"
         directories[$parent]=1
     fi
-    cp --reflink=auto --no-preserve=mode -- "$source" "$stage/$destination"
-    case "$mode" in 644|0644) ;; *) chmod "$mode" "$stage/$destination";; esac
+    copy_source "$source" "$stage/$destination" "$mode" &
+    copy_jobs+=("$!")
+    if ((${#copy_jobs[@]} == 8)); then
+        join_copy_jobs || fail "source copy failed (status $copy_first_status)"
+    fi
 done < "$manifest"
+join_copy_jobs || fail "source copy failed (status $copy_first_status)"
 printf 'Staged %s declared files in %ss\n' "${#paths[@]}" "$((SECONDS - stage_started))"
 while IFS= read -r row || [[ -n "$row" ]]; do
     [[ "$row" == *=* ]] || fail 'invalid build.env row'
