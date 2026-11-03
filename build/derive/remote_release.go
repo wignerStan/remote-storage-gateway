@@ -3,7 +3,6 @@ package main
 import (
 	"archive/tar"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -54,13 +53,11 @@ func (b *builder) admitRemoteSnapshot() (remoteInputManifest, error) {
 	if err != nil {
 		return manifest, err
 	}
-	var ui struct {
-		Version string `json:"version"`
-	}
-	if err = readJSON(filepath.Join(b.sourcePath("openlist-ui"), "package.json"), &ui); err != nil {
+	uiVersion, err := readUIVersion(filepath.Join(b.sourcePath("openlist-ui"), "package.json"))
+	if err != nil {
 		return manifest, err
 	}
-	expected := map[string]string{"gateway_digest": "sha256:" + digest, "rclone_digest": native, "product_commit": commit, "ui_version": ui.Version, "rclone_version": version}
+	expected := map[string]string{"gateway_digest": "sha256:" + digest, "rclone_digest": native, "product_commit": commit, "ui_version": uiVersion, "rclone_version": version}
 	return manifest, validateRemoteSnapshot(manifest, expected)
 }
 
@@ -71,7 +68,7 @@ func (b *builder) collectRemote() error {
 	}
 	// Owning the build prevents stale outputs being relabelled after a failed or
 	// differently configured external invocation. UI is explicitly top-level.
-	if err = b.remoteBuild("//:native_release", "//:ui_dist"); err != nil {
+	if err = b.remoteBuild("//:native_release", "//:ui_dist", "@rclone_data_plane//:native_rclone/rclone.json"); err != nil {
 		return err
 	}
 	if _, err = b.admitRemoteSnapshot(); err != nil {
@@ -118,7 +115,7 @@ func (b *builder) collectRemote() error {
 			return err
 		}
 	}
-	_, err = b.nativeTool("-binary", filepath.Join(b.output, "bin/rclone"), "collect-artifact")
+	_, err = b.nativeTool("-binary", filepath.Join(b.output, "bin/rclone"), "-binary-receipt", filepath.Join(bin, "external/rclone_data_plane+/native_rclone/rclone.json"), "collect-artifact")
 	return err
 }
 
@@ -224,14 +221,8 @@ func (b *builder) collectRemoteUI(archive string) error {
 	if err != nil {
 		return err
 	}
-	var pkg struct {
-		Version string `json:"version"`
-	}
-	data, err := os.ReadFile(filepath.Join(b.sourcePath("openlist-ui"), "package.json"))
+	version, err := readUIVersion(filepath.Join(b.sourcePath("openlist-ui"), "package.json"))
 	if err != nil {
-		return err
-	}
-	if err = json.Unmarshal(data, &pkg); err != nil {
 		return err
 	}
 	source, err := b.load("openlist-ui")
@@ -241,7 +232,7 @@ func (b *builder) collectRemoteUI(archive string) error {
 	return writeJSON(filepath.Join(b.output, "receipts/ui.json"), map[string]any{
 		"dist_sha256": distHash, "archive_sha256": archiveHash,
 		"embedded_input": destination, "pnpm_lock_sha256": lockHash,
-		"toolchain": b.tools, "upstream": source.Upstream, "version": pkg.Version,
+		"toolchain": b.tools, "upstream": source.Upstream, "version": version,
 		"execution": "Buildbarn", "cache": "shared REAPI AC/CAS",
 	})
 }

@@ -39,6 +39,27 @@ func TestRemoteManifestHasItsOwnBoundedReader(t *testing.T) {
 	}
 }
 
+func TestUpstreamPackageVersionAllowsItsOwnMetadata(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "package.json")
+	for _, fixture := range []struct{ body, version string }{
+		{`{"name":"openlist-frontend","version":"4.2.9","private":true,"scripts":{"build":"vite build"},"dependencies":{"solid-js":"1.9.9"}}`, "4.2.9"},
+		{`{"name":"missing-version"}`, ""},
+		{`{"version":42}`, ""},
+	} {
+		if err := os.WriteFile(file, []byte(fixture.body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		version, err := readUIVersion(file)
+		if fixture.version == "" {
+			if err == nil {
+				t.Fatal("invalid upstream version accepted")
+			}
+		} else if err != nil || version != fixture.version {
+			t.Fatalf("valid upstream package rejected: %q %v", version, err)
+		}
+	}
+}
+
 func TestRemoteSnapshotRejectsRelabelledAndChangedInputs(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "source.go")
 	if err := os.WriteFile(file, []byte("original"), 0644); err != nil {
