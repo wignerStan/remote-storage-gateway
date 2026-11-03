@@ -17,6 +17,7 @@ source: bootstrap
 	$(MAKE) -C $(RCLONE_ROOT) MISE=$(MISE) INFRA_ROOT=$(INFRA_ROOT) DATA_PLANE_ROOT=$(DATA_PLANE_ROOT) BUILD_DIR=$(BUILD_DIR)/materializer prepare
 prepare: source
 	$(SOURCE_TOOL) remote-inputs
+	$(SOURCE_TOOL) verify-inputs
 all: prepare
 	$(SOURCE_TOOL) collect
 ui: prepare
