@@ -1,1 +1,2 @@
 exports_files(["runtime_inputs.bzl"])
+exports_files(["remote-go-action.sh", "ui-action.sh", "working_directory"])
