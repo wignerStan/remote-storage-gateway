@@ -9,6 +9,9 @@ build:buildbarn --remote_local_fallback=false
 build:buildbarn --remote_download_outputs=toplevel
 build:buildbarn --remote_timeout=1800s
 build:buildbarn --remote_default_exec_properties=OSFamily=Linux
+build:buildbarn --action_env=HTTP_PROXY=http://172.16.0.1:7897
+build:buildbarn --action_env=HTTPS_PROXY=http://172.16.0.1:7897
+build:buildbarn --action_env=NO_PROXY=localhost,127.0.0.1,172.16.0.0/24,10.42.0.0/16,10.43.0.0/16
 common --@rules_img//img/settings:compress=gzip
 common --@rules_img//img/settings:remote_cache=grpc://172.16.0.210:8980
 build --symlink_prefix=/tmp/trade-remote-gateway-bazel-links/
