@@ -136,14 +136,8 @@ func (b *builder) remoteInputs() error {
 	if err != nil {
 		return err
 	}
-	var ui struct {
-		Version string `json:"version"`
-	}
-	uiBytes, err := os.ReadFile(filepath.Join(b.sourcePath("openlist-ui"), "package.json"))
+	uiVersion, err := readUIVersion(filepath.Join(b.sourcePath("openlist-ui"), "package.json"))
 	if err != nil {
-		return err
-	}
-	if err = json.Unmarshal(uiBytes, &ui); err != nil {
 		return err
 	}
 	// The standalone source owner computes its own fingerprint. Never substitute
@@ -152,7 +146,7 @@ func (b *builder) remoteInputs() error {
 	if err != nil {
 		return err
 	}
-	config := map[string]string{"gateway_digest": "sha256:" + digest, "rclone_digest": native, "product_commit": strings.TrimSpace(string(commitRaw)), "ui_version": ui.Version, "rclone_version": version}
+	config := map[string]string{"gateway_digest": "sha256:" + digest, "rclone_digest": native, "product_commit": strings.TrimSpace(string(commitRaw)), "ui_version": uiVersion, "rclone_version": version}
 	buildEnv, err := remoteBuildEnv(config)
 	if err != nil {
 		return err
@@ -173,6 +167,25 @@ func (b *builder) remoteInputs() error {
 	files = append(files, buildinputs.File{Path: "runtime/ca-certificates.crt", Source: b.ca, SHA256: caHash, Mode: "0644"})
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return writeJSON(filepath.Join(inputDir, "manifest.json"), remoteInputManifest{"storage-gateway/build-inputs/v1", files, config})
+}
+
+// Upstream package metadata has its own vocabulary. Read the version projection
+// without imposing the closed schema used for product-owned configuration.
+func readUIVersion(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	if err = json.Unmarshal(raw, &pkg); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(pkg.Version) == "" {
+		return "", fmt.Errorf("UI package metadata has no version")
+	}
+	return pkg.Version, nil
 }
 
 func (b *builder) nativeTool(args ...string) (string, error) {

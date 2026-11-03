@@ -663,6 +663,9 @@ func (b *builder) run(stage string) error {
 		return b.workspace()
 	case "remote-inputs":
 		return b.remoteInputs()
+	case "verify-inputs":
+		_, e := b.admitRemoteSnapshot()
+		return e
 	case "module-source":
 		return b.materializeRcloneModule()
 	case "ui":
