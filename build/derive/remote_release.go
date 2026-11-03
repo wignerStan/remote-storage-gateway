@@ -15,15 +15,16 @@ import (
 )
 
 func (b *builder) bazel(args ...string) (string, error) {
+	if len(args) > 0 && b.materializer != filepath.Clean(filepath.Join(b.root, "../../network/rclone")) {
+		mapped := []string{args[0], "--override_module=rclone_data_plane=" + b.materializer}
+		args = append(mapped, args[1:]...)
+	}
 	command := []string{"GATEWAY_BUILD_INPUTS=" + filepath.Join(b.output, "build-inputs/manifest.json"), "RCLONE_BUILD_INPUTS=" + filepath.Join(b.output, "materializer/build-inputs/manifest.json"), b.mise, "exec", "bazel@9.3.1", "--", "bazel"}
 	return b.command(b.root, "env", append(command, args...)...)
 }
 
 func (b *builder) remoteBuild(targets ...string) error {
 	args := []string{"build", "--config=buildbarn", "--lockfile_mode=off"}
-	if b.materializer != filepath.Join(filepath.Dir(b.root), "rclone") {
-		args = append(args, "--override_module=rclone_data_plane="+b.materializer)
-	}
 	_, err := b.bazel(append(args, targets...)...)
 	return err
 }
@@ -93,7 +94,7 @@ func (b *builder) collectRemote() error {
 	if err = os.MkdirAll(filepath.Join(b.output, "bin"), 0755); err != nil {
 		return err
 	}
-	for _, name := range []string{"openlist-control-plane", "storage-worker", "client-openlist.so", "client-rclone.so", "transfer-reapi.so", "gateway-admin", "rclone"} {
+	for _, name := range []string{"gateway", "openlist-control-plane", "storage-worker", "client-openlist.so", "client-rclone.so", "transfer-reapi.so", "gateway-admin", "rclone"} {
 		source := filepath.Join(bin, "native_release", name)
 		target := filepath.Join(b.output, "bin", name)
 		if err = copyInput(source, target); err != nil {
@@ -126,7 +127,7 @@ func (b *builder) remoteImages() error {
 	if _, err := b.admitRemoteSnapshot(); err != nil {
 		return err
 	}
-	if err := b.remoteBuild("--output_groups=+oci_tarball,+digest", "//:gateway_image", "//:control_plane_image", "@rclone_data_plane//:rclone_image"); err != nil {
+	if err := b.remoteBuild("--output_groups=+oci_tarball,+digest", "//:bundle_image", "//:gateway_image", "//:control_plane_image", "@rclone_data_plane//:rclone_image"); err != nil {
 		return err
 	}
 	_, err := b.admitRemoteSnapshot()

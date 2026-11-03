@@ -1,0 +1,32 @@
+diff --git a/pkg/storage/s3session/session.go b/pkg/storage/s3session/session.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c314db9d496f9cf1084ea7bd5bfe7c074a5b48cf
+--- /dev/null
++++ b/pkg/storage/s3session/session.go
+@@ -0,0 +1,26 @@
++// Package s3session shares the initializer extracted from drivers/s3.
++package s3session
++
++import (
++	"github.com/aws/aws-sdk-go/aws"
++	"github.com/aws/aws-sdk-go/aws/credentials"
++	"github.com/aws/aws-sdk-go/aws/session"
++	"net/http"
++)
++
++type Config struct {
++	Endpoint, Region, AccessKeyID, SecretAccessKey, SessionToken string
++	ForcePathStyle                                               bool
++	HTTPClient                                                   *http.Client
++	MaxRetries                                                   *int
++}
++
++func New(config Config) (*session.Session, error) {
++	cfg := &aws.Config{
++		Credentials: credentials.NewStaticCredentials(config.AccessKeyID, config.SecretAccessKey, config.SessionToken),
++		Region:      &config.Region, Endpoint: &config.Endpoint,
++		S3ForcePathStyle: aws.Bool(config.ForcePathStyle),
++		HTTPClient:       config.HTTPClient, MaxRetries: config.MaxRetries,
++	}
++	return session.NewSession(cfg)
++}

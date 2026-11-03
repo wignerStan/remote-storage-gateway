@@ -1,0 +1,383 @@
+diff --git a/internal/controlplane/httpapi/management_test.go b/internal/controlplane/httpapi/management_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..be8da692298203f21ccb3caa8613323ffcc1e605
+--- /dev/null
++++ b/internal/controlplane/httpapi/management_test.go
+@@ -0,0 +1,377 @@
++package httpapi_test
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"github.com/gin-gonic/gin"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	cp "github.com/OpenListTeam/OpenList/v4/internal/controlplane"
++	"github.com/OpenListTeam/OpenList/v4/internal/controlplane/httpapi"
++	"github.com/wignerStan/infra/go/config/schema"
++	schemaapi "github.com/wignerStan/infra/go/network/http/openapi"
++	openapigin "github.com/wignerStan/infra/go/network/http/openapi/gin"
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
++	worker "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
++	"github.com/wignerStan/network-data-plane-worker/go/management"
++	"github.com/wignerStan/network-data-plane-worker/go/pluginruntime"
++	"golang.org/x/net/webdav"
++)
++
++func secretFile(t *testing.T, value string) string {
++	t.Helper()
++	p := filepath.Join(t.TempDir(), "secret")
++	if e := os.WriteFile(p, []byte(value), 0600); e != nil {
++		t.Fatal(e)
++	}
++	return p
++}
++func fixtureAPI(engine *gin.Engine, r *cp.Registry) {
++	entry := httpapi.NewEntry(r, nil)
++	table, err := schemaapi.Compose(httpapi.APIConfig(), entry.RegisterRoutes)
++	if err != nil {
++		panic(err)
++	}
++	if err = openapigin.Mount(engine, engine.Group("/api/admin/control"), table, openapigin.Options{OpenAPIPath: "/openapi", SchemasPath: "/schemas", Errors: httpapi.ErrorPolicy()}); err != nil {
++		panic(err)
++	}
++}
++func router(r *cp.Registry) http.Handler {
++	engine := gin.New()
++	fixtureAPI(engine, r)
++	return engine
++}
++func request(t *testing.T, r http.Handler, method, path, body string) *httptest.ResponseRecorder {
++	t.Helper()
++	q := httptest.NewRequest(method, "/api/admin/control"+path, strings.NewReader(body))
++	q.Header.Set("Content-Type", "application/json")
++	w := httptest.NewRecorder()
++	r.ServeHTTP(w, q)
++	return w
++}
++
++func TestRcloneRegisteredRoutesCredentialsAndProjection(t *testing.T) {
++	var calls atomic.Int32
++	var stopped atomic.Bool
++	rc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		calls.Add(1)
++		u, p, ok := r.BasicAuth()
++		if !ok || u != "operator" || p != "test-password" {
++			t.Error("secret reference not applied")
++			w.WriteHeader(401)
++			return
++		}
++		if r.Method != "POST" {
++			t.Error("wrong RC method")
++		}
++		w.Header().Set("Content-Type", "application/json")
++		switch r.URL.Path {
++		case "/core/version":
++			io.WriteString(w, `{"version":"v1.71.2","os":"linux","arch":"amd64","password":"never-return-this"}`)
++		case "/core/stats":
++			b, _ := io.ReadAll(r.Body)
++			if string(b) != `{"short":true}` {
++				t.Errorf("not short stats: %s", b)
++			}
++			io.WriteString(w, `{"bytes":42,"errors":1,"lastError":"never-return-this","transferring":[{"name":"private"}]}`)
++		case "/job/list":
++			io.WriteString(w, `{"executeId":"process-one","jobids":[7],"running_ids":[7],"finished_ids":[]}`)
++		case "/job/status":
++			io.WriteString(w, `{"id":7,"executeId":"process-one","finished":false,"success":false,"error":"never-return-this","output":{"password":"never-return-this"}}`)
++		case "/job/stop":
++			stopped.Store(true)
++			io.WriteString(w, `{}`)
++		default:
++			t.Error("unregistered RC method reached", r.URL.Path)
++			w.WriteHeader(500)
++		}
++	}))
++	defer rc.Close()
++	passwordPath := secretFile(t, "test-password")
++	registry, e := cp.New(cp.Config{Targets: []cp.Target{{Name: "backup", Kind: "rclone", Endpoint: rc.URL, Username: "operator", PasswordSecretRef: "rc-password"}}, SecretFiles: map[string]string{"rc-password": passwordPath}})
++	if e != nil {
++		t.Fatal(e)
++	}
++	routes := router(registry)
++	summary := request(t, routes, "GET", "/targets", "")
++	if calls.Load() != 0 || strings.Contains(summary.Body.String(), "test-password") || strings.Contains(summary.Body.String(), rc.URL) {
++		t.Fatal("target inventory initialized provider or disclosed endpoint credentials")
++	}
++	for _, route := range []string{"version", "stats", "jobs", "jobs/7"} {
++		w := request(t, routes, "GET", "/targets/backup/"+route, "")
++		if w.Code != 200 || strings.Contains(w.Body.String(), "never-return-this") || strings.Contains(w.Body.String(), "private") {
++			t.Fatalf("unsafe %s response %d %s", route, w.Code, w.Body)
++		}
++	}
++	w := request(t, routes, "POST", "/targets/backup/jobs/7/stop", `{"execute_id":"old-process"}`)
++	if w.Code != 409 || stopped.Load() {
++		t.Fatal("stale job submission stopped a current process job")
++	}
++	w = request(t, routes, "POST", "/targets/backup/jobs/7/stop", `{"execute_id":"process-one"}`)
++	if w.Code != 200 || !stopped.Load() {
++		t.Fatal("typed job stop failed", w.Code, w.Body)
++	}
++	before := calls.Load()
++	for _, route := range []string{"config/dump", "rc/noop", "operations/cat", "operations/put", "sync/sync", "jobs/not-a-number"} {
++		w = request(t, routes, "GET", "/targets/backup/"+route, "")
++		if w.Code < 400 {
++			t.Fatal("undeclared operation admitted", route)
++		}
++	}
++	w = request(t, routes, "POST", "/targets/backup/jobs/7/stop", `{"execute_id":"process-one","url":"http://untrusted"}`)
++	if w.Code != 400 || calls.Load() != before {
++		t.Fatal("unknown fields or arbitrary RC operation reached endpoint")
++	}
++	if e = os.Chmod(passwordPath, 0644); e != nil {
++		t.Fatal(e)
++	}
++	w = request(t, routes, "GET", "/targets/backup/version", "")
++	if w.Code != 502 || calls.Load() != before {
++		t.Fatal("invalid secret permissions fell back to anonymous endpoint access")
++	}
++
++}
++
++func TestOriginProbesOnlySignedAvailabilityAndRootMetadata(t *testing.T) {
++	var s3Calls, davCalls atomic.Int32
++	objectStore := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		s3Calls.Add(1)
++		if r.Method != "HEAD" || r.URL.Path != "/approved-bucket" || !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") {
++			t.Error("probe exceeded selected signed HeadBucket", r.Method, r.URL.Path)
++			w.WriteHeader(500)
++			return
++		}
++		w.WriteHeader(200)
++	}))
++	defer objectStore.Close()
++	fs := &webdav.Handler{FileSystem: webdav.Dir(t.TempDir()), LockSystem: webdav.NewMemLS()}
++	dav := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		davCalls.Add(1)
++		if r.Method != "OPTIONS" && r.Method != "PROPFIND" {
++			t.Error("object payload entered management plane", r.Method)
++			w.WriteHeader(500)
++			return
++		}
++		u, p, _ := r.BasicAuth()
++		if u != "dav-user" || p != "dav-password" {
++			t.Error("DAV secret reference absent")
++			w.WriteHeader(401)
++			return
++		}
++		if r.Method == "PROPFIND" && r.Header.Get("Depth") != "0" {
++			t.Error("probe recursively enumerated objects")
++		}
++		fs.ServeHTTP(w, r)
++	}))
++	defer dav.Close()
++	registry, e := cp.New(cp.Config{Targets: []cp.Target{
++		{Name: "bucket", Kind: "origin-s3", Endpoint: objectStore.URL, Bucket: "approved-bucket", Region: "us-east-1", ForcePathStyle: true, AccessKeySecretRef: "access", SecretKeySecretRef: "key"},
++		{Name: "documents", Kind: "origin-webdav", Endpoint: dav.URL, Username: "dav-user", PasswordSecretRef: "dav"},
++	}, SecretFiles: map[string]string{"access": secretFile(t, "test-access"), "key": secretFile(t, "test-key"), "dav": secretFile(t, "dav-password")}})
++	if e != nil {
++		t.Fatal(e)
++	}
++	routes := router(registry)
++	request(t, routes, "GET", "/targets", "")
++	if s3Calls.Load() != 0 || davCalls.Load() != 0 {
++		t.Fatal("inventory constructed a provider")
++	}
++	for _, name := range []string{"bucket", "documents"} {
++		w := request(t, routes, "GET", "/targets/"+name+"/probe", "")
++		if w.Code != 200 || !strings.Contains(w.Body.String(), `"available":true`) {
++			t.Fatal("native origin probe failed", w.Code, w.Body)
++		}
++	}
++	if s3Calls.Load() != 1 || davCalls.Load() != 2 {
++		t.Fatalf("unexpected provider operations s3=%d dav=%d", s3Calls.Load(), davCalls.Load())
++	}
++}
++
++type FixtureConfiguration struct{}
++
++func TestWorkerManagementPreservesDescriptorAndCAS(t *testing.T) {
++	generated, e := schema.Derive[FixtureConfiguration]()
++	if e != nil {
++		t.Fatal(e)
++	}
++	configSchema, e := json.Marshal(generated)
++	if e != nil {
++		t.Fatal(e)
++	}
++	d := descriptor.Descriptor{Schema: descriptor.Schema, PluginID: "client.fixture", PluginVersion: "1.0.0", Contract: port.Contract, Runtime: "go", BuildDigest: "sha256:" + strings.Repeat("1", 64), Implementations: []descriptor.Implementation{{ID: "fixture", DisplayName: "Fixture", ConfigSchema: configSchema, Capabilities: []string{"stat"}}}}
++	encoded, e := admission.Encode(d)
++	if e != nil {
++		t.Fatal(e)
++	}
++	var pretty bytes.Buffer
++	if e = json.Indent(&pretty, encoded.Bytes, "", "  "); e != nil {
++		t.Fatal(e)
++	}
++	pretty.WriteByte('\n')
++	record, e := admission.Decode(pretty.Bytes())
++	if e != nil {
++		t.Fatal(e)
++	}
++	var replacement atomic.Int32
++	var tamper atomic.Bool
++	version := pluginruntime.Version{Incarnation: "worker-one", Generation: 1, DescriptorDigest: record.Digest}
++	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		switch r.URL.Path {
++		case management.ManifestPath:
++			json.NewEncoder(w).Encode(worker.Manifest{Schema: worker.CapabilitySchema, Implementation: "go", Lanes: []string{"l7"}, Controls: []string{management.Contract}, PluginRuntimes: []string{"native"}, BuildDigest: d.BuildDigest, PluginDescriptors: []worker.PluginCapability{{PluginID: d.PluginID, Contract: d.Contract, PluginVersion: d.PluginVersion, DescriptorDigest: record.Digest}}})
++		case management.DescriptorPrefix + record.Digest:
++			w.Write(record.Bytes)
++			if tamper.Load() {
++				w.Write([]byte(" "))
++			}
++		case management.ObservedPath:
++			json.NewEncoder(w).Encode([]pluginruntime.Observed{{Name: "files", Version: version, PluginID: d.PluginID, ImplementationID: "fixture", Accepting: true}})
++		case management.ClientPrefix + "files":
++			if r.Method != "POST" {
++				t.Error("wrong replacement method")
++			}
++			var req management.ReplaceRequest
++			json.NewDecoder(r.Body).Decode(&req)
++			if req.Expected != version {
++				w.WriteHeader(409)
++				io.WriteString(w, `{"error":"never-return-this"}`)
++				return
++			}
++			replacement.Add(1)
++			next := version
++			next.Generation++
++			json.NewEncoder(w).Encode(next)
++		default:
++			w.WriteHeader(404)
++		}
++	}))
++	defer backend.Close()
++	registry, e := cp.New(cp.Config{Targets: []cp.Target{{Name: "gateway", Kind: "worker", Endpoint: backend.URL}}})
++	if e != nil {
++		t.Fatal(e)
++	}
++	routes := router(registry)
++	for _, route := range []string{"manifest", "observed"} {
++		w := request(t, routes, "GET", "/targets/gateway/"+route, "")
++		if w.Code != 200 {
++			t.Fatal(route, w.Code, w.Body)
++		}
++	}
++	w := request(t, routes, "GET", "/targets/gateway/descriptors/"+record.Digest, "")
++	if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), record.Bytes) || w.Header().Get("ETag") != `"`+record.Digest+`"` {
++		t.Fatal("descriptor bytes were rewritten")
++	}
++	tamper.Store(true)
++	w = request(t, routes, "GET", "/targets/gateway/descriptors/"+record.Digest, "")
++	if w.Code != 502 {
++		t.Fatal("descriptor whose exact bytes changed passed digest approval")
++	}
++	tamper.Store(false)
++	selection := pluginruntime.Selection{Name: "files", PluginID: d.PluginID, DescriptorDigest: record.Digest, ImplementationID: "fixture", Public: json.RawMessage(`{}`)}
++	b, _ := json.Marshal(management.ReplaceRequest{Expected: version, Selection: selection})
++	w = request(t, routes, "POST", "/targets/gateway/clients/files", string(b))
++	if w.Code != 200 || replacement.Load() != 1 {
++		t.Fatal("replacement failed", w.Code, w.Body)
++	}
++	stale := version
++	stale.Generation = 77
++	b, _ = json.Marshal(management.ReplaceRequest{Expected: stale, Selection: selection})
++	w = request(t, routes, "POST", "/targets/gateway/clients/files", string(b))
++	if w.Code != 409 || replacement.Load() != 1 || strings.Contains(w.Body.String(), "never-return-this") {
++		t.Fatal("CAS conflict lost or body exposed")
++	}
++}
++
++func TestManagementBoundsRedirectAndCancellation(t *testing.T) {
++	var leaked atomic.Int32
++	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaked.Add(1); w.WriteHeader(200) }))
++	defer destination.Close()
++	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Location", destination.URL)
++		w.WriteHeader(307)
++	}))
++	defer redirect.Close()
++	registry, e := cp.New(cp.Config{Targets: []cp.Target{{Name: "rc", Kind: "rclone", Endpoint: redirect.URL, Username: "user", PasswordSecretRef: "secret"}, {Name: "dav", Kind: "origin-webdav", Endpoint: redirect.URL, Username: "user", PasswordSecretRef: "secret"}}, SecretFiles: map[string]string{"secret": secretFile(t, "password")}})
++	if e != nil {
++		t.Fatal(e)
++	}
++	routes := router(registry)
++	for _, p := range []string{"/targets/rc/version", "/targets/dav/probe"} {
++		w := request(t, routes, "GET", p, "")
++		if w.Code != 502 {
++			t.Fatal("redirect accepted")
++		}
++	}
++	if leaked.Load() != 0 {
++		t.Fatal("credentials/request followed redirected management origin")
++	}
++	oversized := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		io.WriteString(w, `{"version":"`+strings.Repeat("a", cp.MaxMetadata)+`"}`)
++	}))
++	defer oversized.Close()
++	registry, e = cp.New(cp.Config{Targets: []cp.Target{{Name: "rc", Kind: "rclone", Endpoint: oversized.URL}}})
++	if e != nil {
++		t.Fatal(e)
++	}
++	w := request(t, router(registry), "GET", "/targets/rc/version", "")
++	if w.Code != 502 {
++		t.Fatal("oversized metadata accepted")
++	}
++	cancelled := make(chan struct{})
++	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		_, _ = io.Copy(io.Discard, r.Body)
++		_ = r.Body.Close()
++		<-r.Context().Done()
++		close(cancelled)
++	}))
++	defer blocked.Close()
++	registry, e = cp.New(cp.Config{Targets: []cp.Target{{Name: "rc", Kind: "rclone", Endpoint: blocked.URL}}})
++	if e != nil {
++		t.Fatal(e)
++	}
++	ctx, stop := context.WithTimeout(context.Background(), 50*time.Millisecond)
++	defer stop()
++	client, _ := registry.RcloneClient("rc")
++	_, e = client.Version(ctx)
++	if e == nil {
++		t.Fatal("cancelled request succeeded")
++	}
++	select {
++	case <-cancelled:
++	case <-time.After(time.Second):
++		t.Fatal("request context did not reach management endpoint")
++	}
++}
++
++func TestRegistryRejectsUnsafeTargetsAndPayloadFields(t *testing.T) {
++	for _, target := range []cp.Target{
++		{Name: "bad", Kind: "rclone", Endpoint: "http://user:password@example.test"},
++		{Name: "bad", Kind: "rclone", Endpoint: "http://example.test?url=http://other"},
++		{Name: "bad", Kind: "origin-webdav", Endpoint: "http://example.test", Root: "../private"},
++		{Name: "bad", Kind: "origin-s3", Endpoint: "http://example.test", Bucket: "selected", Region: "region"},
++		{Name: "bad", Kind: "arbitrary", Endpoint: "http://example.test"},
++	} {
++		if _, e := cp.New(cp.Config{Targets: []cp.Target{target}}); e == nil {
++			t.Fatal("unsafe operator target accepted", target.Kind)
++		}
++	}
++	for _, body := range []string{`{"targets":[],"targets":[]}`, `{"targets":[{"name":"x","kind":"rclone","endpoint":"http://localhost","password":"inline-secret"}]}`, strings.Repeat(" ", cp.MaxMetadata) + "{}"} {
++		p := filepath.Join(t.TempDir(), "registry")
++		os.WriteFile(p, []byte(body), 0600)
++		if _, e := cp.Load(p); e == nil {
++			t.Fatal("unsafe registry accepted")
++		}
++	}
++}

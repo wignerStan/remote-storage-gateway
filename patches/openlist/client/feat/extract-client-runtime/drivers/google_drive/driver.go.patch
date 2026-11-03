@@ -1,0 +1,70 @@
+diff --git a/drivers/google_drive/driver.go b/drivers/google_drive/driver.go
+index 94ef854f2f30377c557a88f63aededf2386ac7f6..625852d52fb53e8b9ff558184af4216cc0564832 100644
+--- a/drivers/google_drive/driver.go
++++ b/drivers/google_drive/driver.go
+@@ -111,14 +111,15 @@ func (d *GoogleDrive) Remove(ctx context.Context, obj model.Obj) error {
+ 	return err
+ }
+ 
+-func (d *GoogleDrive) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) error {
++func (d *GoogleDrive) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
+ 	obj := stream.GetExist()
+ 	var (
+-		e    Error
+-		url  string
+-		data base.Json
+-		res  *resty.Response
+-		err  error
++		e       Error
++		url     string
++		data    base.Json
++		res     *resty.Response
++		err     error
++		newFile File
+ 	)
+ 	if obj != nil {
+ 		url = fmt.Sprintf("https://www.googleapis.com/upload/drive/v3/files/%s?uploadType=resumable&supportsAllDrives=true", obj.GetID())
+@@ -143,28 +144,37 @@ func (d *GoogleDrive) Put(ctx context.Context, dstDir model.Obj, stream model.Fi
+ 		res, err = req.Post(url)
+ 	}
+ 	if err != nil {
+-		return err
++		return nil, err
+ 	}
+ 	if e.Error.Code != 0 {
+ 		if e.Error.Code == 401 {
+ 			err = d.refreshToken()
+ 			if err != nil {
+-				return err
++				return nil, err
+ 			}
+ 			return d.Put(ctx, dstDir, stream, up)
+ 		}
+-		return fmt.Errorf("%s: %v", e.Error.Message, e.Error.Errors)
++		return nil, fmt.Errorf("%s: %v", e.Error.Message, e.Error.Errors)
+ 	}
+ 	putUrl := res.Header().Get("location")
+ 	if stream.GetSize() < d.ChunkSize*1024*1024 {
+ 		_, err = d.request(putUrl, http.MethodPut, func(req *resty.Request) {
+ 			req.SetHeader("Content-Length", strconv.FormatInt(stream.GetSize(), 10)).
+ 				SetBody(driver.NewLimitedUploadStream(ctx, stream))
+-		}, nil)
++		}, &newFile)
+ 	} else {
+-		err = d.chunkUpload(ctx, stream, putUrl, up)
++		newFile, err = d.chunkUpload(ctx, stream, putUrl, up)
+ 	}
+-	return err
++	if err != nil {
++		return nil, err
++	}
++	if newFile.Size == "" {
++		newFile.Size = strconv.FormatInt(stream.GetSize(), 10)
++	}
++	if newFile.Name == "" {
++		newFile.Name = stream.GetName()
++	}
++	return fileToObj(newFile), nil
+ }
+ 
+ func (d *GoogleDrive) GetDetails(ctx context.Context) (*model.StorageDetails, error) {

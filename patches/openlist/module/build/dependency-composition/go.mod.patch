@@ -1,0 +1,34 @@
+diff --git a/go.mod b/go.mod
+index 0470237f7ac4513274658428280f396496d9810d..a39619bc5462db92418fe67900bb16c6de6aa4da 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,10 +1,11 @@
+ module github.com/OpenListTeam/OpenList/v4
+ 
+-go 1.26.0
++go 1.27.3
+ 
+ toolchain go1.27.3
+ 
+ require (
++	github.com/wignerStan/remote-storage-gateway/go v0.1.0
+ 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.1
+ 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.8.1
+ 	github.com/KarpelesLab/reflink v1.0.2
+@@ -32,6 +33,7 @@ require (
+ 	github.com/city404/v6-public-rpc-proto/go v0.0.0-20240817070657-90f8e24b653e
+ 	github.com/cloudsoda/go-smb2 v0.0.0-20260803221621-0b399b9d036c
+ 	github.com/coreos/go-oidc v2.5.0+incompatible
++	github.com/danielgtaylor/huma/v2 v2.39.1
+ 	github.com/deckarep/golang-set/v2 v2.9.0
+ 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
+ 	github.com/disintegration/imaging v1.6.2
+@@ -75,6 +77,8 @@ require (
+ 	github.com/tchap/go-patricia/v2 v2.3.3
+ 	github.com/u2takey/ffmpeg-go v0.5.0
+ 	github.com/upyun/go-sdk/v3 v3.0.4
++	github.com/wignerStan/infra/go v0.0.0
++	github.com/wignerStan/network-data-plane-worker/go v0.0.0
+ 	github.com/zzzhr1990/go-common-entity v0.0.0-20250202070650-1a200048f0d3
+ 	golang.org/x/crypto v0.57.0
+ 	golang.org/x/image v0.45.0

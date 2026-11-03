@@ -1,0 +1,28 @@
+diff --git a/server/handles/fsread.go b/server/handles/fsread.go
+index bf4089ff5d96f3079a0eb5202c6ead305a858a25..87d958fdc68b565fb9ebf8fa33dfd87ff7c6dbf0 100644
+--- a/server/handles/fsread.go
++++ b/server/handles/fsread.go
+@@ -33,6 +33,7 @@ type DirReq struct {
+ }
+ 
+ type ObjResp struct {
++	ID           string                     `json:"id"`
+ 	Name         string                     `json:"name"`
+ 	Size         int64                      `json:"size"`
+ 	IsDir        bool                       `json:"is_dir"`
+@@ -232,6 +233,7 @@ func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjResp {
+ 		thumb, _ := model.GetThumb(obj)
+ 		mountDetails, _ := model.GetStorageDetails(obj)
+ 		resp = append(resp, ObjResp{
++			ID:           obj.GetID(),
+ 			Name:         obj.GetName(),
+ 			Size:         obj.GetSize(),
+ 			IsDir:        obj.IsDir(),
+@@ -361,6 +363,7 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
+ 	mountDetails, _ := model.GetStorageDetails(obj)
+ 	common.SuccessResp(c, FsGetResp{
+ 		ObjResp: ObjResp{
++			ID:           obj.GetID(),
+ 			Name:         obj.GetName(),
+ 			Size:         obj.GetSize(),
+ 			IsDir:        obj.IsDir(),

@@ -1,0 +1,22 @@
+diff --git a/internal/conf/config.go b/internal/conf/config.go
+index f8423d590846e323cbe099b47630ccdf6bcf12d1..80c906d0ed17744eec54ca1ce37553002e0ce56c 100644
+--- a/internal/conf/config.go
++++ b/internal/conf/config.go
+@@ -112,6 +112,8 @@ type MCP struct {
+ }
+ 
+ type Config struct {
++	GatewayControlFile    string      `json:"gateway_control_file" env:"GATEWAY_CONTROL_FILE"`
++	ControlTargetsFile    string      `json:"control_targets_file" env:"CONTROL_TARGETS_FILE"`
+ 	Force                 bool        `json:"force" env:"FORCE"`
+ 	SiteURL               string      `json:"site_url" env:"SITE_URL"`
+ 	Cdn                   string      `json:"cdn" env:"CDN"`
+@@ -122,7 +124,7 @@ type Config struct {
+ 	Scheme                Scheme      `json:"scheme"`
+ 	TempDir               string      `json:"temp_dir" env:"TEMP_DIR"`
+ 	BleveDir              string      `json:"bleve_dir" env:"BLEVE_DIR"`
+-	DistDir               string      `json:"dist_dir"`
++	DistDir               string      `json:"dist_dir" env:"DIST_DIR"`
+ 	Log                   LogConfig   `json:"log" envPrefix:"LOG_"`
+ 	DelayedStart          int         `json:"delayed_start" env:"DELAYED_START"`
+ 	AutoMemoryLimit       int         `json:"auto_memory_limit" env:"AUTO_MEMORY_LIMIT"`

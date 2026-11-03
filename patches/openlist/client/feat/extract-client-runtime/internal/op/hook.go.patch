@@ -1,0 +1,14 @@
+diff --git a/internal/op/hook.go b/internal/op/hook.go
+index 3d8530f933b2cedf7b4f3ce92615703fabb830db..90ba6069833c3e9397d2a6934757636fa7c61096 100644
+--- a/internal/op/hook.go
++++ b/internal/op/hook.go
+@@ -103,6 +103,9 @@ func RegisterSettingItemHook(key string, hook SettingItemHook) {
+ }
+ 
+ func HandleSettingItemHook(item *model.SettingItem) (hasHook bool, err error) {
++	if conf.GatewayManaged() && item.Key == conf.SearchIndex {
++		return false, nil
++	}
+ 	if hook, ok := settingItemHooks[item.Key]; ok {
+ 		return true, hook(item)
+ 	}

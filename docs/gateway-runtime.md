@@ -1,9 +1,10 @@
 # Remote storage gateway
 
 The gateway is a product composition of the Worker client contract and Infra's
-L7 server. It loads `client-openlist.so` and `client-rclone.so` through Infra's native ABI. Concrete
-providers are absent from the gateway executable's dependency graph. OpenList
-control-plane code is not on the payload path.
+L7 server. It loads `client-openlist.so` and `client-rclone.so` through Infra's native ABI. Provider instances are constructed only in the approved plugin runtime. The
+standalone Worker excludes CP dependencies; the combined ELF links both roles
+while keeping their execution in separate processes. CP code is not on the
+payload path.
 
 Build with the workspace described in the repository README:
 
@@ -125,7 +126,7 @@ management integration, not completion of every legacy provider migration.
 
 `make admin` builds the standalone-Worker operator. Its Secret allowlist and
 supplied systemd unit target that standalone profile; they must not be pointed at
-the managed CP Secret containing processes/targets configuration. Managed profile
+the managed CP Secret containing bundle/control/targets configuration. Bundle profile
 Secret publication and rollout stay an explicit deployment operation. The timer
 runs `gateway-admin tls-sync` every12hours: obtain/check the Tailscale certificate,
 validate its key/domain/validity, publish only allowlisted configuration/secrets,

@@ -13,7 +13,47 @@ mkdir -p "$4"
 out=$(realpath "$4")
 inputs=$(dirname "$manifest")
 work=$(mktemp -d "$PWD/.remote-go.XXXXXXXX")
-trap 'rm -rf "$work"' EXIT
+copy_jobs=()
+copy_first_status=0
+join_copy_jobs() {
+    local pid status
+    for pid in "${copy_jobs[@]}"; do
+        if wait "$pid"; then
+            :
+        else
+            status=$?
+            if ((copy_first_status == 0)); then copy_first_status=$status; fi
+        fi
+    done
+    copy_jobs=()
+    return "$copy_first_status"
+}
+cleanup() {
+    local status=$? cleanup_status
+    trap - EXIT
+    trap '' INT TERM
+    if join_copy_jobs; then
+        :
+    elif ((status == 0)); then
+        status=$copy_first_status
+    fi
+    if rm -rf "$work"; then
+        :
+    else
+        cleanup_status=$?
+        if ((status == 0)); then status=$cleanup_status; fi
+    fi
+    exit "$status"
+}
+copy_source() {
+    # Only the parent owns scratch cleanup, after every copy process has joined.
+    trap - EXIT INT TERM
+    cp --reflink=auto --no-preserve=mode --no-target-directory -- "$1" "$2" || return "$?"
+    case "$3" in 644|0644) ;; *) chmod "$3" "$2" || return "$?";; esac
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 stage="$work/stage"
 mkdir -p "$stage" "$work/home" "$work/tmp" "$work/go-cache"
 declare -A paths=() verified=() values=() directories=()
@@ -45,9 +85,13 @@ while IFS=$'\t' read -r destination payload mode extra || [[ -n ${destination:-}
         mkdir -p "$parent"
         directories[$parent]=1
     fi
-    cp --reflink=auto --no-preserve=mode -- "$source" "$stage/$destination"
-    case "$mode" in 644|0644) ;; *) chmod "$mode" "$stage/$destination";; esac
+    copy_source "$source" "$stage/$destination" "$mode" &
+    copy_jobs+=("$!")
+    if ((${#copy_jobs[@]} == 8)); then
+        join_copy_jobs || fail "source copy failed (status $copy_first_status)"
+    fi
 done < "$manifest"
+join_copy_jobs || fail "source copy failed (status $copy_first_status)"
 printf 'Staged %s declared files in %ss\n' "${#paths[@]}" "$((SECONDS - stage_started))"
 while IFS= read -r row || [[ -n "$row" ]]; do
     [[ "$row" == *=* ]] || fail 'invalid build.env row'
@@ -92,12 +136,13 @@ run_go() {
             GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local GOENV=off GOTELEMETRY=off \
             GOOS=linux GOARCH=amd64 CGO_ENABLED="$cgo" GOMAXPROCS=4 \
             CC='/usr/bin/gcc -B/usr/bin/' CXX='/usr/bin/g++ -B/usr/bin/' \
-            CGO_CFLAGS="-I$stage/workspace/infra/rust/crates/interop/native-plugin-protocol/include -I$stage/workspace/infra/c/plugin-interop/include" \
+            CGO_CFLAGS="-I$stage/workspace/infra/c/interop/plugins/include" \
             "$stage/tools/go/bin/go" build -mod=readonly -p=4 -trimpath -buildvcs=false "$@"
     )
 }
-run_go openlist 0 go.work -ldflags "-X github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=${values[ui_version]} -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=${values[product_commit]}" -o "$out/openlist-control-plane" .
-run_go gateway/go 1 go.work -tags dataplane_l7 -o "$out/storage-worker" ./cmd/storage-worker
+run_go openlist 0 go.work -tags infra_grpc -ldflags "-X github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=${values[ui_version]} -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=${values[product_commit]}" -o "$out/openlist-control-plane" .
+run_go gateway/go 1 go.work -tags dataplane_l7,infra_grpc -o "$out/storage-worker" ./cmd/storage-worker
+run_go openlist 1 go.work -tags dataplane_l7,infra_grpc -ldflags "-X github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=${values[ui_version]} -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=${values[product_commit]}" -o "$out/gateway" ./cmd/gateway-bundle
 run_go openlist 1 go.work -buildmode=c-shared -ldflags "-X main.buildDigest=${values[gateway_digest]}" -o "$out/client-openlist.so" ./cmd/openlist-client-plugin
 run_go gateway/go 1 go.work -buildmode=c-shared -ldflags "-X main.buildDigest=${values[gateway_digest]}" -o "$out/client-rclone.so" ./cmd/plugin-rclone
 run_go gateway/go 1 go.work -buildmode=c-shared -ldflags "-X main.buildDigest=${values[gateway_digest]}" -o "$out/transfer-reapi.so" ./cmd/plugin-reapi
@@ -107,6 +152,6 @@ chmod 0755 "$out/rclone"
 # The standalone producer is a declared action input, not another Go compilation.
 # c-shared also generates C headers, which are not release outputs.
 rm -f "$out/client-openlist.h" "$out/client-rclone.h" "$out/transfer-reapi.h"
-for artifact in openlist-control-plane storage-worker client-openlist.so client-rclone.so transfer-reapi.so gateway-admin rclone; do
+for artifact in gateway openlist-control-plane storage-worker client-openlist.so client-rclone.so transfer-reapi.so gateway-admin rclone; do
     [[ -s "$out/$artifact" ]] || fail "missing output $artifact"
 done

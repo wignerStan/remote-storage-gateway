@@ -14,7 +14,8 @@ func fixture(t *testing.T) (*builder, relationship) {
 	t.Helper()
 	root := t.TempDir()
 	b := &builder{root: root, output: filepath.Join(root, "output")}
-	source := filepath.Join(root, "third_party/fixture")
+	source := filepath.Join(root, "references/fixture")
+	b.referenceRoot = filepath.Join(root, "references")
 	if e := os.MkdirAll(source, 0755); e != nil {
 		t.Fatal(e)
 	}
@@ -42,7 +43,7 @@ func fixture(t *testing.T) (*builder, relationship) {
 	git("add", "provider.txt")
 	tree := git("write-tree")
 	diff := git("diff", "--cached", "--binary", "--full-index") + "\n"
-	p := filepath.Join(root, "patches/fixture/0001.patch")
+	p := filepath.Join(root, "patches/fixture/client/feat/update/provider.txt.patch")
 	if e := os.MkdirAll(filepath.Dir(p), 0755); e != nil {
 		t.Fatal(e)
 	}
@@ -53,7 +54,10 @@ func fixture(t *testing.T) (*builder, relationship) {
 	if _, e := b.git(root, "init"); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := b.git(root, "update-index", "--add", "--cacheinfo", "160000,"+commit+",third_party/fixture"); e != nil {
+	if e := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("/build/\n/references/\n"), 0644); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := b.git(root, "add", ".gitignore"); e != nil {
 		t.Fatal(e)
 	}
 	for _, pair := range [][2]string{{"user.name", "Fixture"}, {"user.email", "fixture@example.invalid"}} {
@@ -68,7 +72,13 @@ func fixture(t *testing.T) (*builder, relationship) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	r := relationship{Schema: "git-source-relationship/v1", Kind: "patched_third_party", Path: "third_party/fixture", Integration: "submodule", Upstream: upstream{URL: "https://example.invalid/upstream.git", Commit: commit}, Patches: []patch{{Order: 1, Path: "patches/fixture/0001.patch", SHA256: hash}}, ResultTree: &tree}
+	bundle := "patches/fixture"
+	buildPath := "build/fixture"
+	if e := os.WriteFile(filepath.Join(root, bundle, "apply_order.txt"), []byte("1 client/feat/update/provider.txt.patch "+hash+"\n"), 0644); e != nil {
+		t.Fatal(e)
+	}
+	r := relationship{Schema: "git-source-relationship/v5", Kind: "upstream_product_build", Path: buildPath, BuildPath: &buildPath, PatchBundle: &bundle, Integration: "build", Upstream: upstream{URL: "https://example.invalid/upstream.git", Commit: commit}, Patches: []patch{{Order: 1, Path: "patches/fixture/client/feat/update/provider.txt.patch", SHA256: hash}}, ResultTree: &tree}
+
 	return b, r
 }
 
@@ -82,7 +92,7 @@ func TestPatchReplayPreservesPristineSource(t *testing.T) {
 	if e != nil || string(got) != "patched\n" {
 		t.Fatalf("derived content %q %v", got, e)
 	}
-	got, e = os.ReadFile(filepath.Join(b.root, r.Path, "provider.txt"))
+	got, e = os.ReadFile(filepath.Join(b.referenceRoot, "fixture", "provider.txt"))
 	if e != nil || string(got) != "upstream\n" {
 		t.Fatalf("upstream modified %q %v", got, e)
 	}
@@ -98,7 +108,7 @@ func TestPatchReplayPreservesPristineSource(t *testing.T) {
 }
 
 func TestPatchAdmissionRejectsTamperAndDirtyUpstreamBeforeClone(t *testing.T) {
-	for _, name := range []string{"hash", "order", "traversal", "dirty", "parent-pin"} {
+	for _, name := range []string{"hash", "order", "traversal", "tracked-output", "upstream-pin"} {
 		t.Run(name, func(t *testing.T) {
 			b, r := fixture(t)
 			switch name {
@@ -108,20 +118,26 @@ func TestPatchAdmissionRejectsTamperAndDirtyUpstreamBeforeClone(t *testing.T) {
 				r.Patches[0].Order = 2
 			case "traversal":
 				r.Patches[0].Path = "patches/../../outside.patch"
-			case "dirty":
-				if e := os.WriteFile(filepath.Join(b.root, r.Path, "provider.txt"), []byte("dirty"), 0644); e != nil {
+			case "tracked-output":
+				path := filepath.Join(b.root, r.Path)
+				if e := os.MkdirAll(path, 0755); e != nil {
 					t.Fatal(e)
 				}
-			case "parent-pin":
-				if _, e := b.git(b.root, "update-index", "--add", "--cacheinfo", "160000,"+strings.Repeat("f", 40)+",third_party/fixture"); e != nil {
+				if e := os.WriteFile(filepath.Join(path, "injected"), []byte("tracked"), 0644); e != nil {
 					t.Fatal(e)
 				}
+				if _, e := b.git(b.root, "add", "--force", r.Path); e != nil {
+					t.Fatal(e)
+				}
+			case "upstream-pin":
+				r.Upstream.Commit = "malformed"
+
 			}
 			destination := b.sourcePath("fixture")
 			if e := b.materialize(r, destination); e == nil {
 				t.Fatal("invalid input accepted")
 			}
-			if _, e := os.Lstat(destination); !os.IsNotExist(e) {
+			if _, e := os.Lstat(filepath.Join(destination, ".git")); !os.IsNotExist(e) {
 				t.Fatal("materialized before input admission")
 			}
 		})
@@ -196,7 +212,7 @@ func TestBuildWorkspaceOverridesAmbientWorkspace(t *testing.T) {
 
 func TestShallowSourceUsesExplicitLocalClone(t *testing.T) {
 	b, r := fixture(t)
-	if e := os.WriteFile(filepath.Join(b.root, r.Path, ".git/shallow"), []byte(r.Upstream.Commit+"\n"), 0644); e != nil {
+	if e := os.WriteFile(filepath.Join(b.referenceRoot, "fixture", ".git/shallow"), []byte(r.Upstream.Commit+"\n"), 0644); e != nil {
 		t.Fatal(e)
 	}
 	if e := b.materialize(r, b.sourcePath("fixture")); e != nil {
@@ -227,7 +243,7 @@ func TestImageCompositionsContainEmbeddedCPAndIndependentPlugins(t *testing.T) {
 	if e := os.MkdirAll(dir, 0755); e != nil {
 		t.Fatal(e)
 	}
-	for _, name := range []string{"storage-worker", "rclone", "transfer-reapi.so", "client-openlist.so", "client-rclone.so", "openlist-control-plane"} {
+	for _, name := range []string{"gateway", "storage-worker", "rclone", "transfer-reapi.so", "client-openlist.so", "client-rclone.so", "openlist-control-plane"} {
 		if e := os.WriteFile(filepath.Join(dir, name), []byte(name), 0644); e != nil {
 			t.Fatal(e)
 		}
@@ -239,14 +255,19 @@ func TestImageCompositionsContainEmbeddedCPAndIndependentPlugins(t *testing.T) {
 	if e := b.imageInputs(); e != nil {
 		t.Fatal(e)
 	}
-	for _, composition := range []string{"gateway", "control-plane"} {
+	for _, composition := range []string{"gateway", "control-plane", "bundle"} {
 		var manifest map[string]string
 		if e := readJSON(filepath.Join(b.output, "image-inputs", composition, "inputs.json"), &manifest); e != nil {
 			t.Fatal(e)
 		}
-		want := map[string]int{"gateway": 5, "control-plane": 7}[composition]
+		want := map[string]int{"gateway": 5, "control-plane": 2, "bundle": 6}[composition]
 		if len(manifest) != want {
 			t.Fatalf("%s has %d inputs", composition, len(manifest))
+		}
+		if composition == "bundle" {
+			if manifest["gateway"] == "" || manifest["storage-worker"] != "" || manifest["openlist-control-plane"] != "" {
+				t.Fatal("bundle is not a single gateway ELF")
+			}
 		}
 		for name, digest := range manifest {
 			actual, e := hashFile(filepath.Join(b.output, "image-inputs", composition, name))
@@ -596,5 +617,36 @@ func TestSDKSchemaSourceRequiresOwnedDeclaredModule(t *testing.T) {
 	}
 	if _, err = sdkHuma(root); err == nil {
 		t.Fatal("undeclared neighboring source admitted")
+	}
+}
+
+func TestBuildRecipeDigestExcludesDisposableProductsOnly(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"remote-go-action.sh", "openlist/source.go", "openlist-ui/node_modules/dep.js"} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("first"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := treeDigest(root, "openlist", "openlist-ui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(root, "openlist/source.go"), []byte("generated"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	next, err := treeDigest(root, "openlist", "openlist-ui")
+	if err != nil || next != first {
+		t.Fatal("disposable materialization changed build recipe identity", err)
+	}
+	if err = os.WriteFile(filepath.Join(root, "remote-go-action.sh"), []byte("changed-recipe"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	next, err = treeDigest(root, "openlist", "openlist-ui")
+	if err != nil || next == first {
+		t.Fatal("changed build recipe kept identity", err)
 	}
 }

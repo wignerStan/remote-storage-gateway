@@ -253,6 +253,117 @@
       "entry_type": [
         "direct"
       ]
+    },
+    {
+      "path": "manager",
+      "names": [
+        "gateway_bundle_process_assembly"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "entry_type": [
+        "direct"
+      ],
+      "subsystem": "gateway_bundle",
+      "route_axes": [
+        "gateway_management",
+        "remote_storage_access"
+      ]
+    },
+    {
+      "path": "worker/entry",
+      "names": [
+        "storage_worker_role_entry"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "entry_type": [
+        "direct"
+      ],
+      "subsystem": "storage_worker_role",
+      "route_axes": [
+        "remote_storage_access"
+      ]
+    },
+    {
+      "path": "contracts/control",
+      "names": [
+        "gateway_control_assignments"
+      ],
+      "role": "protocol_spec"
+    },
+    {
+      "path": "contracts/control/rpc",
+      "names": [
+        "gateway_remote_control_protocol"
+      ],
+      "role": "protocol_spec"
+    },
+    {
+      "path": "control/grpc",
+      "names": [
+        "gateway_authenticated_remote_control"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "application_support",
+      "effect_family": "network",
+      "effect_operation": {
+        "name": "remote_metadata_rpc",
+        "mechanisms": [
+          "network",
+          "codec"
+        ],
+        "controls": [
+          "cancellation",
+          "backpressure",
+          "lifecycle",
+          "shutdown"
+        ]
+      },
+      "externals": [
+        "google.golang.org/grpc"
+      ]
+    },
+    {
+      "path": "controlplane/assembly",
+      "names": [
+        "gateway_control_process_assembly"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "entry_type": [
+        "direct"
+      ],
+      "subsystem": "gateway_control_process",
+      "route_axes": [
+        "gateway_management"
+      ]
+    },
+    {
+      "path": "control/grpc/rpc",
+      "names": [
+        "gateway_generated_grpc_bindings"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "application_support",
+      "effect_family": "network",
+      "effect_operation": {
+        "name": "grpc_control_binding",
+        "mechanisms": [
+          "network",
+          "codec"
+        ],
+        "controls": [
+          "cancellation",
+          "backpressure",
+          "lifecycle",
+          "shutdown"
+        ]
+      },
+      "externals": [
+        "google.golang.org/protobuf",
+        "google.golang.org/grpc"
+      ]
     }
   ]
 }

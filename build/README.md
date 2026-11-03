@@ -3,35 +3,32 @@
 This monorepo owns the Gateway Worker application, Control Plane, independent
 concrete client/transfer entries and OpenList patch stack.
 Generic Data Plane contracts and runtime remain in the independent
-`network-data-plane-worker` Go module, selected by `DATA_PLANE_ROOT`. Official OpenList and its frontend are
-pristine exact submodules below the product's `third_party/` directory. Infra
-owns the cloud filesystem and optional VFS adapters, the required rclone Go
-package version and its ordered patch stack. The product consumes that selected
-Infra input read-only; neither repository pins a rclone Git commit or submodule,
-and the product has no second rclone patch stack. The
-former whole OpenList client fork is not a build dependency.
+`network-data-plane-worker` Go module, selected by `DATA_PLANE_ROOT`. OpenList and its frontend are upstream products materialized at ignored
+`build/openlist` and `build/openlist-ui`. The closed Git v5 records bind immutable
+upstream URL/commit, the package patch order and final tree. Each semantic patch
+owns exactly one source target. `patches/openlist/apply_order.txt` is the only
+order authority and `run.py` verifies the package through the installed Git skill.
+The Go producer owns acquisition and build receipts. Reference clones reuse
+existing object stores with dissociation; a detected shallow reference uses an
+explicit local clone. It never sets Git `safe.directory` or edits reference input
+checkouts. Whole upstream products are not tracked as `third_party` libraries.
 
-`SOURCE_RELATIONSHIPS.md` in the Git skill defines this relationship. The
-product records are `.git-source-relationships/{openlist,openlist-ui}.json`
-and `build/source-history.json`. OpenList records bind the official URL, exact gitlink,
-ordered patch SHA-256 values and resulting Git tree. The source tool rejects a
-dirty upstream, mismatched pin, patch hash, patch order or resulting tree. It
-uses reference clones with dissociation in an external build directory. Git
-cannot use a shallow source as a reference alternate, so an explicitly detected
-shallow upstream uses a local clone preserving that shallow boundary; the
-receipt records this mode. It
-never sets Git `safe.directory` or applies patches in the canonical submodule.
+Infra owns the versioned rclone SDK and its patch inventory. Independent rclone
+owns its CLI/materializer artifact. The product does not pin a rclone Git hash or
+maintain a second patch stack. The former whole OpenList client fork is not a
+build dependency. Historical extraction commits remain in `source-history.json`;
+current package patches consolidate those changes once per target.
 
 ## Preserved implementation and extraction
 
-The first OpenList patch exactly reproduces the accepted control-plane source
+The control-family OpenList patches preserve the accepted control-plane source
 tree at `cdddb733`, including the existing object-ID and Drive fixes and typed
-management entries. The second moves the selected client adapters and tests
+management entries. The client-family patches move the selected client adapters and tests
 from `f5d3a4ce` into that same derived upstream Go module. Its plugin main uses
 the shared first-party `nativeclient/provider` bridge. It does not carry another
 copy of the C ABI implementation.
 
-The third patch extracts the existing `drivers/s3.initSession` static-credential
+The client package patches extract the existing `drivers/s3.initSession` static-credential
 initializer into public `pkg/storage/s3session`. Both the legacy driver and the
 native client call that kernel. The streaming S3 port adapter is parent-owned
 code; it is not presented as extraction of the complete upstream S3 driver.

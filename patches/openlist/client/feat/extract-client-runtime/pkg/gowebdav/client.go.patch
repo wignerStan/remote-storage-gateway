@@ -1,0 +1,42 @@
+diff --git a/pkg/gowebdav/client.go b/pkg/gowebdav/client.go
+index 4341f9033b54762aa836ae7c154feb7f0372e8fd..48b62f9aa74a73e0dbf2a632f5122ef24fe280fa 100644
+--- a/pkg/gowebdav/client.go
++++ b/pkg/gowebdav/client.go
+@@ -2,6 +2,7 @@ package gowebdav
+ 
+ import (
+ 	"bytes"
++	"context"
+ 	"encoding/xml"
+ 	"fmt"
+ 	"io"
+@@ -23,6 +24,7 @@ type Client struct {
+ 	interceptor func(method string, rq *http.Request)
+ 	c           *http.Client
+ 
++	ctx       context.Context
+ 	authMutex sync.Mutex
+ 	auth      Authenticator
+ }
+@@ -62,7 +64,7 @@ func (n *NoAuth) Authorize(req *http.Request, method string, path string) {
+ 
+ // NewClient creates a new instance of client
+ func NewClient(uri, user, pw string) *Client {
+-	return &Client{FixSlash(uri), make(http.Header), nil, &http.Client{}, sync.Mutex{}, &NoAuth{user, pw}}
++	return &Client{root: FixSlash(uri), headers: make(http.Header), c: &http.Client{}, ctx: context.Background(), auth: &NoAuth{user, pw}}
+ }
+ 
+ // SetHeader lets us set arbitrary headers for a given client
+@@ -484,3 +486,12 @@ func (c *Client) WriteStream(path string, stream io.Reader, _ os.FileMode, callb
+ 		return newPathError("WriteStream", path, s)
+ 	}
+ }
++
++// WithContext creates request-local authentication and cancellation state.
++// It shares the thread-safe HTTP transport, not a mutable context on a live client.
++func (c *Client) WithContext(ctx context.Context) *Client {
++	c.authMutex.Lock()
++	user, pass := c.auth.User(), c.auth.Pass()
++	c.authMutex.Unlock()
++	return &Client{root: c.root, headers: c.headers.Clone(), interceptor: c.interceptor, c: c.c, ctx: ctx, auth: &NoAuth{user, pass}}
++}

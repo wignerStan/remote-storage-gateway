@@ -1,0 +1,13 @@
+diff --git a/server/handles/storage.go b/server/handles/storage.go
+index 687c93551bc6f60e71fd9233520c4b030ea19796..1ce94c455c4f430cf36ff6b3dea9ba247173a8c8 100644
+--- a/server/handles/storage.go
++++ b/server/handles/storage.go
+@@ -37,7 +37,7 @@ func makeStorageResp(ctx *gin.Context, storages []model.Storage) []*StorageResp
+ 			Storage:      s,
+ 			MountDetails: nil,
+ 		}
+-		if setting.GetBool(conf.HideStorageDetailsInManagePage) {
++		if conf.GatewayManaged() || setting.GetBool(conf.HideStorageDetailsInManagePage) {
+ 			continue
+ 		}
+ 		d, err := op.GetStorageByMountPath(s.MountPath)

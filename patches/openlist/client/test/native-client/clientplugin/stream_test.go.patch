@@ -1,0 +1,25 @@
+diff --git a/clientplugin/stream_test.go b/clientplugin/stream_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f8822548b7b939f14c510dc6608759d0bb55b94a
+--- /dev/null
++++ b/clientplugin/stream_test.go
+@@ -0,0 +1,19 @@
++package clientplugin
++
++import (
++	"io"
++	"strings"
++	"testing"
++)
++
++func TestKnownSizeReaderRejectsMismatch(t *testing.T) {
++	for _, n := range []int64{2, 4} {
++		if _, e := io.ReadAll(checkedBody(strings.NewReader("abc"), n)); e == nil {
++			t.Fatalf("accepted wrong size%d", n)
++		}
++	}
++	b, e := io.ReadAll(checkedBody(strings.NewReader("abc"), 3))
++	if e != nil || string(b) != "abc" {
++		t.Fatal(e)
++	}
++}

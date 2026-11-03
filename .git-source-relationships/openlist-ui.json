@@ -1,17 +1,19 @@
 {
-  "schema_version": "git-source-relationship/v1",
-  "kind": "upstream_submodule",
-  "path": "third_party/openlist-ui",
+  "schema_version": "git-source-relationship/v5",
+  "kind": "upstream_product_build",
+  "path": "build/openlist-ui",
   "owner": "openlistteam",
-  "integration": "submodule",
+  "integration": "build",
   "upstream": {
     "url": "https://github.com/OpenListTeam/OpenList-Frontend.git",
     "commit": "20ce8d7d6077a1ee186274c3c0d13aafb5e3833f"
   },
-  "patches": [],
+  "dependency_manifest": null,
+  "patch_bundle": null,
   "public_api": "Vite frontend dist built from pinned pnpm-lock.yaml and embedded in the derived OpenList binary",
-  "result_tree": null,
+  "result_tree": "9e0a01db3bc2add761967fe5a9bbbcd2fd5bc2a4",
+  "build_path": "build/openlist-ui",
   "licenses": [
-    "third_party/openlist-ui/LICENSE"
+    "build/openlist-ui/LICENSE"
   ]
 }
