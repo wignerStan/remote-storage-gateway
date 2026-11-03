@@ -55,7 +55,7 @@ func (p *controlPlane) processSpec() (supervisor.Spec, error) {
 	for key, value := range proxyEnvironment() {
 		command = command.WithExtraEnv(key, value)
 	}
-	for key, value := range map[string]string{"OPENLIST_GATEWAY_CONTROL_FILE": "-", "GATEWAY_SAME_HOST":"1", "OPENLIST_ADDR": "127.0.0.1", "OPENLIST_HTTP_PORT": p.port, "OPENLIST_HTTPS_PORT": "-1", "OPENLIST_FORCE_HTTPS": "false", "OPENLIST_ENABLE_H3": "false"} {
+	for key, value := range map[string]string{"OPENLIST_GATEWAY_CONTROL_FILE": "-", "GATEWAY_SAME_HOST": "1", "OPENLIST_ADDR": "127.0.0.1", "OPENLIST_HTTP_PORT": p.port, "OPENLIST_HTTPS_PORT": "-1", "OPENLIST_FORCE_HTTPS": "false", "OPENLIST_ENABLE_H3": "false"} {
 		command = command.WithExtraEnv(key, value)
 	}
 	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

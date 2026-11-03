@@ -280,7 +280,7 @@
       "entry_type": [
         "direct"
       ],
-      "subsystem": "storage_worker_process",
+      "subsystem": "storage_worker_role",
       "route_axes": [
         "remote_storage_access"
       ]
@@ -290,14 +290,14 @@
       "names": [
         "gateway_control_assignments"
       ],
-      "role": "link_proto"
+      "role": "protocol_spec"
     },
     {
       "path": "contracts/control/rpc",
       "names": [
         "gateway_remote_control_protocol"
       ],
-      "role": "link_proto",
+      "role": "protocol_spec",
       "externals": [
         "google.golang.org/protobuf",
         "google.golang.org/grpc"
@@ -314,13 +314,13 @@
       "effect_operation": {
         "name": "remote_metadata_rpc",
         "mechanisms": [
-          "rpc",
-          "network"
+          "network",
+          "codec"
         ],
         "controls": [
-          "authentication",
-          "deadline",
+          "cancellation",
           "backpressure",
+          "lifecycle",
           "shutdown"
         ]
       },

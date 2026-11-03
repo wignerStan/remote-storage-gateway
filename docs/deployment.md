@@ -78,8 +78,9 @@ not JSON fields or request headers. Server DNS and the exact peer URI are both
 checked; plaintext, anonymous and unassigned certificates have no fallback.
 
 Do not put a shared `emptyDir` or shared-memory path between different Pods.
-Native VFS shared memory remains on the Worker host and uses the existing local
-UDS/ttrpc lease path; remote CP decisions still use gRPC. Until that co-location
+Native VFS shared memory stays inside the bundle container (or an explicitly
+co-located Pod with shared process namespace and private UDS volume), using the
+existing UDS/ttrpc lease path; remote CP decisions still use gRPC. Until that co-location
 is selected, the supplied remote profile omits VFS rather than substituting
 network file payloads through the CP.
 
