@@ -20,7 +20,10 @@ func (b *builder) bazel(args ...string) (string, error) {
 }
 
 func (b *builder) remoteBuild(targets ...string) error {
-	args := []string{"build", "--config=buildbarn", "--lockfile_mode=off", "--override_module=rclone_data_plane=" + b.materializer}
+	args := []string{"build", "--config=buildbarn", "--lockfile_mode=off"}
+	if b.materializer != filepath.Join(filepath.Dir(b.root), "rclone") {
+		args = append(args, "--override_module=rclone_data_plane="+b.materializer)
+	}
 	_, err := b.bazel(append(args, targets...)...)
 	return err
 }
@@ -74,7 +77,7 @@ func (b *builder) collectRemote() error {
 	if _, err = b.admitRemoteSnapshot(); err != nil {
 		return err
 	}
-	bin, err := b.bazel("info", "bazel-bin")
+	bin, err := b.bazel("info", "--lockfile_mode=off", "bazel-bin")
 	if err != nil {
 		return err
 	}
@@ -157,8 +160,8 @@ func extractRemoteUI(archive, destination string) error {
 		if err != nil {
 			return err
 		}
-		name := strings.TrimSuffix(header.Name, "/")
-		if name == "." && header.Typeflag == tar.TypeDir {
+		name := strings.TrimSuffix(strings.TrimPrefix(header.Name, "./"), "/")
+		if (name == "." || name == "") && header.Typeflag == tar.TypeDir {
 			continue
 		}
 		if count >= 20000 || name == "" || path.IsAbs(name) || path.Clean(name) != name || name == ".." || strings.HasPrefix(name, "../") || strings.ContainsAny(name, "\\\x00\r\n") || seen[name] {
