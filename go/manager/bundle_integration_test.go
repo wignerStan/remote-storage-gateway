@@ -411,17 +411,26 @@ func (p *bundleProcess) wait(t *testing.T, timeout time.Duration) error {
 	}
 }
 
-// Linux reports actual direct children. Comparing executable inode identity
-// also works when the installed bundle path is a symlink.
+// A Go process can fork on any OS thread. Linux exposes each thread's children
+// separately, so inspecting only the thread-group leader misses live roles.
+// Comparing executable inodes also supports a symlinked installation path.
 func bundleChildren(parent int) map[string]int {
 	out := make(map[string]int)
-	data, _ := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/children", parent, parent))
-	for _, text := range strings.Fields(string(data)) {
-		pid, _ := strconv.Atoi(text)
-		cmdline, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-		args := bytes.Split(cmdline, []byte{0})
-		if len(args) > 1 && (string(args[1]) == "worker" || string(args[1]) == "control-plane") {
-			out[string(args[1])] = pid
+	tasks, _ := filepath.Glob(fmt.Sprintf("/proc/%d/task/*/children", parent))
+	seen := make(map[int]bool)
+	for _, task := range tasks {
+		data, _ := os.ReadFile(task)
+		for _, text := range strings.Fields(string(data)) {
+			pid, err := strconv.Atoi(text)
+			if err != nil || pid <= 0 || seen[pid] {
+				continue
+			}
+			seen[pid] = true
+			cmdline, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+			args := bytes.Split(cmdline, []byte{0})
+			if len(args) > 1 && (string(args[1]) == "worker" || string(args[1]) == "control-plane") {
+				out[string(args[1])] = pid
+			}
 		}
 	}
 	return out
