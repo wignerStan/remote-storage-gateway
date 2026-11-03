@@ -89,7 +89,7 @@ func TestRemoteSnapshotRejectsRelabelledAndChangedInputs(t *testing.T) {
 }
 
 func TestRemoteUIArchiveAdmission(t *testing.T) {
-	for _, kind := range []string{"valid", "traversal", "link", "duplicate", "missing-index", "oversized"} {
+	for _, kind := range []string{"valid", "dot-prefix", "traversal", "link", "duplicate", "duplicate-alias", "missing-index", "oversized"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
 			archive := filepath.Join(root, "ui.tar")
@@ -117,6 +117,14 @@ func TestRemoteUIArchiveAdmission(t *testing.T) {
 			case "duplicate":
 				write("index.html", tar.TypeReg, 2)
 				write("index.html", tar.TypeReg, 2)
+			case "duplicate-alias":
+				write("index.html", tar.TypeReg, 2)
+				write("./index.html", tar.TypeReg, 2)
+			case "dot-prefix":
+				write("./", tar.TypeDir, 0)
+				write("./assets/", tar.TypeDir, 0)
+				write("./index.html", tar.TypeReg, 2)
+				write("./assets/style.css", tar.TypeReg, 2)
 			case "missing-index":
 				write("other.html", tar.TypeReg, 2)
 			case "oversized":
@@ -138,7 +146,7 @@ func TestRemoteUIArchiveAdmission(t *testing.T) {
 				t.Fatal(err)
 			}
 			err = extractRemoteUI(archive, destination)
-			if kind == "valid" {
+			if kind == "valid" || kind == "dot-prefix" {
 				if err != nil {
 					t.Fatal(err)
 				}
