@@ -48,7 +48,7 @@ scheduler/build system publishes images, approved artifact inventories,
 assignments and workload certificates; neither CP nor Worker builds an image.
 
 Cross-Pod control uses generated protobuf Worker and Decisions services over
-mutually authenticated **gRPC**. `control/rpc/control.proto` owns the finite wire
+mutually authenticated **gRPC**. `contracts/control/rpc/control.proto` owns the finite wire
 service. Info, manifest, observed state, exact descriptor bytes and generation-CAS
 replacement go CP to Worker. Bounded transfer decisions go Worker to CP. No
 object body, remote command, loader pointer or cloud credential operation exists.

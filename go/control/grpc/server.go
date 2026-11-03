@@ -10,7 +10,7 @@ import (
 	dp "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	cfg "github.com/wignerStan/remote-storage-gateway/go/contracts/control"
 	"github.com/wignerStan/remote-storage-gateway/go/contracts/control/broker"
-	pb "github.com/wignerStan/remote-storage-gateway/go/contracts/control/rpc"
+	pb "github.com/wignerStan/remote-storage-gateway/go/control/grpc/rpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"

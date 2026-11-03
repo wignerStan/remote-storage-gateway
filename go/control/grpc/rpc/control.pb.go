@@ -220,7 +220,7 @@ const file_contracts_control_rpc_control_proto_rawDesc = "" +
 	"Descriptor\x124.remote_storage_gateway.control.v1.DescriptorRequest\x1a+.remote_storage_gateway.control.v1.Metadata\x12i\n" +
 	"\aReplace\x121.remote_storage_gateway.control.v1.ReplaceRequest\x1a+.remote_storage_gateway.control.v1.Metadata2o\n" +
 	"\tDecisions\x12b\n" +
-	"\x06Decide\x12+.remote_storage_gateway.control.v1.Metadata\x1a+.remote_storage_gateway.control.v1.MetadataBKZIgithub.com/wignerStan/remote-storage-gateway/go/contracts/control/rpc;rpcb\x06proto3"
+	"\x06Decide\x12+.remote_storage_gateway.control.v1.Metadata\x1a+.remote_storage_gateway.control.v1.MetadataBFZDgithub.com/wignerStan/remote-storage-gateway/go/control/grpc/rpc;rpcb\x06proto3"
 
 var (
 	file_contracts_control_rpc_control_proto_rawDescOnce sync.Once

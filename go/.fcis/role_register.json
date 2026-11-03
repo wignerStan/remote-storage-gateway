@@ -297,11 +297,7 @@
       "names": [
         "gateway_remote_control_protocol"
       ],
-      "role": "protocol_spec",
-      "externals": [
-        "google.golang.org/protobuf",
-        "google.golang.org/grpc"
-      ]
+      "role": "protocol_spec"
     },
     {
       "path": "control/grpc",
@@ -341,6 +337,32 @@
       "subsystem": "gateway_control_process",
       "route_axes": [
         "gateway_management"
+      ]
+    },
+    {
+      "path": "control/grpc/rpc",
+      "names": [
+        "gateway_generated_grpc_bindings"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "application_support",
+      "effect_family": "network",
+      "effect_operation": {
+        "name": "grpc_control_binding",
+        "mechanisms": [
+          "network",
+          "codec"
+        ],
+        "controls": [
+          "cancellation",
+          "backpressure",
+          "lifecycle",
+          "shutdown"
+        ]
+      },
+      "externals": [
+        "google.golang.org/protobuf",
+        "google.golang.org/grpc"
       ]
     }
   ]

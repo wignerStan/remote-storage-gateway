@@ -1,6 +1,6 @@
 syntax = "proto3";
 package remote_storage_gateway.control.v1;
-option go_package = "github.com/wignerStan/remote-storage-gateway/go/contracts/control/rpc;rpc";
+option go_package = "github.com/wignerStan/remote-storage-gateway/go/control/grpc/rpc;rpc";
 // JSON contains only the bounded Worker-owned metadata contract. Descriptor
 // bytes remain exact. Object content and provider secrets have no RPC here.
 message Empty {}
