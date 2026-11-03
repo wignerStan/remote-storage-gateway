@@ -3,6 +3,7 @@ package grpc
 import (
 	"context"
 	"encoding/json"
+	clock "github.com/wignerStan/infra/go/time/clock"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
 	dp "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
@@ -12,7 +13,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"net"
-	"time"
 )
 
 func connect(c cfg.RemoteWorker) (*grpc.ClientConn, error) {
@@ -146,14 +146,14 @@ func (c *DecisionClient) Decide(ctx context.Context, in broker.TransferIntent) (
 	if e != nil {
 		return out, e
 	}
-	started := time.Now()
+	started := (clock.SystemClock{}).Now()
 	b, e := c.client.Decide(ctx, req)
 	e = decode(b, e, &out)
 	if e == nil {
 		e = broker.ValidateDecision(in, out)
 	}
 	deadline, _ := ctx.Deadline()
-	if e == nil && !time.Now().Before(out.ExpiresAt(started, deadline)) {
+	if e == nil && !(clock.SystemClock{}).Now().Before(out.ExpiresAt(started, deadline)) {
 		e = context.DeadlineExceeded
 	}
 	return out, e

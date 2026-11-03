@@ -1074,7 +1074,7 @@ func (b *builder) compile(stage string) error {
 		return err
 	}
 	args := []string{"exec", "go@" + b.tools.Go, "--", "go", "test", "-race", "./clientplugin", "./pluginentry", "./pkg/gowebdav", "./pkg/storage/s3session", "./internal/controlplane/...", "./server"}
-	env := map[string]string{"GOWORK": filepath.Join(b.output, "go.work"), "CGO_ENABLED": "1", "CGO_CFLAGS": "-I" + filepath.Join(b.infra, "rust/crates/interop/native-plugin-protocol/include") + " -I" + filepath.Join(b.infra, "c/plugin-interop/include")}
+	env := map[string]string{"GOWORK": filepath.Join(b.output, "go.work"), "CGO_ENABLED": "1", "CGO_CFLAGS": "-I" + filepath.Join(b.infra, "c/interop/plugins/include")}
 	spec := processexec.NewSpec(b.mise, args...).WithTimeout(30 * time.Minute).WithEnv(buildEnvironment(env))
 	spec.Dir, spec.MaxStdout, spec.MaxStderr = b.sourcePath("openlist"), 8<<20, 8<<20
 	result, err := processexec.RunContext(context.Background(), spec)

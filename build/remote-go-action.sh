@@ -92,7 +92,7 @@ run_go() {
             GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local GOENV=off GOTELEMETRY=off \
             GOOS=linux GOARCH=amd64 CGO_ENABLED="$cgo" GOMAXPROCS=4 \
             CC='/usr/bin/gcc -B/usr/bin/' CXX='/usr/bin/g++ -B/usr/bin/' \
-            CGO_CFLAGS="-I$stage/workspace/infra/rust/crates/interop/native-plugin-protocol/include -I$stage/workspace/infra/c/plugin-interop/include" \
+            CGO_CFLAGS="-I$stage/workspace/infra/c/interop/plugins/include" \
             "$stage/tools/go/bin/go" build -mod=readonly -p=4 -trimpath -buildvcs=false "$@"
     )
 }

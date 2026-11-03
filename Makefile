@@ -8,7 +8,7 @@ export GATEWAY_BUILD_INPUTS = $(BUILD_DIR)/build-inputs/manifest.json
 export RCLONE_BUILD_INPUTS = $(BUILD_DIR)/materializer/build-inputs/manifest.json
 GO = $(MISE) exec go@1.27.3 -- go
 DERIVE = ../build/derive/main.go ../build/derive/remote_inputs.go ../build/derive/remote_release.go
-SOURCE_REFERENCES ?= /develop/network/remote-storage-gateway/third_party
+SOURCE_REFERENCES ?= /develop/storage/remote-storage-gateway/third_party
 SOURCE_TOOL = cd go && GOWORK=$(BUILD_DIR)/bootstrap/go.work $(GO) run $(DERIVE) -root $(CURDIR) -out $(BUILD_DIR) -infra-root $(INFRA_ROOT) -data-plane-root $(DATA_PLANE_ROOT) -rclone-root $(RCLONE_ROOT) -source-references $(SOURCE_REFERENCES) -mise $(MISE)
 .PHONY: all bootstrap source prepare ui control-plane plugin worker materializer rclone transfer admin test test-build test-derived test-core image-inputs images
 bootstrap:

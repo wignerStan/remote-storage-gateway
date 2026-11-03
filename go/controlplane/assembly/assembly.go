@@ -5,6 +5,7 @@ package assembly
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	configsource "github.com/wignerStan/infra/go/config/source"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
 	cfg "github.com/wignerStan/remote-storage-gateway/go/contracts/control"
@@ -19,11 +20,17 @@ import (
 
 type App struct {
 	*controlplane.Controller
-	config  cfg.Config
-	life    sync.Mutex
-	ready   bool
-	brokers []*control.Server
-	remote  *controlgrpc.Server
+	config    cfg.Config
+	life      sync.Mutex
+	ready     bool
+	brokers   []*control.Server
+	remote    *controlgrpc.Server
+	stop      context.Context
+	cancel    context.CancelFunc
+	once      sync.Once
+	done      chan struct{}
+	closeErr  error
+	observers sync.WaitGroup
 }
 
 func Load(path string) (*App, error) {
@@ -52,7 +59,8 @@ func New(c cfg.Config) (*App, error) {
 	if e != nil {
 		return nil, e
 	}
-	return &App{Controller: controller, config: c}, nil
+	stop, cancel := context.WithCancel(context.Background())
+	return &App{Controller: controller, config: c, stop: stop, cancel: cancel, done: make(chan struct{})}, nil
 }
 func (a *App) Start(ctx context.Context) (err error) {
 	if ctx == nil {
@@ -62,10 +70,17 @@ func (a *App) Start(ctx context.Context) (err error) {
 	defer a.life.Unlock()
 	defer func() {
 		if err != nil {
-			a.close(context.Background())
+			a.beginClose()
 		}
 	}()
-	if err = a.Controller.Start(ctx); err != nil {
+	startup, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stopCancel := context.AfterFunc(a.stop, cancel)
+	defer stopCancel()
+	if err = startup.Err(); err != nil {
+		return err
+	}
+	if err = a.Controller.Start(startup); err != nil {
 		return err
 	}
 	if a.config.RuntimeDirectory != "" {
@@ -85,10 +100,32 @@ func (a *App) Start(ctx context.Context) (err error) {
 		a.brokers = append(a.brokers, s)
 	}
 	if a.config.RPC != nil {
-		a.remote, err = controlgrpc.StartServer(ctx, *a.config.RPC, nil, a.Controller, a.config.MetadataNames)
+		a.remote, err = controlgrpc.StartServer(startup, *a.config.RPC, nil, a.Controller, a.config.MetadataNames)
 		if err != nil {
 			return err
 		}
+	}
+	for _, server := range a.brokers {
+		a.observers.Add(1)
+		go func(s *control.Server) {
+			defer a.observers.Done()
+			select {
+			case <-s.Done():
+				a.beginClose()
+			case <-a.stop.Done():
+			}
+		}(server)
+	}
+	if a.remote != nil {
+		a.observers.Add(1)
+		go func() {
+			defer a.observers.Done()
+			select {
+			case <-a.remote.Done():
+				a.beginClose()
+			case <-a.stop.Done():
+			}
+		}()
 	}
 	a.ready = true
 	return nil
@@ -96,8 +133,15 @@ func (a *App) Start(ctx context.Context) (err error) {
 func (a *App) Ready() bool {
 	a.life.Lock()
 	defer a.life.Unlock()
-	if !a.ready || !a.Controller.Ready() {
+	if !a.ready || a.stop.Err() != nil || !a.Controller.Ready() {
 		return false
+	}
+	for _, server := range a.brokers {
+		select {
+		case <-server.Done():
+			return false
+		default:
+		}
 	}
 	if a.remote != nil {
 		select {
@@ -108,25 +152,36 @@ func (a *App) Ready() bool {
 	}
 	return true
 }
-func (a *App) close(ctx context.Context) error {
-	a.ready = false
-	for _, s := range a.brokers {
-		if e := s.Close(ctx); e != nil {
-			return e
-		}
-	}
-	if a.remote != nil {
-		if e := a.remote.Close(ctx); e != nil {
-			return e
-		}
-	}
-	return a.Controller.Close(ctx)
+func (a *App) beginClose() {
+	a.once.Do(func() {
+		a.cancel()
+		go func() {
+			a.life.Lock()
+			a.ready = false
+			var errs []error
+			for _, server := range a.brokers {
+				errs = append(errs, server.Close(context.Background()))
+			}
+			if a.remote != nil {
+				errs = append(errs, a.remote.Close(context.Background()))
+			}
+			errs = append(errs, a.Controller.Close(context.Background()))
+			a.life.Unlock()
+			a.observers.Wait()
+			a.closeErr = errors.Join(errs...)
+			close(a.done)
+		}()
+	})
 }
 func (a *App) Close(ctx context.Context) error {
 	if ctx == nil {
 		return broker.ErrInvalid
 	}
-	a.life.Lock()
-	defer a.life.Unlock()
-	return a.close(ctx)
+	a.beginClose()
+	select {
+	case <-a.done:
+		return a.closeErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

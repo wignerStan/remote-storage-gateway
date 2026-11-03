@@ -129,7 +129,7 @@ func (b *builder) remoteInputs() error {
 			}},
 			{Workspace: filepath.Join(b.output, "materializer/go.work"), Stage: "go-native.work", Targets: []buildinputs.Target{
 				{Directory: filepath.Join(b.output, "materializer/source/rclone"), Package: ".", CGOEnabled: true},
- {Directory:filepath.Join(b.materializer,"go"),Package:"./build/derive",CGOEnabled:true},
+				{Directory: filepath.Join(b.materializer, "go"), Package: "./build/derive", CGOEnabled: true},
 			}},
 		},
 	})

@@ -157,17 +157,21 @@ func (r *Runtime) Start(ctx context.Context) error {
 		go func() { _ = entry.Serve(listener) }()
 	}
 	go func() {
-		var storageDone, remoteDone <-chan struct{}
+		var storageDone, remoteDone, controlDone <-chan struct{}
 		if storage != nil {
 			storageDone = storage.server.Done()
 		}
 		if r.remoteServer != nil {
 			remoteDone = r.remoteServer.Done()
 		}
+		if entry != nil {
+			controlDone = entry.Done()
+		}
 		select {
 		case <-server.Done():
 		case <-storageDone:
 		case <-remoteDone:
+		case <-controlDone:
 		}
 		close(r.stopped)
 	}()
@@ -244,6 +248,13 @@ func (r *Runtime) Info(context.Context) (broker.InstanceInfo, error) {
 	if ready && r.remoteServer != nil {
 		select {
 		case <-r.remoteServer.Done():
+			ready = false
+		default:
+		}
+	}
+	if ready && r.controlServer != nil {
+		select {
+		case <-r.controlServer.Done():
 			ready = false
 		default:
 		}

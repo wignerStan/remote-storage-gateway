@@ -7,6 +7,9 @@ The generic [Data Plane](https://github.com/wignerStan/network-data-plane-worker
 remains a separate repository. Gateway imports its Go module; this repository
 does not contain a second copy of its runtime, contracts, or Rust source.
 
+The canonical workspace is `/develop/storage/remote-storage-gateway`;
+`/develop/network/remote-storage-gateway` remains a compatibility symlink.
+
 ## Applications and module boundaries
 
 | Application | Source | Responsibility |

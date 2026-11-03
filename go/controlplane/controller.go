@@ -5,6 +5,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	cpconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/control"
 	"github.com/wignerStan/remote-storage-gateway/go/contracts/control/broker"
 	controlgrpc "github.com/wignerStan/remote-storage-gateway/go/control/grpc"
@@ -26,6 +27,9 @@ type Controller struct {
 	clients          map[string]*control.WorkerClient
 	remotes          map[string]broker.WorkerControl
 	started, closing bool
+	closeOnce        sync.Once
+	closeDone        chan struct{}
+	closeErr         error
 }
 
 func New(c cpconfig.Config) (*Controller, error) {
@@ -68,7 +72,7 @@ func New(c cpconfig.Config) (*Controller, error) {
 			}
 		}
 	}
-	return &Controller{config: c, clients: map[string]*control.WorkerClient{}, remotes: map[string]broker.WorkerControl{}}, nil
+	return &Controller{config: c, clients: map[string]*control.WorkerClient{}, remotes: map[string]broker.WorkerControl{}, closeDone: make(chan struct{})}, nil
 }
 func (c *Controller) Start(ctx context.Context) error {
 	if ctx == nil {
@@ -168,27 +172,34 @@ func (c *Controller) Close(ctx context.Context) error {
 	if ctx == nil {
 		return broker.ErrInvalid
 	}
-	c.mu.Lock()
-	c.closing = true
-
-	clients := make([]*control.WorkerClient, 0, len(c.clients))
-	for _, client := range c.clients {
-		clients = append(clients, client)
-	}
-	c.mu.Unlock()
-	for _, client := range clients {
-		if err := client.Close(ctx); err != nil {
-			return err
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		c.closing = true
+		clients := make([]interface{ Close(context.Context) error }, 0, len(c.clients)+len(c.remotes))
+		for _, client := range c.clients {
+			clients = append(clients, client)
 		}
-	}
-	for _, client := range c.remotes {
-		if v, ok := client.(interface{ Close(context.Context) error }); ok {
-			if err := v.Close(ctx); err != nil {
-				return err
+		for _, client := range c.remotes {
+			if v, ok := client.(interface{ Close(context.Context) error }); ok {
+				clients = append(clients, v)
 			}
 		}
+		c.mu.Unlock()
+		go func() {
+			var errs []error
+			for _, client := range clients {
+				errs = append(errs, client.Close(context.Background()))
+			}
+			c.closeErr = errors.Join(errs...)
+			close(c.closeDone)
+		}()
+	})
+	select {
+	case <-c.closeDone:
+		return c.closeErr
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return nil
 }
 
 var _ broker.DecisionBroker = (*Controller)(nil)

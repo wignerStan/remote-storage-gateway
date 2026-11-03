@@ -15,15 +15,16 @@ import (
 )
 
 func (b *builder) bazel(args ...string) (string, error) {
+	if len(args) > 0 && b.materializer != filepath.Clean(filepath.Join(b.root, "../../network/rclone")) {
+		mapped := []string{args[0], "--override_module=rclone_data_plane=" + b.materializer}
+		args = append(mapped, args[1:]...)
+	}
 	command := []string{"GATEWAY_BUILD_INPUTS=" + filepath.Join(b.output, "build-inputs/manifest.json"), "RCLONE_BUILD_INPUTS=" + filepath.Join(b.output, "materializer/build-inputs/manifest.json"), b.mise, "exec", "bazel@9.3.1", "--", "bazel"}
 	return b.command(b.root, "env", append(command, args...)...)
 }
 
 func (b *builder) remoteBuild(targets ...string) error {
 	args := []string{"build", "--config=buildbarn", "--lockfile_mode=off"}
-	if b.materializer != filepath.Join(filepath.Dir(b.root), "rclone") {
-		args = append(args, "--override_module=rclone_data_plane="+b.materializer)
-	}
 	_, err := b.bazel(append(args, targets...)...)
 	return err
 }

@@ -38,4 +38,4 @@ npm.npm_translate_lock(
 use_repo(npm, "ui_npm")
 
 bazel_dep(name = "rclone_data_plane", version = "0.1.0")
-local_path_override(module_name = "rclone_data_plane", path = "../rclone")
+local_path_override(module_name = "rclone_data_plane", path = "../../network/rclone")
