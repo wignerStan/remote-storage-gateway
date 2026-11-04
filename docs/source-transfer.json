@@ -1,0 +1,74 @@
+{
+  "source_repository": "https://github.com/wignerStan/openlist-client-plugins.git",
+  "source_commit": "f7095ccb47caa48ffa7a394b2ea7e4e70a787513",
+  "scope": "private gateway product source; generic Worker contracts retain their existing owner and public identity",
+  "files": [
+    {
+      "source": "cmd/gateway-admin/README.md",
+      "destination": "go/cmd/gateway-admin/README.md",
+      "source_sha256": "440b7d540b5648c85832d926fc14058bcc79e14ad91d8a86c80b0c719a0d0ddc",
+      "namespace_change": "private product packages now belong to the Worker monorepo module"
+    },
+    {
+      "source": "cmd/gateway-admin/main.go",
+      "destination": "go/cmd/gateway-admin/main.go",
+      "source_sha256": "e1d31f9716a3f58a7360097bbc7a83eee2a02cd828ea5eadf4bbc40d122770ab",
+      "namespace_change": "private product packages now belong to the Worker monorepo module"
+    },
+    {
+      "source": "cmd/gateway-admin/sync.go",
+      "destination": "go/cmd/gateway-admin/sync.go",
+      "source_sha256": "f9e33cd2a786a76bcd05aebfd91b264b8a7fd4e013b3fa667839a52f101f0c7b",
+      "namespace_change": "private product packages now belong to the Worker monorepo module"
+    },
+    {
+      "source": "cmd/gateway-admin/sync_test.go",
+      "destination": "go/cmd/gateway-admin/sync_test.go",
+      "source_sha256": "35343cc6b3e6b1c260dd14eac40b92d205a9e3e416fee8e6ba80c9809d1cbd7e",
+      "namespace_change": "private product packages now belong to the Worker monorepo module"
+    },
+    {
+      "source": "cmd/remote-storage-gateway/assembly.go",
+      "destination": "go/cmd/remote-storage-gateway/assembly.go",
+      "source_sha256": "9acb1cdc71f40ca62cb1dc24ae73405cd6fbfd7472be7e3f605fb66b42536000",
+      "namespace_change": "private product packages now belong to the Worker monorepo module"
+    },
+    {
+      "source": "cmd/remote-storage-gateway/ingress_test.go",
+      "destination": "go/cmd/remote-storage-gateway/ingress_test.go",
+      "source_sha256": "d0fa1785e47d8e70efc2037d00171a1be36ea907f4631f39454dfa3539022724",
+      "namespace_change": "private product packages now belong to the Worker monorepo module"
+    },
+    {
+      "source": "cmd/remote-storage-gateway/integration_test.go",
+      "destination": "go/cmd/remote-storage-gateway/integration_test.go",
+      "source_sha256": "981f17883b7e473b82b62c04d27cfba33d0d081c7bb6f2a9121e102ea6d32c8d",
+      "namespace_change": "private product packages now belong to the Worker monorepo module"
+    },
+    {
+      "source": "cmd/remote-storage-gateway/main.go",
+      "destination": "go/cmd/remote-storage-gateway/main.go",
+      "source_sha256": "bbdad22bda8bc9d5053036cd5334c077b9b35827ad31a9218fa8269042dc5300",
+      "namespace_change": "private product packages now belong to the Worker monorepo module"
+    },
+    {
+      "source": "gateway/config.go",
+      "destination": "go/gateway/config.go",
+      "source_sha256": "7ca42d7d7156ca41c61b93f719b22836af5cb4cf36d4c657471283c2795dd709",
+      "namespace_change": "private product packages now belong to the Worker monorepo module"
+    },
+    {
+      "source": "gateway/httpapi/http.go",
+      "destination": "go/gateway/httpapi/http.go",
+      "source_sha256": "d7fb2fd3de66118c0a017bf731a7ffb5828606ad251df449d84e6f71ab57b888",
+      "namespace_change": "private product packages now belong to the Worker monorepo module"
+    },
+    {
+      "source": "gateway/httpapi/webdav.go",
+      "destination": "go/gateway/httpapi/webdav.go",
+      "source_sha256": "9228f0c422b954184ccb2b87d8e4dd2f03e1a8fa3881cbd7b4af0d4b225fef0f",
+      "namespace_change": "private product packages now belong to the Worker monorepo module"
+    }
+  ],
+  "status": "Historical transfer receipt at its source commit; current application ownership is described in README.md and build/source-history.json. Original source hashes and namespace-change observations remain unmodified."
+}

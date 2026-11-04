@@ -1,0 +1,20 @@
+{
+  "schema": "infra/go-source-profile-validation/v1",
+  "runtime_source_commit": "0c136f4b3a1ab1f9b017107a9b473cd7d646b1d7",
+  "pr_head": "bd3e0969ac20e702fdc16d4860defb19cf583736",
+  "changed_files_since_runtime": [
+    ".github/workflows/ci.yml"
+  ],
+  "runtime_go_and_patch_trees_unchanged": true,
+  "package_version_authority": "go/go.mod github.com/rclone/rclone v1.75.2",
+  "source_step": "exact workflow run block extracted and executed with Bash -euo pipefail",
+  "prepare_exit": 0,
+  "build_exit": 0,
+  "test_exit": 0,
+  "test_ok_packages": 101,
+  "patched_source_equivalence": "diff -qr against the verified version-module derivative exited0",
+  "workspace": "explicit task-local go.work, not ambient; shared module cache verified read-only",
+  "global_module_cache_modified": false,
+  "proofs": "ci-profile/",
+  "remote_ci": "pushed followup; current remote Go job not yet verified"
+}
