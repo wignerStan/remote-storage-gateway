@@ -1,0 +1,369 @@
+{
+  "schema_version": 10,
+  "units": [
+    {
+      "path": "gateway",
+      "names": [
+        "storage_gateway_access"
+      ],
+      "role": "use_flow",
+      "axis": "remote_storage_access"
+    },
+    {
+      "path": "gateway/httpapi",
+      "names": [
+        "storage_gateway_http_entry"
+      ],
+      "role": "front_door",
+      "role_stratum": "entry",
+      "entry_type": [
+        "server"
+      ],
+      "route_axes": [
+        "remote_storage_access"
+      ],
+      "externals": [
+        "github.com/gin-gonic/gin",
+        "golang.org/x/net/webdav"
+      ]
+    },
+    {
+      "path": "worker/runtime",
+      "names": [
+        "gateway_worker_runtime_assembly"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "subsystem": "storage_gateway_worker",
+      "route_axes": [
+        "remote_storage_access"
+      ],
+      "entry_type": [
+        "direct"
+      ],
+      "sources": [
+        {
+          "path": "assembly.go",
+          "role_stratum": "assembly"
+        },
+        {
+          "path": "lifecycle.go",
+          "role_stratum": "assembly"
+        },
+        {
+          "path": "runtime.go",
+          "role_stratum": "entry"
+        },
+        {
+          "path": "storageipc.go",
+          "role_stratum": "assembly"
+        }
+      ]
+    },
+    {
+      "path": "plugins/client/rclone",
+      "names": [
+        "rclone_storage_client_preparation"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "application_support",
+      "effect_family": "storage",
+      "effect_operation": {
+        "name": "prepare_rclone_storage_client",
+        "mechanisms": [
+          "network",
+          "file",
+          "codec",
+          "config_source",
+          "open_input"
+        ],
+        "controls": [
+          "cancellation",
+          "backpressure",
+          "drain",
+          "lifecycle",
+          "shutdown"
+        ]
+      },
+      "sources": [
+        {
+          "path": "client.go",
+          "role_stratum": "handler_adapter"
+        },
+        {
+          "path": "factory.go",
+          "role_stratum": "application_support"
+        }
+      ]
+    },
+    {
+      "path": "plugins/client/rclone/entry",
+      "names": [
+        "rclone_plugin_publication_entry"
+      ],
+      "role": "front_door",
+      "role_stratum": "entry",
+      "entry_type": [
+        "direct"
+      ]
+    },
+    {
+      "path": "cmd/plugin-rclone",
+      "names": [
+        "rclone_native_plugin_assembly"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "subsystem": "rclone_native_plugin"
+    },
+    {
+      "path": "contracts/worker",
+      "names": [
+        "gateway_worker_configuration"
+      ],
+      "role": "protocol_spec"
+    },
+    {
+      "path": "contracts/control/broker",
+      "names": [
+        "gateway_metadata_control_contract"
+      ],
+      "role": "protocol_spec"
+    },
+    {
+      "path": "cmd/storage-worker",
+      "names": [
+        "storage_worker_process_assembly"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "entry_type": [
+        "direct"
+      ],
+      "subsystem": "storage_worker_process"
+    },
+    {
+      "path": "worker",
+      "names": [
+        "storage_worker_process_box"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "application_support",
+      "effect_family": "process",
+      "effect_operation": {
+        "name": "manage_worker_process",
+        "mechanisms": [
+          "process",
+          "network",
+          "codec"
+        ],
+        "controls": [
+          "lifecycle",
+          "cancellation",
+          "health",
+          "shutdown",
+          "drain"
+        ]
+      }
+    },
+    {
+      "path": "control/ttrpc",
+      "names": [
+        "gateway_metadata_transport"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "handler_adapter",
+      "effect_family": "network",
+      "effect_operation": {
+        "name": "gateway_control_rpc",
+        "mechanisms": [
+          "network",
+          "codec"
+        ],
+        "controls": [
+          "cancellation",
+          "backpressure",
+          "lifecycle",
+          "shutdown"
+        ]
+      }
+    },
+    {
+      "path": "controlplane",
+      "names": [
+        "gateway_instance_management"
+      ],
+      "role": "use_flow",
+      "axis": "gateway_management"
+    },
+    {
+      "path": "controlplane/httpapi",
+      "names": [
+        "gateway_management_http_entry"
+      ],
+      "role": "front_door",
+      "role_stratum": "entry",
+      "entry_type": [
+        "server"
+      ],
+      "route_axes": [
+        "gateway_management"
+      ]
+    },
+    {
+      "path": "plugins/transfer/reapi",
+      "names": [
+        "reapi_encoded_session"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "application_support",
+      "effect_family": "network",
+      "effect_operation": {
+        "name": "reapi_encoded_transfer",
+        "mechanisms": [
+          "codec"
+        ],
+        "controls": [
+          "backpressure",
+          "cancellation",
+          "lifecycle",
+          "drain"
+        ]
+      }
+    },
+    {
+      "path": "cmd/plugin-reapi",
+      "names": [
+        "reapi_native_plugin_assembly"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "subsystem": "reapi_native_plugin",
+      "entry_type": [
+        "direct"
+      ]
+    },
+    {
+      "path": "plugins/transfer/reapi/entry",
+      "names": [
+        "reapi_schema_publication_entry"
+      ],
+      "role": "front_door",
+      "role_stratum": "entry",
+      "entry_type": [
+        "direct"
+      ]
+    },
+    {
+      "path": "manager",
+      "names": [
+        "gateway_bundle_process_assembly"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "entry_type": [
+        "direct"
+      ],
+      "subsystem": "gateway_bundle",
+      "route_axes": [
+        "gateway_management",
+        "remote_storage_access"
+      ]
+    },
+    {
+      "path": "worker/entry",
+      "names": [
+        "storage_worker_role_entry"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "entry_type": [
+        "direct"
+      ],
+      "subsystem": "storage_worker_role",
+      "route_axes": [
+        "remote_storage_access"
+      ]
+    },
+    {
+      "path": "contracts/control",
+      "names": [
+        "gateway_control_assignments"
+      ],
+      "role": "protocol_spec"
+    },
+    {
+      "path": "contracts/control/rpc",
+      "names": [
+        "gateway_remote_control_protocol"
+      ],
+      "role": "protocol_spec"
+    },
+    {
+      "path": "control/grpc",
+      "names": [
+        "gateway_authenticated_remote_control"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "application_support",
+      "effect_family": "network",
+      "effect_operation": {
+        "name": "remote_metadata_rpc",
+        "mechanisms": [
+          "network",
+          "codec"
+        ],
+        "controls": [
+          "cancellation",
+          "backpressure",
+          "lifecycle",
+          "shutdown"
+        ]
+      },
+      "externals": [
+        "google.golang.org/grpc"
+      ]
+    },
+    {
+      "path": "controlplane/assembly",
+      "names": [
+        "gateway_control_process_assembly"
+      ],
+      "role": "front_door",
+      "role_stratum": "assembly",
+      "entry_type": [
+        "direct"
+      ],
+      "subsystem": "gateway_control_process",
+      "route_axes": [
+        "gateway_management"
+      ]
+    },
+    {
+      "path": "control/grpc/rpc",
+      "names": [
+        "gateway_generated_grpc_bindings"
+      ],
+      "role": "effect_tool",
+      "role_stratum": "application_support",
+      "effect_family": "network",
+      "effect_operation": {
+        "name": "grpc_control_binding",
+        "mechanisms": [
+          "network",
+          "codec"
+        ],
+        "controls": [
+          "cancellation",
+          "backpressure",
+          "lifecycle",
+          "shutdown"
+        ]
+      },
+      "externals": [
+        "google.golang.org/protobuf",
+        "google.golang.org/grpc"
+      ]
+    }
+  ]
+}

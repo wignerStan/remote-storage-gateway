@@ -1,0 +1,288 @@
+diff --git a/internal/controlplane/config.go b/internal/controlplane/config.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c5b7649583a06500ec18311beca02f6c745f300e
+--- /dev/null
++++ b/internal/controlplane/config.go
+@@ -0,0 +1,282 @@
++// Package controlplane implements administrative clients, never object transport.
++package controlplane
++
++import (
++	"context"
++	"errors"
++	"io"
++	"net/http"
++	"net/url"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++	"time"
++
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
++	"github.com/wignerStan/network-data-plane-worker/go/management"
++	secretstore "github.com/wignerStan/network-data-plane-worker/go/secrets"
++)
++
++const MaxMetadata = 1 << 20
++
++var ErrInvalid = errors.New("invalid management request")
++var ErrUpstream = errors.New("management endpoint unavailable")
++var ErrConflict = errors.New("management state changed")
++
++// Target selects an operator-owned administrative endpoint. This is not a
++// provider plugin descriptor or a provider configuration schema.
++type Target struct {
++	Name                  string `json:"name"`
++	Kind                  string `json:"kind"`
++	Endpoint              string `json:"endpoint"`
++	Username              string `json:"username,omitempty"`
++	PasswordSecretRef     string `json:"password_secret_ref,omitempty"`
++	Bucket                string `json:"bucket,omitempty"`
++	Region                string `json:"region,omitempty"`
++	ForcePathStyle        bool   `json:"force_path_style,omitempty"`
++	AccessKeySecretRef    string `json:"access_key_secret_ref,omitempty"`
++	SecretKeySecretRef    string `json:"secret_key_secret_ref,omitempty"`
++	SessionTokenSecretRef string `json:"session_token_secret_ref,omitempty"`
++	Root                  string `json:"root,omitempty"`
++}
++
++// Config is operator-owned startup configuration. Targets never accept URLs,
++// provider selections or inline credentials from administrator HTTP requests.
++// Secret file references are resolved for each operation, permitting rotation
++// without copying secret values into management state or API responses.
++type Config struct {
++	Targets     []Target          `json:"targets"`
++	SecretFiles map[string]string `json:"secret_files,omitempty"`
++}
++type Summary struct {
++	Name       string   `json:"name"`
++	Kind       string   `json:"kind"`
++	Operations []string `json:"operations"`
++}
++type endpoint struct {
++	config Target
++	http   *http.Client
++	worker *management.Client
++	rclone *Rclone
++}
++type Registry struct {
++	targets map[string]*endpoint
++	secrets secretstore.FileResolver
++}
++
++func Load(path string) (*Registry, error) {
++	if path == "" {
++		return New(Config{})
++	}
++	f, e := os.Open(path)
++	if e != nil {
++		return nil, ErrInvalid
++	}
++	defer f.Close()
++	b, e := io.ReadAll(io.LimitReader(f, MaxMetadata+1))
++	if e != nil {
++		return nil, ErrInvalid
++	}
++	var c Config
++	if admission.StrictJSON(b, &c) != nil {
++		return nil, ErrInvalid
++	}
++	return New(c)
++}
++func validName(s string) bool {
++	if len(s) == 0 || len(s) > 128 {
++		return false
++	}
++	for _, r := range s {
++		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
++			continue
++		}
++		return false
++	}
++	return true
++}
++func New(c Config) (*Registry, error) {
++	if len(c.Targets) > 64 || len(c.SecretFiles) > 256 {
++		return nil, ErrInvalid
++	}
++	secrets := secretstore.FileResolver{}
++	for ref, p := range c.SecretFiles {
++		if ref == "" || len(ref) > 4096 || !filepath.IsAbs(p) {
++			return nil, ErrInvalid
++		}
++		secrets[ref] = p
++	}
++	r := &Registry{targets: map[string]*endpoint{}, secrets: secrets}
++	for _, cfg := range c.Targets {
++		if !validName(cfg.Name) || r.targets[cfg.Name] != nil {
++			return nil, ErrInvalid
++		}
++		u, e := url.Parse(cfg.Endpoint)
++		if e != nil || u.Host == "" || u.Scheme != "http" && u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" {
++			return nil, ErrInvalid
++		}
++		for _, seg := range strings.Split(u.Path, "/") {
++			if seg == ".." || seg == "." {
++				return nil, ErrInvalid
++			}
++		}
++		switch cfg.Kind {
++		case "worker", "rclone", "origin-webdav":
++			if cfg.Username != "" && cfg.PasswordSecretRef == "" || cfg.Username == "" && cfg.PasswordSecretRef != "" || cfg.AccessKeySecretRef != "" || cfg.SecretKeySecretRef != "" || cfg.SessionTokenSecretRef != "" || cfg.Bucket != "" || cfg.Region != "" || cfg.ForcePathStyle {
++				return nil, ErrInvalid
++			}
++			if cfg.Kind != "origin-webdav" && cfg.Root != "" {
++				return nil, ErrInvalid
++			}
++		case "origin-s3":
++			if cfg.Bucket == "" || cfg.Region == "" || cfg.AccessKeySecretRef == "" || cfg.SecretKeySecretRef == "" || cfg.Username != "" || cfg.PasswordSecretRef != "" || cfg.Root != "" {
++				return nil, ErrInvalid
++			}
++		default:
++			return nil, ErrInvalid
++		}
++		for _, ref := range []string{cfg.PasswordSecretRef, cfg.AccessKeySecretRef, cfg.SecretKeySecretRef, cfg.SessionTokenSecretRef} {
++			if ref != "" && secrets[ref] == "" {
++				return nil, ErrInvalid
++			}
++		}
++		for _, seg := range strings.Split(cfg.Root, "/") {
++			if seg == ".." || seg == "." || strings.ContainsAny(seg, "\\\x00") {
++				return nil, ErrInvalid
++			}
++		}
++		transport := http.DefaultTransport.(*http.Transport).Clone()
++		transport.ResponseHeaderTimeout = 15 * time.Second
++		transport.MaxResponseHeaderBytes = 64 << 10
++		client := &http.Client{Timeout: 30 * time.Second, Transport: authTransport{transport, cfg, secrets}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
++		target := &endpoint{config: cfg, http: client}
++		switch cfg.Kind {
++		case "worker":
++			target.worker, e = management.NewClient(cfg.Endpoint, client)
++		case "rclone":
++			target.rclone, e = NewRclone(cfg.Endpoint, client)
++		}
++		if e != nil {
++			return nil, ErrInvalid
++		}
++		r.targets[cfg.Name] = target
++	}
++	return r, nil
++}
++func (r *Registry) Summaries() []Summary {
++	out := []Summary{}
++	for name, t := range r.targets {
++		ops := []string{"probe"}
++		switch t.config.Kind {
++		case "worker":
++			ops = []string{"manifest", "descriptor", "observed", "replace"}
++		case "rclone":
++			ops = []string{"version", "stats", "jobs", "job-status", "job-stop"}
++		}
++		out = append(out, Summary{name, t.config.Kind, ops})
++	}
++	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
++	return out
++}
++func (r *Registry) get(name, kind string) (*endpoint, error) {
++	t := r.targets[name]
++	if t == nil || t.config.Kind != kind {
++		return nil, ErrInvalid
++	}
++	return t, nil
++}
++func secret(ctx context.Context, s secretstore.FileResolver, ref string) (string, error) {
++	if ref == "" {
++		return "", nil
++	}
++	v, e := s.Resolve(ctx, ref)
++	if e != nil {
++		return "", ErrUpstream
++	}
++	defer v.Close()
++	return string(v.Bytes()), nil
++}
++
++// Endpoint credentials come only from registered file references; redirects
++// never forward them to a second host. Every response is metadata bounded.
++type authTransport struct {
++	base    http.RoundTripper
++	config  Target
++	secrets secretstore.FileResolver
++}
++
++func (t authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
++	if t.config.Kind != "origin-s3" {
++		base, _ := url.Parse(t.config.Endpoint)
++		if req.URL.Scheme != base.Scheme || req.URL.Host != base.Host {
++			return nil, ErrUpstream
++		}
++	}
++	if t.config.Kind == "origin-webdav" && req.Method != http.MethodOptions && req.Method != "PROPFIND" {
++		return nil, ErrInvalid
++	}
++	clone := req.Clone(req.Context())
++	clone.Header = req.Header.Clone()
++	if t.config.PasswordSecretRef != "" {
++		p, e := secret(req.Context(), t.secrets, t.config.PasswordSecretRef)
++		if e != nil {
++			return nil, e
++		}
++		clone.SetBasicAuth(t.config.Username, p)
++	}
++	response, e := t.base.RoundTrip(clone)
++	if e != nil {
++		return nil, ErrUpstream
++	}
++	if t.config.Kind == "origin-webdav" && (response.StatusCode == http.StatusUnauthorized || response.StatusCode >= 300 && response.StatusCode < 400) {
++		response.Body.Close()
++		return nil, ErrUpstream
++	}
++	response.Body = &metadataBody{ReadCloser: response.Body, remaining: MaxMetadata}
++	return response, nil
++}
++
++type metadataBody struct {
++	io.ReadCloser
++	remaining int64
++}
++
++func (b *metadataBody) Read(p []byte) (int, error) {
++	if len(p) == 0 {
++		return 0, nil
++	}
++	if b.remaining == 0 {
++		var extra [1]byte
++		n, e := b.ReadCloser.Read(extra[:])
++		if n > 0 {
++			return 0, ErrUpstream
++		}
++		return 0, e
++	}
++	if int64(len(p)) > b.remaining {
++		p = p[:b.remaining]
++	}
++	n, e := b.ReadCloser.Read(p)
++	b.remaining -= int64(n)
++	return n, e
++}
++
++// WorkerClient selects an immutable, operator-registered management endpoint.
++// Its SDK exposes only the Worker-owned control contract, never file payloads.
++func (r *Registry) WorkerClient(name string) (*management.Client, error) {
++	e, err := r.get(name, "worker")
++	if err != nil {
++		return nil, err
++	}
++	return e.worker, nil
++}
++
++// RcloneClient exposes the selected finite administrative RC SDK.
++func (r *Registry) RcloneClient(name string) (*Rclone, error) {
++	e, err := r.get(name, "rclone")
++	if err != nil {
++		return nil, err
++	}
++	return e.rclone, nil
++}

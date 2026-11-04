@@ -1,0 +1,86 @@
+diff --git a/pluginentry/configuration_test.go b/pluginentry/configuration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9fecb7883bb37859b48d12cdad9949be69fc919b
+--- /dev/null
++++ b/pluginentry/configuration_test.go
+@@ -0,0 +1,80 @@
++package pluginentry
++
++import (
++	"bytes"
++	"encoding/json"
++	"testing"
++
++	"github.com/danielgtaylor/huma/v2"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
++)
++
++func TestOwnedConfigurationSchemasGenerateStandardSecretSemantics(t *testing.T) {
++	first, e := ConfigurationSchemas()
++	if e != nil {
++		t.Fatal(e)
++	}
++	second, e := ConfigurationSchemas()
++	if e != nil {
++		t.Fatal(e)
++	}
++	a, _ := json.Marshal(first)
++	b, _ := json.Marshal(second)
++	if !bytes.Equal(a, b) {
++		t.Fatal("owned schema generation is unstable")
++	}
++	for _, generated := range []*huma.Schema{first.S3, first.WebDAV} {
++		if generated == nil || generated.Type != "object" {
++			t.Fatal("structured object schema missing")
++		}
++	}
++	if first.S3.Properties["endpoint"] == nil || first.WebDAV.Properties["address"] == nil {
++		t.Fatal("schema no longer describes the implementation-owned model")
++	}
++	factory, e := NewFactory("sha256:" + string(bytes.Repeat([]byte("1"), 64)))
++	if e != nil {
++		t.Fatal(e)
++	}
++	published := factory.Descriptor()
++	if published.Schema != "network-data-plane-worker/plugin-descriptor/v2" {
++		t.Fatal("breaking schema shape was published under old descriptor version")
++	}
++	var s3, dav descriptor.Implementation
++	for _, impl := range published.Implementations {
++		switch impl.ID {
++		case "s3":
++			s3 = impl
++		case "webdav":
++			dav = impl
++		}
++	}
++	fields := admission.SecretFields(s3)
++	required := map[string]bool{}
++	for _, field := range fields {
++		required[field.Name] = field.Required
++	}
++	if len(fields) != 3 || !required["access_key_id"] || !required["secret_access_key"] || required["session_token"] {
++		t.Fatal("S3 required/optional credential semantics changed")
++	}
++	davSecrets := admission.SecretFields(dav)
++	if len(davSecrets) != 1 || davSecrets[0].Name != "password" || davSecrets[0].Required {
++		t.Fatal("optional WebDAV credential semantics changed")
++	}
++	valid := json.RawMessage(`{"endpoint":"https://example.test","bucket":"selected","region":"us-east-1"}`)
++	refs := map[string]string{"access_key_id": "access-ref", "secret_access_key": "key-ref"}
++	if admission.ValidateConfig(s3, valid, refs) != nil {
++		t.Fatal("valid public/reference separation rejected")
++	}
++	for _, input := range []json.RawMessage{json.RawMessage(`{"endpoint":"https://example.test","bucket":"selected","region":"us-east-1","secret_access_key":"inline"}`), json.RawMessage(`{"endpoint":"https://example.test","bucket":"selected","region":"us-east-1","undeclared":true}`), json.RawMessage(`{"endpoint":"https://example.test","bucket":"selected"}`)} {
++		if admission.ValidateConfig(s3, input, refs) == nil {
++			t.Fatal("public secret/unknown/missing required input admitted")
++		}
++	}
++	if admission.ValidateConfig(s3, valid, nil) == nil {
++		t.Fatal("required secret references were lost")
++	}
++	if admission.ValidateConfig(dav, json.RawMessage(`{"address":"https://example.test"}`), nil) != nil {
++		t.Fatal("optional WebDAV fields became required")
++	}
++}

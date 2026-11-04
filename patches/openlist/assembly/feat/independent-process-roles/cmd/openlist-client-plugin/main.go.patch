@@ -1,0 +1,25 @@
+diff --git a/cmd/openlist-client-plugin/main.go b/cmd/openlist-client-plugin/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..be3f6f0a1f215d0b43c9a7b8f1b53fcae4aa62c6
+--- /dev/null
++++ b/cmd/openlist-client-plugin/main.go
+@@ -0,0 +1,19 @@
++package main
++
++import (
++	"github.com/OpenListTeam/OpenList/v4/pluginentry"
++	"github.com/wignerStan/network-data-plane-worker/go/nativeclient/provider"
++)
++
++var buildDigest string
++
++func init() {
++	factory, err := pluginentry.NewFactory(buildDigest)
++	if err != nil {
++		// Leave the bridge unregistered: the host must reject this artifact,
++		// rather than aborting its process during dynamic library initialization.
++		return
++	}
++	provider.RegisterFactory(factory)
++}
++func main() {}

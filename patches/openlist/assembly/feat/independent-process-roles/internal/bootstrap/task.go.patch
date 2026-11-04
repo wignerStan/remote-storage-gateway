@@ -1,0 +1,14 @@
+diff --git a/internal/bootstrap/task.go b/internal/bootstrap/task.go
+index a9ea494f196a9a44bb2668db54b1c44b5d9a9050..43061d5e68897d4ca38e1819b899885abd629318 100644
+--- a/internal/bootstrap/task.go
++++ b/internal/bootstrap/task.go
+@@ -18,6 +18,9 @@ func taskFilterNegative(num int) int64 {
+ }
+ 
+ func InitTaskManager() {
++	if conf.GatewayManaged() {
++		return
++	}
+ 	fs.UploadTaskManager = tache.NewManager[*fs.UploadTask](tache.WithWorks(setting.GetInt(conf.TaskUploadThreadsNum, conf.Conf.Tasks.Upload.Workers)), tache.WithMaxRetry(conf.Conf.Tasks.Upload.MaxRetry)) //upload will not support persist
+ 	op.RegisterSettingChangingCallback(func() {
+ 		fs.UploadTaskManager.SetWorkersNumActive(taskFilterNegative(setting.GetInt(conf.TaskUploadThreadsNum, conf.Conf.Tasks.Upload.Workers)))

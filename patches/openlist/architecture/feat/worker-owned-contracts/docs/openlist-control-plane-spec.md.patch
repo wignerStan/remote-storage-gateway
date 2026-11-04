@@ -1,0 +1,944 @@
+diff --git a/docs/openlist-control-plane-spec.md b/docs/openlist-control-plane-spec.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..5cf8a0677699ccf917037220d7c0f62ef83c4a5a
+--- /dev/null
++++ b/docs/openlist-control-plane-spec.md
+@@ -0,0 +1,938 @@
++# OpenList control-plane architecture specification
++
++## Status
++
++This document defines the target architecture for the repository currently named
++`OpenList`. It is a design contract and migration plan. It does not claim that
++the control-plane/data-plane split has already landed.
++
++The canonical application role is:
++
++```text
++openlist-control-plane
++```
++
++The corresponding execution application is the separately owned
++`network-data-plane-worker`.
++
++## Contract ownership
++
++The data-plane worker owns the plugin contract.
++
++The canonical definitions of plugin descriptors, configuration-schema fields,
++secret declarations, typed plugin ports, lifecycle, capability manifests,
++generation replacement, and observed state belong to:
++
++```text
++wignerStan/pingora-worker/docs/network-data-plane-worker-spec.md
++```
++
++OpenList consumes those contracts. It does not define or fork them.
++
++OpenList may:
++
++- register and approve worker build digests;
++- cache an exact worker-published plugin descriptor by digest;
++- render administration forms from that descriptor;
++- structurally validate desired values against it;
++- store public configuration and secret references;
++- assign desired instances to compatible workers;
++- reconcile desired and observed generations.
++
++OpenList must not:
++
++- author a competing data-plane plugin schema;
++- hardcode provider fields as the canonical runtime contract;
++- add a capability absent from the worker descriptor;
++- reinterpret a field's secrecy or type;
++- construct a live provider client merely to render or validate a form;
++- send executable code through desired-state configuration.
++
++A concrete plugin implementation owns its concrete plugin ID, adapter IDs,
++configuration field declarations, secret field declarations, capabilities, and
++provider behavior by publishing a descriptor that conforms to the worker-owned
++contract.
++
++## Decision summary
++
++1. OpenList becomes the desired-state control plane for client instances,
++   namespaces, access policy, worker assignments, rollouts, and status.
++2. Object bytes never pass through the control plane.
++3. The control plane is not synchronously consulted by GET, PUT, LIST, COPY,
++   multipart, WebDAV, S3, or ordinary provider operations.
++4. Worker-reported plugin descriptors are authoritative for runtime capability
++   and configuration shape.
++5. OpenList stores and approves exact descriptor/build digests; it does not
++   manufacture plugin descriptors.
++6. Current OpenList driver implementations are migration input for a concrete
++   worker client plugin, but that plugin consumes the worker contract.
++7. Other client implementations are managed through the same generic desired
++   model. The control plane does not gain ownership of their schemas or runtime
++   behavior.
++8. There is no provider sidecar introduced merely to separate the planes, and no
++   OpenList-specific per-request provider RPC.
++9. Runtime configuration can select only capabilities reported by the assigned
++   worker from operator-installed, hash-approved native `.so` plugins. Provider
++   implementations are not linked into the Worker executable. Desired state
++   cannot install executable code.
++10. Current OpenList data-serving behavior remains only as a temporary legacy
++    migration profile. The final control-plane binary serves administration,
++    identity, configuration, reconciliation, and status—not file data.
++
++## Current implementation baseline
++
++The existing code combines desired configuration and runtime execution:
++
++- `model.Storage` stores mount-path identity, driver name, provider `Addition`
++  JSON, runtime status, enablement, sort/cache, and proxy behavior in one record;
++- storage creation writes the record, constructs the selected driver, unmarshals
++  its addition, initializes it, and inserts it into a process-global mount map;
++- update drops and reinitializes the live driver in the administrator request;
++- disable and delete drop live adapters while mutating the desired record;
++- driver field descriptions are derived from `Addition` struct tags;
++- the same process exposes administrator APIs and file data APIs, including
++  filesystem operations, downloads, WebDAV, and S3;
++- `drivers/all.go` blank-imports the complete adapter inventory.
++
++These mechanisms are useful migration inputs, but they are not the final plane
++boundary.
++
++## Target topology
++
++```text
++                             ADMINISTRATIVE TRAFFIC
++                                      |
++                                      v
+++------------------------------------------------------------------------+
++|                      openlist-control-plane                            |
++|                                                                        |
++|  Admin UI / API            Identity / RBAC          Audit              |
++|  Descriptor registry       Client desired state     Secret vault       |
++|  Namespace / route model   Access credentials       Policy compiler    |
++|  Worker registry           Assignment compiler      Rollout/reconcile  |
++|  Desired revisions         Observed-state store     Status / events    |
+++--------------------------------+---------------------------------------+
++                                 |
++               exact descriptor refs + desired snapshots + ACK
++               no object body, no per-request route/provider RPC
++                                 |
++                  +--------------+--------------+
++                  |                             |
++                  v                             v
+++--------------------------------+  +--------------------------------+
++| network-data-plane-worker      |  | network-data-plane-worker      |
++| selected build A               |  | selected build B               |
++|                                |  |                                |
++| worker-owned plugin contract   |  | worker-owned plugin contract   |
++| loaded plugin descriptors      |  | loaded plugin descriptors      |
++| pinned runtime generations     |  | pinned runtime generations     |
+++---------------+----------------+  +----------------+---------------+
++                |                                    |
++                v                                    v
++      External storage/provider APIs and other selected data services
++```
++
++A worker keeps its last-known-good applied generation while the control plane is
++unavailable. Control-plane reachability is never a condition for continuing an
++already admitted transfer.
++
++# Ownership boundary
++
++## Control plane owns
++
++- administrator and operator identity;
++- tenants or projects when multi-tenancy is enabled;
++- approved worker build digests;
++- approved plugin descriptor digests and policy around their use;
++- client desired state and revisions;
++- encrypted secret versions and rotation history;
++- namespace, bucket, host, path, and protocol-route desired state;
++- access credentials and policy bindings;
++- worker groups, selectors, and assignments;
++- snapshot compilation, signing, and delivery;
++- rollout intent, reconciliation, status aggregation, and audit.
++
++## Data-plane worker owns
++
++- the plugin descriptor and configuration-schema contract;
++- plugin registration and exact typed-port validation;
++- listeners and L4/L7 mechanics;
++- protocol parsing and request authentication;
++- local policy evaluation;
++- plugin and client generation construction and pinning;
++- provider sessions and access-token refresh;
++- streaming, Range, backpressure, cancellation, and retries;
++- multipart runtime state;
++- actual generation drain and physical cleanup;
++- request completion and operational telemetry.
++
++## Concrete plugin implementation owns
++
++- its stable plugin ID and version;
++- its implementation or adapter IDs;
++- concrete configuration field declarations;
++- concrete secret field declarations;
++- concrete capability declarations;
++- final typed configuration validation;
++- provider authentication and session behavior;
++- provider-specific object identity, upload, retry, direct-link, token-refresh,
++  and metadata behavior;
++- authoritative runtime results and cleanup.
++
++The plugin implementation may reuse OpenList provider-driver source, rclone
++packages, or another selected library. That implementation choice does not move
++its descriptor contract into the control plane or infra.
++
++## Infra owns
++
++Only reusable mechanisms, including:
++
++- Rust and Go L4/L7 facilities;
++- managed resource and plugin lifecycle;
++- native plugin loading;
++- action publication and dispatch;
++- local-control and selected remote carriers;
++- bounded storage/configuration primitives;
++- generic cryptographic and observability mechanisms.
++
++Infra must not import product-specific client implementations.
++
++# Descriptor consumption model
++
++## Authoritative source
++
++A worker binary publishes a capability manifest containing exact plugin IDs,
++contract versions, plugin versions, and descriptor digests. The worker makes the
++corresponding immutable descriptors available through its selected registration
++or control mechanism.
++
++The control plane keys a descriptor by at least:
++
++```text
++worker build digest
++plugin ID
++plugin version
++contract version
++descriptor digest
++```
++
++The descriptor bytes reported by an approved worker build are authoritative.
++OpenList may cache them, but it cannot edit them in place.
++
++## Registration flow
++
++```text
++worker starts
++    -> verifies installed .so artifact hashes before dynamic loading
++    -> validates exact plugin descriptors through the Worker contract
++    -> reports build and capability manifest
++control plane authenticates worker incarnation
++    -> verifies approved build and contract versions
++    -> fetches or receives exact descriptors
++    -> validates digest and bounds
++    -> records descriptor approval/availability
++```
++
++A worker name, deployment label, or language is not capability evidence.
++
++## Administration form flow
++
++```text
++administrator selects an available plugin implementation
++    -> OpenList loads the approved cached descriptor
++    -> UI renders bounded escaped field metadata
++    -> secret fields are write-only
++    -> OpenList performs structural validation
++    -> public values and secret values are stored separately
++```
++
++OpenList does not import a provider package or initialize a provider session to
++render this form.
++
++## Final validation flow
++
++Structural control-plane validation is not runtime acceptance.
++
++```text
++control plane commits desired client revision
++    -> snapshot references exact descriptor digest
++worker receives snapshot
++    -> verifies descriptor digest exists in its build
++    -> resolves sealed secret fields declared by that descriptor
++    -> plugin constructor performs final typed validation
++    -> candidate initializes
++    -> worker publishes generation or reports failure
++```
++
++A failed candidate leaves the current generation active.
++
++# Core terminology
++
++## Plugin descriptor
++
++The immutable description of one dynamically loaded plugin version, published by
++the concrete plugin under the Worker-owned contract. It
++contains its contract, implementation IDs, config schema, secret declarations,
++and capabilities.
++
++## Plugin approval
++
++A control-plane policy record authorizing an exact plugin/build/descriptor digest
++for selected worker groups or projects. Approval does not redefine the descriptor.
++
++## Client instance
++
++Desired configuration for one client implementation and account/session. One
++client may be referenced by multiple routes with different roots and policies.
++
++## Route
++
++An application route mapping a bucket, host, path, prefix, or namespace to a
++client instance and provider-relative root.
++
++## Configuration revision
++
++A control-plane revision for public desired values. It is distinct from the
++secret version, route revision, snapshot revision, worker incarnation, descriptor
++digest, and runtime generation.
++
++## Runtime generation
++
++The concrete worker-owned instance pinned by admitted work. The control plane can
++request replacement and observe it; the worker owns actual publication and drain.
++
++# Desired-state model
++
++Desired and observed state use separate records. Runtime status is never written
++back into the same row that defines operator intent.
++
++## Worker build approval
++
++```text
++build_digest
++implementation
++release/version
++approval_state
++allowed_worker_groups
++created_at
++updated_at
++```
++
++## Plugin descriptor record
++
++```text
++build_digest
++plugin_id
++plugin_version
++contract_version
++descriptor_digest
++descriptor_bytes_or_artifact_ref
++approval_state
++first_seen_at
++last_seen_at
++```
++
++The cached descriptor is immutable for its digest.
++
++## Client instance
++
++```text
++id
++project_id
++name
++plugin_id
++plugin_version
++implementation_id
++descriptor_digest
++config_revision
++public_config_json
++secret_set_id
++desired_enabled
++labels
++created_at
++updated_at
++deleted_at / tombstone_revision
++```
++
++The record never contains plaintext refresh tokens, cookies, passwords, or client
++secrets.
++
++## Secret set and version
++
++```text
++secret_set_id
++secret_version
++ciphertext / external_vault_reference
++key_id
++created_at
++revoked_at
++supersedes_version
++```
++
++Each secret name must be declared by the pinned descriptor.
++
++## Route
++
++```text
++id
++project_id
++lane
++protocol
++listener_or_route_key
++host / bucket / prefix
++client_id
++client_root
++policy_id
++credential_set_id
++desired_enabled
++route_revision
++labels
++```
++
++`client_root` is implementation-relative. It is not an OpenList mount-path
++identity.
++
++## Access credential
++
++```text
++id
++kind
++public_identifier
++secret_set_id
++policy_id
++desired_enabled
++revision
++```
++
++## Policy
++
++```text
++id
++version
++actions
++route selectors
++object-prefix selectors
++limits / constraints
++compiled_digest
++```
++
++## Worker
++
++```text
++worker_id
++worker_incarnation
++worker_group
++implementation
++build_digest
++capability_manifest_digest
++last_heartbeat
++readiness
++```
++
++## Assignment
++
++```text
++worker_group / selector
++resource set
++assignment_revision
++rollout strategy
++```
++
++## Desired snapshot
++
++```text
++snapshot_id
++worker_group
++snapshot_revision
++source_revision
++payload_digest
++signature
++created_at
++```
++
++## Observed plugin/client state
++
++```text
++worker_id
++worker_incarnation
++resource_id
++plugin_id
++descriptor_digest
++config_revision
++secret_version
++runtime_generation
++state
++last_error_code
++sanitized_message
++last_transition
++```
++
++## Worker applied state
++
++```text
++worker_id
++worker_incarnation
++snapshot_revision
++applied_digest
++state
++acknowledged_at
++resource_failures
++```
++
++## Audit event
++
++```text
++actor
++operation
++resource_type
++resource_id
++old_revision
++new_revision
++request_id
++timestamp
++sanitized_summary
++```
++
++# Mapping from the current `Storage` model
++
++The legacy row is split as follows:
++
++| Legacy field | Target owner |
++| --- | --- |
++| `ID` | client instance ID, with migration mapping |
++| `Driver` | desired plugin/implementation selection derived during migration |
++| `Addition` | public config plus encrypted/versioned secret references |
++| `MountPath` | route namespace and client-root mapping, not client identity |
++| `Disabled` | `desired_enabled=false` |
++| `Status` | observed runtime state, never desired state |
++| cache fields | route/application cache policy |
++| sort/index fields | UI/protocol route policy where still required |
++| proxy fields | L7 route or transport policy |
++| `Remark` | labels/description; legacy reference syntax is not a hidden contract |
++
++During migration, legacy driver `Addition` tags may be used to generate an initial
++plugin descriptor implementation. Once published, the worker-owned descriptor and
++its digest become authoritative. The control plane must not continue deriving a
++parallel schema independently from Go reflection.
++
++A deterministic mapping from old storage IDs and mount paths is retained so
++bookmarks, routes, and administrative workflows can be translated deliberately.
++
++# Control-plane services
++
++## Administrative API and UI
++
++The existing administrator UI is gradually remapped to:
++
++```text
++worker builds and plugin descriptors
++clients
++routes and namespaces
++credentials and secrets
++policies
++workers and assignments
++rollouts
++observed status and audit
++```
++
++The UI displays desired and observed state separately:
++
++- **Saved** means desired state was committed.
++- **Assigned** means a snapshot containing it was issued.
++- **Applied** means a worker published the requested generation.
++- **Drained** means the superseded generation physically finished cleanup.
++
++## Descriptor registry
++
++Responsibilities:
++
++- ingest descriptors only from authenticated approved worker builds or immutable
++  release artifacts tied to those builds;
++- validate the worker-owned descriptor contract, size bounds, and digest;
++- retain immutable descriptor bytes;
++- expose descriptors to UI and desired-state validation;
++- record approval policy and worker-group availability;
++- reject conflicting bytes for the same digest or identity.
++
++It does not author provider fields or capabilities.
++
++## Client desired-state service
++
++Responsibilities:
++
++- create and update client specifications with revision CAS;
++- require an approved exact descriptor digest;
++- separate public and secret fields according to that descriptor;
++- perform structural validation;
++- create tombstones for disable and delete operations;
++- write audit records;
++- enqueue reconciliation.
++
++Saving desired state never calls a provider API.
++
++## Secret service
++
++Responsibilities:
++
++- encrypt secret versions at rest or store external vault references;
++- never return an existing secret value through ordinary GET/list APIs;
++- accept only names declared secret by the exact descriptor;
++- seal assigned secrets to an authenticated worker identity;
++- rotate and revoke versions;
++- accept bounded version-checked secret replacement when a runtime plugin rotates
++  a credential;
++- prevent logs, errors, and audit summaries from containing secret material.
++
++A secret patch uses compare-and-swap:
++
++```text
++client_id
++secret_name
++expected_secret_version
++replacement encrypted value
++worker_id / worker_incarnation
++active runtime generation evidence
++```
++
++A conflict never overwrites a newer secret.
++
++## Route and namespace service
++
++Responsibilities:
++
++- map bucket, host, path, or prefix to a client and implementation-relative root;
++- bind policy and credential sets;
++- verify desired dependencies;
++- compile protocol-specific desired configuration;
++- ensure route withdrawal precedes destructive client closure.
++
++It does not choose a live socket, provider connection, or runtime generation.
++
++## Worker registry
++
++A worker registers with authenticated workload identity and reports:
++
++```text
++worker incarnation
++implementation language
++compiled lanes
++control carriers
++build digest
++capability manifest digest
++plugin IDs, versions, contract versions, and descriptor digests
++```
++
++The registry rejects stale incarnations and unsupported contract versions.
++
++## Assignment compiler
++
++The compiler assigns a resource only when the worker manifest contains:
++
++- the required lane;
++- the required protocol/policy contract;
++- the exact client plugin ID and contract version;
++- the selected implementation ID;
++- the exact approved descriptor digest;
++- any other declared capabilities required by the route.
++
++The compiler does not know capability from a Go build tag. It trusts the signed
++worker capability manifest and approved build digest.
++
++There is no implicit fallback from one plugin or implementation to another.
++Fallback is explicit desired route/policy state.
++
++## Snapshot compiler
++
++The compiler converts persistent desired state into the worker-owned wire
++contract. Each plugin resource references an exact descriptor digest.
++
++Conceptual form:
++
++```json
++{
++  "schema": "network-data-plane-worker/desired/v1",
++  "snapshot_revision": 42,
++  "worker_group": "storage-east",
++  "resources": [
++    {
++      "id": "client-7",
++      "contract": "network-data-plane-worker/client/v1",
++      "plugin_id": "selected.plugin",
++      "plugin_version": "1.2.3",
++      "implementation_id": "selected-adapter",
++      "descriptor_digest": "sha256:...",
++      "config_revision": 9,
++      "public_config": {},
++      "secret_lease_refs": []
++    }
++  ]
++}
++```
++
++The control plane does not embed object bodies, provider access tokens in clear
++text, executable plugin code, live sockets, or connection handles.
++
++## Reconciler
++
++The reconciler compares desired snapshots with observed worker state.
++
++It may:
++
++- retry snapshot delivery;
++- pause or roll back a rollout;
++- reassign resources when a worker disappears;
++- report descriptor/config/capability mismatch;
++- wait for old-generation drain;
++- mark degraded status.
++
++It must not assume a timed-out control request physically stopped plugin work.
++The worker's observed generation and drain state are authoritative.
++
++# Runtime rollout
++
++## Prepare and publish
++
++```text
++control plane commits desired revision
++    -> compiles signed snapshot referencing exact descriptor digest
++worker verifies snapshot and capability manifest
++    -> resolves public config and sealed secrets
++    -> plugin prepares and validates candidate
++    -> worker publishes candidate generation
++    -> worker ACKs applied state
++    -> old generation drains
++    -> worker reports drained or cleanup failure
++```
++
++Candidate failure preserves the current generation.
++
++## Destructive change ordering
++
++For disable or delete:
++
++```text
++withdraw routes that admit new work
++wait for route publication ACK
++request client removal
++worker drains pinned exchanges
++worker closes client generation
++control plane records absent/drained state
++retain tombstone and audit history
++```
++
++Deleting a database row before route withdrawal and runtime drain is forbidden.
++
++## Control-plane outage
++
++Workers continue using the last-known-good applied snapshot. They do not require a
++per-request lease renewal from the control plane. Expiring secrets or explicit
++operator policy may eventually close admission, but ordinary control-plane
++unavailability alone does not interrupt an admitted transfer.
++
++# Security requirements
++
++## Worker identity
++
++Registration and secret delivery require authenticated workload identity. A
++worker ID string or network location is not sufficient.
++
++## Descriptor integrity
++
++- descriptors are bound to approved build and plugin digests;
++- cached bytes are immutable by digest;
++- descriptor labels and help text are escaped before display;
++- an unapproved worker cannot redefine a trusted plugin identity;
++- assignment references the exact descriptor digest.
++
++## Secret handling
++
++- public and secret fields are separated according to the worker descriptor;
++- secret values are write-only in ordinary management APIs;
++- desired snapshots contain sealed leases or references, not plaintext;
++- observed state and audit records contain sanitized codes, not provider errors
++  with credentials;
++- plugin-requested secret names are checked against the pinned descriptor.
++
++## Management authorization
++
++Administrative APIs use explicit RBAC. Worker control endpoints use workload
++identity and revision/incarnation fencing. Loopback or UDS reachability alone is
++not identity.
++
++## Artifact policy
++
++Control-plane approval of a build or descriptor does not sandbox native code.
++Native plugins run with worker process authority unless a separately enforced
++sandbox exists. Strict isolation may require separate worker deployments.
++
++# Product plugin implementation migration
++
++OpenList driver packages are valuable implementation sources. They should be
++adapted into a concrete worker client plugin without moving OpenList server,
++mount, UI, database, or protocol semantics into the plugin.
++
++That implementation must:
++
++- import the worker-owned plugin and Client contracts;
++- publish its concrete descriptor through the worker contract;
++- translate selected driver configuration into its descriptor fields;
++- identify secret fields explicitly;
++- expose only selected reusable driver classes;
++- preserve provider-specific authentication, object IDs, links, uploads, and
++  authoritative results;
++- avoid exposing OpenList `model.Obj`, mount paths, `internal/fs`, router, or
++  storage database types to the generic worker core.
++
++Composite drivers that depend on OpenList mounts, hooks, or hidden database state
++are not automatically valid independent client implementations. Their dependency
++model must become explicit or they remain unsupported in the first plugin build.
++
++Other concrete client plugins follow the same worker contract. OpenList control
++plane treats their IDs and descriptors as opaque approved runtime capabilities.
++It does not own their backend inventory or field schema.
++
++# Legacy compatibility and migration
++
++## Phase 0: characterize current behavior
++
++- freeze storage CRUD and provider initialization tests;
++- inventory legacy data routes and background tasks;
++- classify current drivers by standalone reusability;
++- record secret-bearing `Addition` fields;
++- record stable storage-ID and mount-path mappings.
++
++## Phase 1: land worker contract dependency
++
++- adopt the worker-owned descriptor and desired-state contracts;
++- stop creating an OpenList-local competing plugin schema;
++- add descriptor cache and approval tables;
++- add worker build registration and capability ingestion.
++
++## Phase 2: split desired and observed state
++
++- add client, secret, route, worker, assignment, snapshot, and observed-state
++  records;
++- keep legacy `Storage` rows unchanged during initial backfill;
++- make desired/observed status visible separately.
++
++## Phase 3: build the OpenList-derived client plugin
++
++- create one compatibility boundary over selected drivers;
++- publish the descriptor from the plugin implementation;
++- implement worker Client operations and lifecycle;
++- add conformance tests for each selected driver class;
++- keep current OpenList server behavior unchanged for legacy traffic.
++
++## Phase 4: dual-write management APIs
++
++- translate legacy storage create/update into new client, secret, and route
++  desired state;
++- retain old API responses for compatibility;
++- compare worker descriptor validation with legacy reflection-derived forms;
++- stop treating legacy runtime status as desired state.
++
++## Phase 5: introduce worker assignments
++
++- register selected worker builds;
++- approve descriptor digests;
++- compile signed snapshots;
++- reconcile prepare/publish/drain status;
++- keep the legacy process available as rollback.
++
++## Phase 6: migrate data routes
++
++Move one profile at a time:
++
++```text
++read-only HTTP/download
++WebDAV
++S3 reads
++single PUT
++multipart and mutations
++remaining selected protocols
++```
++
++Each route cutover includes canary, metrics, rollback, and old-generation drain.
++
++## Phase 7: control-plane-only build
++
++Remove from the control-plane profile:
++
++```text
++ordinary file read/write APIs
++download/proxy endpoints
++WebDAV and S3 data listeners
++FTP/SFTP data services
++provider upload/download task execution
++live provider sessions and mount map
++```
++
++Retain only administration, identity, descriptor registry, desired state, secret
++management, worker control, reconciliation, status, and audit.
++
++## Phase 8: retire legacy storage execution
++
++- stop initializing drivers in control-plane storage CRUD;
++- remove process-global mount execution from the control-plane binary;
++- migrate remaining legacy records or explicitly quarantine unsupported drivers;
++- delete compatibility code only after rollback windows close.
++
++# Validation
++
++## Contract validation
++
++- OpenList accepts only worker contract versions it supports;
++- descriptor digest mismatch fails closed;
++- cached descriptors cannot be edited in place;
++- secret fields are taken from the exact worker descriptor;
++- control-plane forms do not initialize live clients;
++- final worker/plugin validation can reject structurally valid desired state;
++- control-plane status distinguishes desired, assigned, applied, and drained.
++
++## Reconciliation validation
++
++- failed candidate keeps the old generation active;
++- stale worker incarnation and revision updates are rejected;
++- route withdrawal precedes client removal;
++- control timeout is not treated as physical cleanup;
++- worker disappearance triggers explicit reassignment policy;
++- last-known-good workers continue serving during control-plane outage.
++
++## Migration validation
++
++- every legacy storage ID has deterministic client/route mapping;
++- secret-bearing `Addition` values are encrypted or externally referenced;
++- mount-path behavior is represented by routes, not client identity;
++- unsupported composite drivers are reported, not silently flattened;
++- legacy and new status values are not conflated.
++
++# Non-goals
++
++This specification does not create:
++
++- a control-plane-owned plugin contract or schema;
++- per-request provider RPC through the control plane;
++- object-byte proxying through the control plane;
++- dynamic code installation from desired state;
++- automatic fallback between client implementations;
++- a guarantee that every legacy driver becomes an independent plugin adapter;
++- full object-store semantics for cloud drives;
++- proof that native plugin code is sandboxed.
++
++# Definition of done
++
++- OpenList serves as `openlist-control-plane` for desired state and reconciliation.
++- The worker specification is the canonical owner of plugin descriptor, schema,
++  secret, lifecycle, capability, and execution contracts.
++- OpenList caches and approves exact worker-published descriptors without
++  redefining them.
++- Public and secret configuration are separated by the pinned descriptor.
++- Assignments reference exact worker build and descriptor digests.
++- Object bytes and provider sessions remain in data-plane workers.
++- Legacy `Storage` rows are split into client, secret, route, and observed state.
++- Provider initialization no longer occurs in control-plane CRUD.
++- Replacement is prepare-publish-drain and preserves the old generation on
++  failure.
++- The final control-plane build contains no ordinary file data path.
++- CI covers contract ingestion, desired-state validation, reconciliation,
++  migration, security, and outage behavior.

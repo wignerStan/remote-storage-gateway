@@ -1,0 +1,121 @@
+diff --git a/internal/bootstrap/run.go b/internal/bootstrap/run.go
+index 558e297ca9667694a3e1430422addd53be0dd591..2efdba5a6f6145ee2ae398d4790393eddc09722b 100644
+--- a/internal/bootstrap/run.go
++++ b/internal/bootstrap/run.go
+@@ -26,17 +26,29 @@ import (
+ 	"github.com/pkg/errors"
+ 	"github.com/quic-go/quic-go/http3"
+ 	log "github.com/sirupsen/logrus"
++	gatewaycontrol "github.com/wignerStan/remote-storage-gateway/go/controlplane/assembly"
+ 	"golang.org/x/net/http2"
+ 	"golang.org/x/net/http2/h2c"
+ )
+ 
+ func Init() {
+ 	InitConfig()
++	if conf.GatewayManaged() && os.Getenv("GATEWAY_SAME_HOST") == "1" {
++		if conf.Conf.Scheme.Address != "127.0.0.1" || conf.Conf.Scheme.HttpsPort != -1 || conf.Conf.Scheme.ForceHttps || conf.Conf.Scheme.EnableH3 {
++			panic("same-host control plane requires private loopback HTTP")
++		}
++	}
++
++	if conf.GatewayManaged() && flags.Dev {
++		panic("managed gateway requires persistent database mode")
++	}
+ 	Log()
+ 	InitDB()
+ 	data.InitData()
+-	InitStreamLimit()
+-	InitIndex()
++	if !conf.GatewayManaged() {
++		InitStreamLimit()
++		InitIndex()
++	}
+ 	InitUpgradePatch()
+ }
+ 
+@@ -94,7 +106,7 @@ func Start() {
+ 	LoadStorages()
+ 	InitTaskManager()
+ 	// 初始化转码模块（总开关关时也会启动 manager，但本地 worker 仅在 enabled 时由 Manager.Start 内部按 run_mode 启动）
+-	if transcode.IsEnabled() {
++	if !conf.GatewayManaged() && transcode.IsEnabled() {
+ 		transcode.Default().Start()
+ 	}
+ 	if !flags.Debug && !flags.Dev {
+@@ -110,6 +122,11 @@ func Start() {
+ 	}
+ 	r.Use(gin.RecoveryWithWriter(log.StandardLogger().Out))
+ 
++	controller, controllerErr := gatewaycontrol.Load(conf.Conf.GatewayControlFile)
++	if controllerErr != nil {
++		panic("invalid gateway control configuration")
++	}
++	server.GatewayControl = controller
+ 	server.Init(r)
+ 	var httpHandler http.Handler = r
+ 	if conf.Conf.Scheme.EnableH2c {
+@@ -125,6 +142,9 @@ func Start() {
+ 			err := httpSrv.ListenAndServe()
+ 			httpRunning = false
+ 			if err != nil && !errors.Is(err, http.ErrServerClosed) {
++				if conf.GatewayManaged() {
++					panic("gateway control HTTP listener failed")
++				}
+ 				handleEndpointStartFailedHooks("http", err)
+ 				utils.Log.Errorf("failed to start http: %s", err.Error())
+ 			} else {
+@@ -203,7 +223,7 @@ func Start() {
+ 			}
+ 		}()
+ 	}
+-	if conf.Conf.S3.Port != -1 && conf.Conf.S3.Enable {
++	if !conf.GatewayManaged() && conf.Conf.S3.Port != -1 && conf.Conf.S3.Enable {
+ 		s3r := gin.New()
+ 		s3r.Use(gin.LoggerWithWriter(log.StandardLogger().Out), gin.RecoveryWithWriter(log.StandardLogger().Out))
+ 		server.InitS3(s3r)
+@@ -229,7 +249,7 @@ func Start() {
+ 			}
+ 		}()
+ 	}
+-	if conf.Conf.FTP.Listen != "" && conf.Conf.FTP.Enable {
++	if !conf.GatewayManaged() && conf.Conf.FTP.Listen != "" && conf.Conf.FTP.Enable {
+ 		var err error
+ 		ftpDriver, err = server.NewMainDriver()
+ 		if err != nil {
+@@ -251,7 +271,7 @@ func Start() {
+ 			}()
+ 		}
+ 	}
+-	if conf.Conf.SFTP.Listen != "" && conf.Conf.SFTP.Enable {
++	if !conf.GatewayManaged() && conf.Conf.SFTP.Listen != "" && conf.Conf.SFTP.Enable {
+ 		var err error
+ 		sftpDriver, err = server.NewSftpDriver()
+ 		if err != nil {
+@@ -273,12 +293,25 @@ func Start() {
+ 			}()
+ 		}
+ 	}
++	startup, finishStartup := context.WithTimeout(context.Background(), 2*time.Minute)
++	controllerErr = controller.Start(startup)
++	finishStartup()
++	if controllerErr != nil {
++		_ = controller.Close(context.Background())
++		panic("gateway control startup failed")
++	}
+ 	running = true
+ }
+ 
+ func Shutdown(timeout time.Duration) {
++	// Stop metadata listeners; the bundle manager owns sibling process lifetime.
++	if server.GatewayControl != nil {
++		_ = server.GatewayControl.Close(context.Background())
++	}
+ 	utils.Log.Println("Shutdown server...")
+-	fs.ArchiveContentUploadTaskManager.RemoveAll()
++	if !conf.GatewayManaged() {
++		fs.ArchiveContentUploadTaskManager.RemoveAll()
++	}
+ 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+ 	defer cancel()
+ 	var wg sync.WaitGroup
