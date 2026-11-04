@@ -1,0 +1,13 @@
+# Image actions execute on Buildbarn. No local image-builder fallback.
+build:buildbarn --remote_executor=grpc://172.16.0.210:8980
+build:buildbarn --remote_cache=grpc://172.16.0.210:8980
+build:buildbarn --remote_instance_name=
+build:buildbarn --platforms=//:linux_x86_64
+build:buildbarn --extra_execution_platforms=//:linux_x86_64
+build:buildbarn --spawn_strategy=remote
+build:buildbarn --remote_local_fallback=false
+build:buildbarn --remote_download_outputs=toplevel
+build:buildbarn --remote_timeout=45s
+build:buildbarn --remote_default_exec_properties=OSFamily=Linux
+common --@rules_img//img/settings:compress=gzip
+build --symlink_prefix=/tmp/trade-remote-gateway-bazel-links/

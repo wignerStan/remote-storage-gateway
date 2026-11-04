@@ -1,0 +1,15 @@
+module(name = "remote_storage_gateway", version = "0.1.0")
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "rules_img", version = "0.3.23")
+pull = use_repo_rule("@rules_img//img:pull.bzl", "pull")
+pull(
+    name = "gateway_runtime",
+    registry = "index.docker.io",
+    repository = "library/debian",
+    digest = "sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4",
+    platforms = ["linux/amd64"],
+    layer_handling = "lazy",
+)
+local_inputs = use_repo_rule("//build:runtime_inputs.bzl", "runtime_inputs")
+local_inputs(name = "runtime_inputs")
+local_inputs(name = "control_plane_inputs", composition = "control-plane")

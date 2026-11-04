@@ -1,0 +1,291 @@
+# Plugin control over local UDS
+
+Entry decodes requests and routes them to one or more axes. A facility owns the
+listener, transport multiplexing and subscriptions. Assembly uses the socket
+primitive to create and bind a socket, gives the listener to the facility, and
+registers entry handlers. The socket primitive owns the OS mechanism. Assembly
+selects that primitive and installs the resulting capability. Assembly may also
+acquire OS resources directly during composition and transfer custody. A handler
+adapter may use OS APIs directly; when an existing primitive supplies the needed
+semantics, it should reuse that primitive. Runtime support and utilities do not
+gain system authority merely from their callers. Entry does not create the
+listener or allocate shared memory.
+
+The worker source separates these responsibilities as follows:
+
+| Source | Observed responsibility | System interaction boundary |
+| --- | --- | --- |
+| `main.rs` | Read process arguments, report startup results, select configuration | Process arguments and terminal output at process entry; file acquisition delegates to `configuration::load_typed` |
+| `assembly.rs` and `assembly/control.rs` | Select logging, native runtimes, socket primitives and listener facilities | Infra owners acquire files, native libraries and sockets; assembly installs their teardown with each resource |
+| `process.rs` | Serve through the installed worker and request runtime shutdown | Uses the installed worker and lifecycle owner; it does not bind or dial sockets |
+| `observability.rs` | Expose counter snapshots and bounded subscriptions | Uses logging/operation capabilities; Tokio task, timer and cancellation operations do not establish a socket or filesystem mechanism |
+| `proxy/carrier.rs` | Apply request policy and drive an admitted Pingora session | `HttpEgress` owns outbound acquisition; Pingora owns session I/O. Calling these capabilities does not transfer their mechanism ownership |
+| `remote_axis.rs` | Select grants and coordinate remote registration and shutdown | `RemoteBindings` owns outbound control exchanges; `event_stamp::SystemSource` owns ambient identity acquisition |
+
+This boundary does not make atomics, in-memory queues or pure protocol parsing
+OS primitives. It also does not prove that an imported capability owner has the
+correct internal boundary. The local-control client reuses `network_sockets`
+for dialing and native socket halves because that primitive already provides
+the required timeout and half-close behavior. The client retains ttrpc framing
+and connection-generation coordination; worker-private grant checks stay in
+the worker.
+
+## Current source boundaries and remaining debt
+
+The graph below records current imports. The remote manager's source role
+requires assessment of its actual coordination and application decisions;
+the graph does not assign that role from a grant lookup or a lifetime shape.
+
+```mermaid
+flowchart LR
+    A[Assembly] --> F[Local control carrier and listener]
+    A --> R[Route publication owner]
+    A --> E[Entry handlers]
+    F --> X[Action execution and dispatch contract]
+    R --> X
+    E --> X
+    E --> M[Remote plugin manager: source role under review]
+    M --> G[Local grant lookup helper]
+    M --> C[Concrete outbound control client]
+    M --> L[Concrete plugin registration lifecycle]
+```
+
+At runtime the listener invokes an injected handler. That call does not imply a
+source dependency from the listener to the concrete entry. Worker controls and
+plugin controls can share an entry boundary. Entry decodes and routes requests;
+assembly selects and injects handlers. Listener and route owners retain their
+transport and publication responsibilities.
+
+`src/entry/worker.rs` and `src/entry/plugins.rs` contain decoding and dispatch.
+`src/assembly/control.rs` selects and connects the listener, route owner and
+carrier. `action-execution` owns invocation, cancellation and completion pins,
+plus the injected `Dispatch` contract. Carriers consume that contract and do not
+import the concrete route registry. `action-router` owns route publication and
+implements dispatch. Native Pingora retains proxy data-path and notifier order.
+
+`src/remote_axis.rs` checks configured grants, manages registration generations,
+constructs outbound clients, replaces connections and joins shutdown. The
+concrete `plugin_lifecycle::manager::PluginManager` dependency is observed. The
+earlier claim that this was necessarily a `use_flow -> effect_facility` violation
+was too strong: selection and rejection also occur in general capability
+coordination. They do not alone establish business workflow ownership.
+
+Role classification must distinguish application-neutral general workflow from
+business workflow. `NativeNotifier` and worker use-flow interpret hook decisions
+and apply them to requests and responses; remote bindings carry opaque metadata.
+The remote module also adapts worker-private configuration and constructs owners.
+Those responsibilities need source-level assessment before assigning the whole
+module a role. Long-lived state, a one-call task or a shutdown `JoinSet` does not
+decide the classification. `RemoteBindings` is currently registered as an
+effect-tool handler adapter, separately from registration coordination.
+
+If independently governed workflow and coordination owners need to cooperate,
+their contract must express real operations, generations and completion duties.
+Assembly selects and injects the implementations. Do not create a forwarding
+trait merely to repair an assumed role edge, or relabel the whole module without
+checking the meaning of its public operations. This review changes neither the
+binding implementation nor the current dependency policy.
+
+### Grant helper and semantic surface
+
+`src/remote_axis/surface.rs` stores configured grants, checks registration/hook
+selection and builds RPC method names. It is a pure host-owned grant helper.
+It does not currently reference an exact typed meaning port, so its `Surface`
+name does not establish the full `axis_meaning_surface` contract.
+
+The existing registered host publication is
+`proxy_pingora::worker::surface`, backed by `worker/contract.rs`, for the
+`proxy_worker` host axis and `proxy_plugins` plugin axis. Host use-flow owns
+callback invocation and result interpretation. The native notifier adapter
+projects permitted metadata and checks replies for both direct and RPC bindings.
+These responsibilities are distinct from the remote registration lookup helper.
+
+An `axis_bindings` key groups an outbound endpoint and its registrations. Every
+remote metadata hook uses the `worker.metadata.v1` contract. A selected host
+codec can also issue bounded `worker.message.v1` callbacks under the same
+registration. A different key, process or transport does not by itself prove a new semantic axis. A plugin may
+have its own use-flow, but that ownership requires its actual contract and source
+evidence. The generic Tool and Full lifecycle managers remain separate from
+such semantic integration; their resource coordination does not derive grants.
+
+## Protocol choice
+
+Plugin control uses ttrpc framing directly on a same-host Unix stream socket.
+It does not use HTTP/2 or gRPC. The profile reuses the canonical 10-byte header,
+Protobuf request/response envelope, request correlation, deadlines and status
+codes. Unary and server-stream calls share one connection. Stream and request
+queues are bounded. There is no automatic retry or invented cancellation frame.
+
+The fixed service is `infra.control.v1.Actions`; the method is the registered
+binding, such as `plugin.get` or `worker.metadata.v1.policy.routing`. The payload
+retains the existing versioned, schema-checked JSON contract for metadata. It is
+opaque to the carrier. Bounded message callbacks use the fixed binding
+`worker.message.v1.<registration>`. Their payload starts with a two-byte big-endian
+method length, then the UTF-8 `codec/kind/request-id/sequence` method (at most 256
+bytes), then the raw message bytes. Replies use the same raw action format and
+host grant checks as native callbacks. This adds no JSON/base64 body conversion.
+The envelope is Protobuf; the JSON payload is not presented as a generated
+Protobuf message. Contract bytes can also be consumed without RPC. This change
+adds no metadata conversion for each callback.
+
+This selects the same-host framing described by the
+[ttrpc protocol](https://github.com/containerd/ttrpc/blob/v1.2.10/PROTOCOL.md) and
+[request schema](https://github.com/containerd/ttrpc/blob/v1.2.10/request.proto).
+[Protobuf encoding](https://protobuf.dev/programming-guides/encoding/) remains
+independent of transport. Ice's object dispatch and protocol machinery are not
+needed for this bounded action carrier; its
+[protocol description](https://docs.zeroc.com/ice/3.8/protocol/protocol-messages)
+was reviewed rather than copied into a second stack. No measured throughput
+advantage over gRPC or Ice is claimed.
+
+## Facility selection
+
+A separate plugin control facility needs only a UDS endpoint:
+
+```json
+{
+  "upstream": "http://127.0.0.1:8080",
+  "axis_bindings": {
+    "request_policy": {
+      "endpoint": "unix:///run/pingora-worker/policy.sock",
+      "max_inflight": 32,
+      "connect_timeout_ms": 5000,
+      "shutdown_timeout_ms": 5000
+    }
+  },
+  "plugin_ingress": {"listen": "unix:///run/pingora-worker/plugins.sock"},
+  "callbacks": [{
+    "axis": "request_policy",
+    "registration": "policy",
+    "package": "example.policy",
+    "hooks": ["before_upstream_send"],
+    "headers": ["x-request-id"],
+    "patch_headers": ["x-policy"],
+    "timeout_ms": 5000
+  }]
+}
+```
+
+To publish worker and plugin routes on the same local control facility:
+
+```json
+{
+  "management": {
+    "listen": "unix:///run/pingora-worker/control.sock",
+    "protocol": "local_control"
+  },
+  "plugin_ingress": {"facility": "management"}
+}
+```
+
+`axis_bindings.endpoint` selects the outbound provider. `plugin_ingress` selects
+the incoming control facility. Neither creates a semantic axis. Omission of
+`plugin_ingress` publishes no incoming plugin controls. The old `mount` field is
+rejected. TCP plugin endpoints and sharing an HTTP management facility are also
+rejected. Each native action must have at least one binding reachable through its
+selected management carrier. Mixed bindings remain valid. A failed control
+connection never silently falls back to gRPC or a local artifact.
+
+Management defaults to the existing `http` facility for HTTP actions, SSE and
+optional gRPC management clients. That independent facility is not the plugin
+control path. Existing API-server mounts remain available for those carriers.
+The local control service can mount on an already bound UDS listener; it cannot
+be inserted into an HTTP router without an explicit protocol multiplexer.
+The current ingress assumes one trusted control domain. Local socket permissions
+and deployment admission restrict who can connect. The entry does not bind a
+connection to a per-plugin principal or authorize each selection against such a
+principal. Any admitted control client can select any host-configured registration
+and use the published get/activate/withdraw operations with their required
+incarnation and generation values. Those values fence stale requests; they are
+not authorization credentials. Sharing the management listener also shares its
+published control routes. A pathname, package name or `axis` string is not peer
+authentication. Separate listeners alone do not add per-plugin authorization.
+
+| Binding selection | Result |
+| --- | --- |
+| Omitted or `remote` | Local ttrpc; requires an axis and registration |
+| `direct` | Existing native or optional Wasm artifact path |
+| `auto`, Rust | Direct using the integrated native ABI bridge |
+| `auto`, Go, Python or JavaScript | Local ttrpc; the other runtime owns its scheduler |
+
+C++/Rust and Node/libuv have suitable native loop models, but a working C ABI or
+FD/byte adapter does not prove that the worker has integrated the runtime's
+callback protocol. This worker currently integrates native Rust and explicit Go
+Object loading. Go `auto` now selects RPC; direct Go requires an explicit choice.
+The independent Node adapter runs on Node-API/libuv, not Bun FFI. Node/C++ worker
+embedding and physical shared-memory bindings remain separate integration work.
+
+## Operations and custody
+
+`plugin.get` takes `axis` and `registration`. It returns availability, contract,
+manager incarnation and registration generation. `plugin.activate` also requires
+the current incarnation. `plugin.withdraw` requires both incarnation and exact
+generation. Unknown fields fail. These operations cannot install a new endpoint,
+artifact, header grant or registration. Inputs and outputs are capped at 1 KiB.
+The local server has 128 request slots, a 64 KiB carrier metadata cap and a
+30-second maximum handler deadline; shorter client deadlines still apply.
+
+The callback binding is `worker.metadata.v1.<registration>.<hook>`. Host projection
+limits visible headers and metadata. Reply validation still checks version,
+decision, header changes and protected fields. Unavailable slots fail closed.
+Reactivation retains notifier position and grants. Replacement connects before
+publication; failed replacement leaves the previous client active. Admitted calls
+retain their previous transport generation.
+
+One `plugin_lifecycle::coordination::memory::Coordinator` bounds assembled direct
+and remote notifier buffers: 64 subscribers, 128 retained allocations and 8 MiB
+reserved capacity. Serialization writes directly into a bounded buffer. Native
+calls and owned remote exchanges retain custody beyond caller cancellation.
+A local deadline is not remote completion. Shared-memory reclamation must never
+use the end of a control wait as its witness.
+
+## Physical shared memory is separate
+
+The existing C profile uses same-kernel `SOCK_SEQPACKET` control and `SCM_RIGHTS`
+for admitted FD bootstrap. Later records carry relative references with exact
+resource, generation and lease coordinates. They carry no native pointers or
+copied bulk body. Allocation, admission, peer release and local completion pins
+belong to the plugin coordinator and memory provider, not this general carrier.
+
+The Rust worker still lacks an adapter for that C arena profile. Its current UDS
+control path carries owned metadata; it does not yet transfer shared-memory bulk
+payloads. Changing the carrier does not close that integration gap.
+
+## Validation limits
+
+Real worker tests cover shared facility routes, separate facilities, stale controls,
+fixed grants, replacement and cancelled requests with retained custody. Official
+Go ttrpc v1.2.10 interoperability covers both directions, errors and server streams.
+The Go harness ran externally; it is not yet a required cross-language CI test.
+
+The reviewed concrete carrier-to-`Router` dependency was removed by extracting
+actual execution ownership and injecting its dispatch contract. That repair does
+not establish the role of the separate remote registration owner, or turn the
+grant helper into a typed meaning surface. Runtime tests do not determine source
+roles. The checker may retain uncertainty where semantic ownership, selected
+dependencies or C/FFI build evidence is missing. This documentation correction
+adds no implementation or new runtime test result.
+
+## Bounded remote messages
+
+The host resolves `message_codec` from its registered codecs. A remote plugin
+cannot install executable codecs or publish arbitrary native `actions`. The same
+`message_actions`, `message_proxy`, `message_responses`, and header grants apply to
+both bindings. Upstream delta events bypass both bindings.
+
+An axis that carries messages must set `max_message_bytes` to at least
+`inspection.max_message_bytes`. The axis limit defaults to 65536 bytes and accepts
+1 through 33554432 bytes. The RPC input limit adds 258 bytes for the method
+prefix. The output limit adds 65541 bytes for action metadata and its prefix.
+Metadata hook inputs and replies remain limited to 65536 bytes.
+
+The carrier retains the registration lease and inspection reservation until a
+reply arrives or the connection closes. A timeout or cancelled waiter does not
+release that custody. A connection close does not prove remote work has ended.
+
+Transport replacement connects first and then selects the new connection for new
+calls. Pending exchanges retain their original connection. The worker never
+retries a failed callback. Connection-local peer request state cannot migrate to
+the replacement. A stateful participant must reject later messages when their
+admission state is absent. An active session can therefore fail closed during
+replacement; callers must start a new request rather than replay old messages.

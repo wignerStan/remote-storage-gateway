@@ -1,0 +1,38 @@
+{
+  "schema_version": "git-source-relationship/v1",
+  "kind": "patched_third_party",
+  "path": "third_party/openlist",
+  "owner": "openlistteam",
+  "integration": "submodule",
+  "upstream": {
+    "url": "https://github.com/OpenListTeam/OpenList.git",
+    "commit": "e72822f5390f4272c9fe9da8cabba3c1a270182f"
+  },
+  "patches": [
+    {
+      "order": 1,
+      "path": "patches/openlist/0001-preserve-control-plane-and-object-identity.patch",
+      "sha256": "ea16fd6d3b36c323e2526249806b5020eb988503720e082c3eef2066b19c0d2e"
+    },
+    {
+      "order": 2,
+      "path": "patches/openlist/0002-build-selected-native-client-adapters.patch",
+      "sha256": "cf5c62be2b155539ccb93d6bebbc019bfb475da7979adfcb867449a44186b675"
+    },
+    {
+      "order": 3,
+      "path": "patches/openlist/0003-extract-shared-s3-session-kernel.patch",
+      "sha256": "7bdf0f95253f052ce4769c9684499388cd808ccbc21f64c230620748c03941af"
+    },
+    {
+      "order": 4,
+      "path": "patches/openlist/0004-publish-schemas-at-native-plugin-entry.patch",
+      "sha256": "ebc7a16d208648aa9c34dc99792db461d025d6d94ce741cde1aa09085e1a6f4b"
+    }
+  ],
+  "public_api": "Worker client/v1 native plugin, shared S3 initializer, context-aware WebDAV kernel, OpenList control-plane HTTP API",
+  "result_tree": "debbb1157585071e49a24f45a626636014075105",
+  "licenses": [
+    "third_party/openlist/LICENSE"
+  ]
+}
