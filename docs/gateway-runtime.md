@@ -8,7 +8,7 @@ payload path.
 
 Build with the local Go/Node/pnpm entry described in the repository README and
 [build instructions](../build/README.md). Select current independent Infra,
-Worker and rclone checkouts explicitly. Derived upstream sources, temporary
+Worker, independent rclone and BuildBarn checkouts explicitly. Derived upstream sources, temporary
 local module replacements and build receipts stay in the selected build output;
 the canonical module cache is not patched.
 
@@ -179,14 +179,19 @@ retiring its previous writer and completing endpoint migration. This candidate
 does not implement a legacy-compatible S3 frontend.
 
 `client.rclone` streams remotely. Its former `materialization` option is rejected.
-VFS lives in the independent `github.com/wignerStan/rclone/go` module. Gateway
-imports its passive Box configuration; the external source build produces the
-native `rclone serve managed-vfs` command. There is no Gateway VFS runtime.
+The ordinary raw-cache VFS lives in `github.com/wignerStan/rclone/go`; immutable
+source views use the BuildBarn product's typed `go/vfs/rclone/mount` contract.
+Gateway imports their passive Box configuration and supervises the explicitly
+configured native `rclone serve managed-vfs` executable. The materializer's VFS
+and backend engine remain outside the Gateway runtime.
 
 The Manager loads `gateway manager --config /path/to/bundle.json`.
 `control_planes` select CP configuration and private data directories; `workers`
 select Worker executables/configurations; optional `materializers` select
-external rclone executables and `box.ProcessConfig`. The CP loads only
+external native executables and the selected product's `ProcessConfig`. An
+omitted `profile` or `"raw-cache"` uses the existing `config` object from the
+independent rclone module; `"buildbarn-source"` requires `buildbarn_config`.
+Mixed configuration objects and unknown profiles are rejected. The CP loads only
 `OPENLIST_GATEWAY_CONTROL_FILE`, which supplies assigned Worker endpoints and
 finite transfer policy. It never launches, signals or reaps another role.
 
@@ -221,6 +226,85 @@ current runtime requires a new materializer/session to consume the replacement;
 it does not migrate an existing cache session automatically. Activating the
 separate cached client changes only that client's generation and preserves the
 raw session used by the materializer.
+
+### Immutable BuildBarn source materializer
+
+A source materializer requires an already published, read-only Worker namespace
+with a distinct `remote_client`. Its native executable must be the matching
+BuildBarn product build. The Manager never substitutes the independent raw-cache
+executable for this profile. This example is a `materializers` entry; replace the
+illustrative identity values with exact published and approved Worker values:
+
+```json
+{
+  "profile": "buildbarn-source",
+  "executable": "/opt/buildbarn/bin/source-materializer",
+  "activate_client": {
+    "name": "source-cache",
+    "plugin_id": "client.rclone",
+    "descriptor_digest": "sha256:<approved cached-client descriptor>",
+    "implementation_id": "webdav",
+    "public": {"url": "http://127.0.0.1:5245/dav/", "username": "source-cache"},
+    "secret_refs": {"password": "source-cache-auth"}
+  },
+  "expected_activation": {
+    "incarnation": "<cached-client registry incarnation>",
+    "generation": 11,
+    "descriptor_digest": "sha256:<current cached-client descriptor>",
+    "artifact_digest": "sha256:<current cached-client artifact>"
+  },
+  "buildbarn_config": {
+    "instance_id": "buildbarn-source",
+    "control_socket": "/run/gateway/source.sock",
+    "listen": "127.0.0.1:5245",
+    "source_view": true,
+    "expected_generation": {
+      "incarnation": "<published-source registry incarnation>",
+      "generation": 19,
+      "descriptor_digest": "sha256:<published-source descriptor>",
+      "artifact_digest": "sha256:<published-source artifact>"
+    },
+    "remote": {"namespace": "source", "expected_worker_id": "worker-source"},
+    "filter_file": "/etc/gateway/source.filter",
+    "local_username": "source-cache",
+    "local_password_file": "/run/gateway-secrets/source-cache-auth",
+    "directory": "/var/cache/gateway/source",
+    "max_bytes": 8388608,
+    "max_age_seconds": 60,
+    "max_cache_entries": 256,
+    "max_open_files": 4,
+    "max_directory_entries": 256,
+    "max_concurrent_requests": 4
+  }
+}
+```
+
+The source `expected_generation` is the complete Worker Version returned by
+publication, including `artifact_digest` when present. Its incarnation identifies
+the client registry. The separate `remote.expected_incarnation` identifies the
+Worker storage transport; the Manager fills that transport identity from its
+supervised Worker and checks any supplied pin. It does not replace either
+registry Version with the transport incarnation.
+
+`expected_activation` is the complete current Version of the separate cached
+client. Source activation requires this value and makes exactly one conditional
+replacement. It never reads `Observed` to pick a newer expected Version or retries
+a conflict against a newer generation. To supervise a source view without cached
+client activation, omit both `activate_client` and `expected_activation`.
+
+The Manager passes `source_view`, `filter_file`, optional `filter_rules`, and the
+complete expected source Version through the typed BuildBarn configuration.
+Static assignment validation uses the BuildBarn validator before children start.
+Readiness checks the product profile, child identity, Worker, namespace, storage
+incarnation and exact source Version before activation. A failed candidate is
+closed and joined before startup returns; cancelling a Close waiter retains
+cleanup ownership. Worker leases already held by in-flight users retain their
+exact registry generation through conditional replacement and drain on release.
+
+This binding consumes a published source and supervises its materializer. Source
+publication and BuildBarn `bb_worker` workspace acquisition remain responsibilities
+of their owning integrations. The Manager adds no source publisher, workspace
+implementation or alternate CAS service.
 
 `/api/admin/control/instances` and its manifest/descriptor/observed/client routes
 coordinate assigned Workers over local ttrpc or remote mTLS/gRPC. They expose no
