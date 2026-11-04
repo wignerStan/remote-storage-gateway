@@ -162,6 +162,61 @@ func TestArchiveWebDAVBindingPagingRangeAndReadOnly(t *testing.T) {
 	if f.requests.Load() != before {
 		t.Fatal("archive mutation reached backing provider")
 	}
+	t.Run("corrupt-full-member-close", func(t *testing.T) {
+		const content = "checksum-protected-member"
+		var encoded bytes.Buffer
+		writer := zip.NewWriter(&encoded)
+		member, err := writer.CreateHeader(&zip.FileHeader{Name: "body", Method: zip.Store})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = io.WriteString(member, content); err != nil {
+			t.Fatal(err)
+		}
+		if err = writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		corrupt := append([]byte(nil), encoded.Bytes()...)
+		index, err := zip.NewReader(bytes.NewReader(corrupt), int64(len(corrupt)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		offset, err := index.File[0].DataOffset()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Keep the member length and recorded CRC; corrupt its stored bytes.
+		corrupt[offset] ^= 1
+		f.write(t, "corrupt-pack.zip", corrupt)
+		request := input
+		request.ArchivePath = "corrupt-pack.zip"
+		candidate, err := testFactory(t).Prepare(context.Background(), port.PluginConfig{ImplementationID: "archive-webdav", Public: mustJSON(t, request), Secrets: passwordResolver()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := candidate.Validate(context.Background()); err != nil {
+			_ = candidate.Abort(context.Background())
+			t.Fatal(err)
+		}
+		client, err := candidate.Publish()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer closeClient(t, client)
+		plan, err := client.Open(context.Background(), port.OpenRequest{Path: "body", Length: -1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer plan.Body.Close()
+		if plan.Info.Size != int64(len(content)) {
+			t.Fatalf("corrupt fixture changed the declared member length: %d", plan.Info.Size)
+		}
+		// An exact-size consumer may ignore both results before retiring its body.
+		_, _ = io.ReadFull(plan.Body, make([]byte, len(content)))
+		if err := plan.Body.Close(); !errors.Is(err, port.ErrProvider) {
+			t.Fatalf("Close lost the full-member CRC failure at the Worker port: %v", err)
+		}
+	})
 }
 
 func TestInvalidArchiveSelectionAndDescriptorResolveNoSecrets(t *testing.T) {
