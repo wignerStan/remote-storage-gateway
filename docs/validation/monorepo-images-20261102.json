@@ -1,0 +1,165 @@
+{
+  "buildbarn": {
+    "bep": "final-images-attempt2-bep.json",
+    "execution": "final-images-attempt2-execution.json",
+    "initial_attempt": "final-images.log",
+    "local_fallback": false,
+    "successful_attempt": "final-images-attempt2.log"
+  },
+  "images": {
+    "control_plane_image": {
+      "archive": "/var/tmp/trade-remote-gateway-20261102/images/control_plane_image_oci_layout.tar",
+      "archive_sha256": "ce17369f6bddccf9822d4f5fa33c6e1a5614f66fc8b803c194f345896d52def1",
+      "config": {
+        "architecture": "amd64",
+        "os": "linux",
+        "config": {
+          "User": "1001:1001",
+          "Env": [
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"
+          ],
+          "Entrypoint": [
+            "/opt/control-plane/openlist"
+          ],
+          "Cmd": [
+            "server",
+            "--data",
+            "/opt/openlist/data",
+            "--config",
+            "/opt/openlist/data/config.json"
+          ],
+          "WorkingDir": "/opt/openlist",
+          "Labels": {
+            "org.opencontainers.image.source": "https://github.com/wignerStan/remote-storage-gateway"
+          }
+        },
+        "rootfs": {
+          "type": "layers",
+          "diff_ids": [
+            "sha256:a5d6d345f6afa08d7c31272055746d60a838b290bfcc82c0a23e8e984d61a933",
+            "sha256:0f21648a8d949bae9f29399c5f6deac561416159b4393651190e1f66a693178f",
+            "sha256:06f5b610483375d4a6983a9a54f1dc2772b8060b20bf870cd33bae7a616e70aa"
+          ]
+        },
+        "history": [
+          {
+            "created": "2026-10-27T00:00:00Z",
+            "created_by": "# debian.sh --arch 'amd64' out/ 'trixie' '@1793059200'",
+            "comment": "debuerreotype 0.17"
+          },
+          {
+            "created_by": "bazel build //:control_plane_program"
+          },
+          {
+            "created_by": "bazel build //:control_plane_trust"
+          }
+        ]
+      },
+      "layers": [
+        "sha256:6fc242d221a673263eabd14a9ad9584d3177c96e5cb504c891497338e2f912f5",
+        "sha256:0d14910769942def9f4d79a84dc17300d93522fef9bc0d50b64ed1bdb499f57f",
+        "sha256:1b405eec317ad737baab1e37fa4bae52ef1577132907fcd0b13107a45eb04358"
+      ],
+      "manifest_digest": "sha256:a6a47b4da6888c11058df51544e66223840a2f94e1ea8d1354340e23605feaf3",
+      "verified_payloads": {
+        "etc/ssl/certs/ca-certificates.crt": {
+          "sha256": "714d457d580922dbf1d0be8bd35ba236a842b50b0072ae791582a19adef772a5",
+          "mode": "0444",
+          "UID": 0,
+          "GID": 0
+        },
+        "opt/control-plane/openlist": {
+          "sha256": "c03b45d8057ca750e97f4ca43d9a985b487963d4ace075c19bad4e5e38fcfbf0",
+          "mode": "0555",
+          "UID": 0,
+          "GID": 0
+        }
+      },
+      "original_build_archive": "/tmp/trade-remote-gateway-bazel-links/bin/control_plane_image_oci_layout.tar"
+    },
+    "gateway_image": {
+      "archive": "/var/tmp/trade-remote-gateway-20261102/images/gateway_image_oci_layout.tar",
+      "archive_sha256": "84fc22bdee734301696e842255108ba989fe0efa253d33b95e1c5d959ec2d301",
+      "config": {
+        "architecture": "amd64",
+        "os": "linux",
+        "config": {
+          "User": "1001:1001",
+          "Env": [
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"
+          ],
+          "Entrypoint": [
+            "/opt/gateway/remote-storage-gateway"
+          ],
+          "Cmd": [
+            "-config",
+            "/run/gateway-secrets/gateway.json"
+          ],
+          "WorkingDir": "/",
+          "Labels": {
+            "org.opencontainers.image.source": "https://github.com/wignerStan/remote-storage-gateway"
+          }
+        },
+        "rootfs": {
+          "type": "layers",
+          "diff_ids": [
+            "sha256:a5d6d345f6afa08d7c31272055746d60a838b290bfcc82c0a23e8e984d61a933",
+            "sha256:c0ad565d6c4ff8fd560ad9c7f01402337cc53e4a0a7ccd55f359ae430972d814",
+            "sha256:9cbc2c03d944790f3ade337489da27898e0587bc2ef2ad4f76105b6cd6e177b9"
+          ]
+        },
+        "history": [
+          {
+            "created": "2026-10-27T00:00:00Z",
+            "created_by": "# debian.sh --arch 'amd64' out/ 'trixie' '@1793059200'",
+            "comment": "debuerreotype 0.17"
+          },
+          {
+            "created_by": "bazel build //:gateway_programs"
+          },
+          {
+            "created_by": "bazel build //:gateway_trust"
+          }
+        ]
+      },
+      "layers": [
+        "sha256:6fc242d221a673263eabd14a9ad9584d3177c96e5cb504c891497338e2f912f5",
+        "sha256:1dcca767ca7b8e15f8e64e3b791979606eefe55f4f7599c5fba1cfc9c765d2a0",
+        "sha256:8e0e14cff3b94f958961762ee5a9b12e96e3ba85d85f1889f3c0846df93fac04"
+      ],
+      "manifest_digest": "sha256:003a694b24050e7876351826e718b7d2b102b585e0bcfc65d1e2aefe36ff8ac1",
+      "verified_payloads": {
+        "etc/ssl/certs/ca-certificates.crt": {
+          "sha256": "714d457d580922dbf1d0be8bd35ba236a842b50b0072ae791582a19adef772a5",
+          "mode": "0644",
+          "UID": 0,
+          "GID": 0
+        },
+        "opt/gateway/client-openlist.so": {
+          "sha256": "8119d09bd20b4519efdedfaced7d3eb3737f8badf0161ea093a2588711cc2801",
+          "mode": "0555",
+          "UID": 1001,
+          "GID": 1001
+        },
+        "opt/gateway/client-rclone.so": {
+          "sha256": "5eb9db2e7f6ba569e788e639c0b511364c92f9ff377f55bf393b43d83fc693cc",
+          "mode": "0555",
+          "UID": 1001,
+          "GID": 1001
+        },
+        "opt/gateway/remote-storage-gateway": {
+          "sha256": "ea1cf6f96c8b19d884558b3afa082fee41ca8aaa91b9f42f18cafefb9ea940eb",
+          "mode": "0555",
+          "UID": 1001,
+          "GID": 1001
+        }
+      },
+      "original_build_archive": "/tmp/trade-remote-gateway-bazel-links/bin/gateway_image_oci_layout.tar"
+    }
+  },
+  "infra_commit": "d4a80fcccc1cc0bd01c3bb432b2743168ab3aa22",
+  "product_commit": "4fa2be0b91d381d7a35ec1a6ceadd1400c4dea72",
+  "schema": "remote-storage-gateway/oci-verification/v1"
+}

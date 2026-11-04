@@ -1,0 +1,217 @@
+--- a/internal/controlplane/httpapi/management_test.go
++++ b/internal/controlplane/httpapi/management_test.go
+@@ -17,8 +17,9 @@
+ 
+ 	cp "github.com/OpenListTeam/OpenList/v4/internal/controlplane"
+ 	"github.com/OpenListTeam/OpenList/v4/internal/controlplane/httpapi"
+-	"github.com/wignerStan/infra/go/code/schema"
+-	schemaapi "github.com/wignerStan/infra/go/code/schema/api"
++	"github.com/wignerStan/infra/go/config/schema"
++	schemaapi "github.com/wignerStan/infra/go/network/http/openapi"
++	openapigin "github.com/wignerStan/infra/go/network/http/openapi/gin"
+ 	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
+ 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+ 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
+@@ -42,7 +43,7 @@
+ 	if err != nil {
+ 		panic(err)
+ 	}
+-	if err = schemaapi.MountGin(engine, engine.Group("/api/admin/control"), table); err != nil {
++	if err = openapigin.Mount(engine, engine.Group("/api/admin/control"), table, openapigin.Options{OpenAPIPath: "/openapi", SchemasPath: "/schemas", Errors: httpapi.ErrorPolicy()}); err != nil {
+ 		panic(err)
+ 	}
+ }
+@@ -200,11 +201,11 @@
+ type FixtureConfiguration struct{}
+ 
+ func TestWorkerManagementPreservesDescriptorAndCAS(t *testing.T) {
+-	generated, e := schema.Derive[FixtureConfiguration](schema.Identity{ID: "fixture/configuration", Version: "1", Owner: "fixture"})
+-	if e != nil {
+-		t.Fatal(e)
+-	}
+-	configSchema, e := json.Marshal(generated.Schema)
++	generated, e := schema.Derive[FixtureConfiguration]()
++	if e != nil {
++		t.Fatal(e)
++	}
++	configSchema, e := json.Marshal(generated)
+ 	if e != nil {
+ 		t.Fatal(e)
+ 	}
+--- a/internal/controlplane/httpapi/openapi_test.go
++++ b/internal/controlplane/httpapi/openapi_test.go
+@@ -5,7 +5,8 @@
+ 	"encoding/json"
+ 	"github.com/OpenListTeam/OpenList/v4/internal/controlplane/httpapi"
+ 	"github.com/gin-gonic/gin"
+-	schemaapi "github.com/wignerStan/infra/go/code/schema/api"
++	schemaapi "github.com/wignerStan/infra/go/network/http/openapi"
++	openapigin "github.com/wignerStan/infra/go/network/http/openapi/gin"
+ 	"io"
+ 	"net/http"
+ 	"net/http/httptest"
+@@ -101,7 +102,7 @@
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	if err = schemaapi.MountGin(engine, engine.Group("/api/admin/control"), table); err != nil {
++	if err = openapigin.Mount(engine, engine.Group("/api/admin/control"), table, openapigin.Options{OpenAPIPath: "/openapi", SchemasPath: "/schemas", Errors: httpapi.ErrorPolicy()}); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 
+--- a/internal/controlplane/httpapi/routes.go
++++ b/internal/controlplane/httpapi/routes.go
+@@ -7,7 +7,7 @@
+ 	"net/http"
+ 
+ 	"github.com/OpenListTeam/OpenList/v4/internal/controlplane"
+-	"github.com/wignerStan/infra/go/code/schema/api"
++	api "github.com/wignerStan/infra/go/network/http/openapi"
+ 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+ 	worker "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
+ 	"github.com/wignerStan/network-data-plane-worker/go/management"
+@@ -214,20 +214,22 @@
+ 	return output(v, err)
+ }
+ 
+-// APIConfig supplies the product's JSON compatibility policy to the schema tool.
++// APIConfig describes the owned HTTP document without transport policy.
+ func APIConfig() api.Config {
+-	return api.Config{
+-		Title: "OpenList control management", Version: "1.0.0",
+-		OpenAPIPath: "/openapi", SchemasPath: "/schemas",
+-		Errors: api.JSONErrors([]int{400, 404, 409, 502, 503}, func(code int) APIError {
+-			return APIError{Code: code, Message: http.StatusText(code)}
+-		}, func(code int) int {
+-			if code == http.StatusRequestEntityTooLarge || code == http.StatusUnprocessableEntity {
+-				return http.StatusBadRequest
+-			}
+-			return code
+-		}),
+-	}
++	return api.Config{Title: "OpenList control management", Version: "1.0.0"}
++}
++
++// ErrorPolicy preserves the public envelope for typed and parser rejections.
++// Host assembly supplies it to the separate Gin publication facet.
++func ErrorPolicy() api.ErrorPolicy {
++	return api.JSONErrors([]int{400, 404, 409, 502, 503}, func(code int) APIError {
++		return APIError{Code: code, Message: http.StatusText(code)}
++	}, func(code int) int {
++		if code == http.StatusRequestEntityTooLarge || code == http.StatusUnprocessableEntity {
++			return http.StatusBadRequest
++		}
++		return code
++	})
+ }
+ 
+ // RegisterRoutes contributes the named entry methods to the schema effect tool.
+--- a/pluginentry/configuration_test.go
++++ b/pluginentry/configuration_test.go
+@@ -5,8 +5,7 @@
+ 	"encoding/json"
+ 	"testing"
+ 
+-	"github.com/OpenListTeam/OpenList/v4/clientplugin"
+-	"github.com/wignerStan/infra/go/code/schema"
++	"github.com/danielgtaylor/huma/v2"
+ 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+ 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
+ )
+@@ -22,17 +21,16 @@
+ 	}
+ 	a, _ := json.Marshal(first)
+ 	b, _ := json.Marshal(second)
+-	if !bytes.Equal(a, b) || first.S3.ID == first.WebDAV.ID || first.S3.Owner != clientplugin.PluginID {
+-		t.Fatal("owned schema identity/generation is unstable")
++	if !bytes.Equal(a, b) {
++		t.Fatal("owned schema generation is unstable")
+ 	}
+-	for _, doc := range []schema.Document{first.S3, first.WebDAV} {
+-		if doc.Kind != "json-schema" || doc.Version != "1" || doc.Schema == nil {
+-			t.Fatal("structured schema identity missing")
++	for _, generated := range []*huma.Schema{first.S3, first.WebDAV} {
++		if generated == nil || generated.Type != "object" {
++			t.Fatal("structured object schema missing")
+ 		}
+-		switch doc.Schema.(type) {
+-		case string, []byte, json.RawMessage:
+-			t.Fatal("owned generation returned formatted bytes instead of structured schema")
+-		}
++	}
++	if first.S3.Properties["endpoint"] == nil || first.WebDAV.Properties["address"] == nil {
++		t.Fatal("schema no longer describes the implementation-owned model")
+ 	}
+ 	factory, e := NewFactory("sha256:" + string(bytes.Repeat([]byte("1"), 64)))
+ 	if e != nil {
+--- a/pluginentry/entry.go
++++ b/pluginentry/entry.go
+@@ -3,27 +3,28 @@
+ 
+ import (
+ 	"encoding/json"
++	"github.com/danielgtaylor/huma/v2"
+ 
+ 	"github.com/OpenListTeam/OpenList/v4/clientplugin"
+-	"github.com/wignerStan/infra/go/code/schema"
++	"github.com/wignerStan/infra/go/config/schema"
+ 	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
+ 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+ 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
+ )
+ 
+ type ProviderConfigurationSchemas struct {
+-	S3     schema.Document
+-	WebDAV schema.Document
++	S3     *huma.Schema
++	WebDAV *huma.Schema
+ }
+ 
+ // ConfigurationSchemas derives this plugin's implementation-owned public models
+ // at its publication entry. It performs no provider initialization or I/O.
+ func ConfigurationSchemas() (ProviderConfigurationSchemas, error) {
+-	s3, err := schema.Derive[clientplugin.S3Configuration](schema.Identity{ID: "client.openlist/configuration/s3", Version: "1", Owner: clientplugin.PluginID})
++	s3, err := schema.Derive[clientplugin.S3Configuration]()
+ 	if err != nil {
+ 		return ProviderConfigurationSchemas{}, err
+ 	}
+-	dav, err := schema.Derive[clientplugin.WebDAVConfiguration](schema.Identity{ID: "client.openlist/configuration/webdav", Version: "1", Owner: clientplugin.PluginID})
++	dav, err := schema.Derive[clientplugin.WebDAVConfiguration]()
+ 	if err != nil {
+ 		return ProviderConfigurationSchemas{}, err
+ 	}
+@@ -37,11 +38,11 @@
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	s3, err := json.Marshal(schemas.S3.Schema)
++	s3, err := json.Marshal(schemas.S3)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	dav, err := json.Marshal(schemas.WebDAV.Schema)
++	dav, err := json.Marshal(schemas.WebDAV)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+--- a/server/router.go
++++ b/server/router.go
+@@ -16,7 +16,8 @@
+ 	"github.com/OpenListTeam/OpenList/v4/server/static"
+ 	"github.com/gin-contrib/cors"
+ 	"github.com/gin-gonic/gin"
+-	schemaapi "github.com/wignerStan/infra/go/code/schema/api"
++	schemaapi "github.com/wignerStan/infra/go/network/http/openapi"
++	openapigin "github.com/wignerStan/infra/go/network/http/openapi/gin"
+ 	gatewayentry "github.com/wignerStan/remote-storage-gateway/go/controlplane/httpapi"
+ )
+ 
+@@ -388,7 +389,7 @@
+ 	if err != nil {
+ 		panic(err)
+ 	}
+-	if err = schemaapi.MountGin(e, controlGroup, table); err != nil {
++	if err = openapigin.Mount(e, controlGroup, table, openapigin.Options{OpenAPIPath: "/openapi", SchemasPath: "/schemas", Errors: httpapi.ErrorPolicy()}); err != nil {
+ 		panic(err)
+ 	}
+ 
