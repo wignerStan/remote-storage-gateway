@@ -69,8 +69,14 @@ source identity, ABI profile, header and archive hashes, and the exact `.pc` fil
 selected by pkg-config. Expanded Cflags/Libs must remain inside the verified SDK.
 The source manifest captures these SDK files and the actual C compiler and
 pkg-config executables. The product build digest also binds their hashes and the
-selected CGO flags. Caller `PKG_CONFIG_PATH`, `CGO_CFLAGS`, `CGO_CPPFLAGS`,
-`CGO_CXXFLAGS` and `CGO_LDFLAGS` settings remain explicit inputs.
+selected CGO flags. Caller `PKG_CONFIG_PATH` remains an explicit input. The
+current native recipe accepts only its canonical plugin include and ordinary
+optimization, debug, PIC and pthread flags in `CGO_CFLAGS`, `CGO_CPPFLAGS`,
+`CGO_CXXFLAGS` and `CGO_LDFLAGS`. It rejects extra include/library paths,
+archives, response files and compiler plugins because their bytes are absent
+from the declared input manifest. Ambient compiler header/library search paths
+are cleared for this recipe. Additional native inputs need an explicit source
+capture contract before the recipe can support them.
 
 The pipeline performs these operations in order:
 

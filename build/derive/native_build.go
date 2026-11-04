@@ -154,6 +154,9 @@ func (b *builder) nativeEnvironment() map[string]string {
 		"GOMAXPROCS": fmt.Sprint(b.parallelism()), "GOMEMLIMIT": "768MiB",
 		// Derived source identity is recorded by the verified manifest and owner receipt.
 		"GOFLAGS": "-buildvcs=false",
+		// Ambient compiler search paths are outside this source/SDK recipe.
+		"CPATH": "", "C_INCLUDE_PATH": "", "CPLUS_INCLUDE_PATH": "", "OBJC_INCLUDE_PATH": "",
+		"LIBRARY_PATH": "", "COMPILER_PATH": "", "GCC_EXEC_PREFIX": "",
 	}
 	for _, key := range []string{"GOCACHE", "GOMODCACHE", "GOPROXY", "GOSUMDB", "CC", "CXX", "GOMEMLIMIT", "PKG_CONFIG", "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_LDFLAGS"} {
 		if value := os.Getenv(key); value != "" {
@@ -742,6 +745,9 @@ func (b *builder) linkInputs() (nativeLinkInputs, error) {
 	if err = json.Unmarshal([]byte(metadata), &settings); err != nil {
 		return result, err
 	}
+	if err = validateNativeFlags(settings, filepath.Join(b.infra, "c/interop/plugins/include")); err != nil {
+		return result, err
+	}
 	compiler, err := exec.LookPath(settings["CC"])
 	if err != nil {
 		return result, fmt.Errorf("native CC must identify one executable: %w", err)
@@ -769,6 +775,25 @@ func (b *builder) linkInputs() (nativeLinkInputs, error) {
 
 // The SDK owns one include directory and one static archive. Do not accept a
 // foreign .pc that reports an admitted prefix but redirects its actual inputs.
+// The product's native recipe admits the canonical plugin include and flags
+// that do not add files. Extra headers, archives, search paths, response files
+// and compiler plugins are not part of its captured source/SDK manifest.
+func validateNativeFlags(settings map[string]string, pluginInclude string) error {
+	for _, key := range []string{"CGO_CFLAGS", "CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_LDFLAGS"} {
+		for _, flag := range strings.Fields(settings[key]) {
+			switch flag {
+			case "-O0", "-O1", "-O2", "-O3", "-Os", "-Og", "-g", "-g0", "-g1", "-g2", "-g3", "-fPIC", "-pthread":
+				continue
+			}
+			if key != "CGO_LDFLAGS" && flag == "-I"+pluginInclude {
+				continue
+			}
+			return fmt.Errorf("%s contains an input outside the declared native recipe", key)
+		}
+	}
+	return nil
+}
+
 func validateSDKFlags(prefix, cflags, libs string) error {
 	required := map[string]bool{"include": false, "lib": false, "archive": false}
 	for _, flag := range strings.Fields(cflags + " " + libs) {
