@@ -3,8 +3,10 @@
 The Gateway build owns product assembly: the manager ELF, its independent CP and
 Worker child modes, source-built UI, concrete client plugins and the REAPI /
 ByteStream transfer plugin. Generic Worker contracts and runtime remain in the
-independent Data Plane repository. The optional VFS executable is compiled by
-the independent rclone repository's native recipe.
+independent Data Plane repository. The optional raw-cache VFS executable is compiled by
+the independent rclone repository's native recipe. Immutable source views use
+the BuildBarn product's typed process binding and its explicitly selected native
+executable; that executable remains built by its own source owner.
 
 ## Source authority
 
@@ -42,6 +44,7 @@ make all \
   INFRA_ROOT=/sources/infra \
   DATA_PLANE_ROOT=/sources/network-data-plane-worker \
   RCLONE_ROOT=/sources/rclone \
+  BUILDBARN_ROOT=/sources/buildbarn-storage \
   BUILD_DIR=/build/storage-gateway
 ```
 
@@ -119,6 +122,13 @@ invokes the rclone source owner's native recipe, validates its source identity,
 and retains its owner receipt. `make rclone` builds that independent executable
 alone under `BUILD_DIR/materializer`; it does not move VFS ownership into the
 Gateway ELF. The default Gateway build omits the optional rclone artifact.
+
+`BUILDBARN_ROOT` is required even when `WITH_RCLONE=0`: the Manager links the
+BuildBarn process module alongside the independent rclone Box. Both selected
+module source trees join dependency capture and the Gateway build fingerprint.
+This does not bundle or rebuild the BuildBarn CLI; select its owner-built
+executable explicitly in the `buildbarn-source` materializer configuration.
+See [the typed source configuration](../docs/gateway-runtime.md).
 
 `receipts/ui.json` binds frontend commit, frozen lock, toolchain and generated
 assets. Per-artifact receipts and `receipts/native-release.json` bind source
