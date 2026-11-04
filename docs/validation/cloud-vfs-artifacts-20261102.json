@@ -1,0 +1,243 @@
+{
+  "artifacts": [
+    {
+      "name": "remote-storage-gateway",
+      "sha256": "ea1cf6f96c8b19d884558b3afa082fee41ca8aaa91b9f42f18cafefb9ea940eb",
+      "elf_class": "ELFCLASS64",
+      "machine": "EM_X86_64",
+      "elf_type": "ET_EXEC",
+      "needed_libraries": [
+        "libc.so.6"
+      ],
+      "go_version": "go1.27.3",
+      "build_settings": {
+        "-buildmode": "exe",
+        "-compiler": "gc",
+        "-tags": "dataplane_l7",
+        "-trimpath": "true",
+        "CGO_ENABLED": "1",
+        "GOAMD64": "v1",
+        "GOARCH": "amd64",
+        "GOOS": "linux"
+      },
+      "native_build_digest": null
+    },
+    {
+      "name": "client-openlist.so",
+      "sha256": "75f1bc74bbc17552679817f124054e356c05abf270d3076cd475fbdae991f8c9",
+      "elf_class": "ELFCLASS64",
+      "machine": "EM_X86_64",
+      "elf_type": "ET_DYN",
+      "needed_libraries": [
+        "libc.so.6"
+      ],
+      "go_version": "go1.27.3",
+      "build_settings": {
+        "-buildmode": "c-shared",
+        "-compiler": "gc",
+        "-trimpath": "true",
+        "CGO_ENABLED": "1",
+        "GOAMD64": "v1",
+        "GOARCH": "amd64",
+        "GOOS": "linux"
+      },
+      "plugin_id": "client.openlist",
+      "descriptor_digest": "sha256:638b3716a15d8023934c5d5cfb93b7d5814fa006fa1d080d844694023edba04f",
+      "native_build_digest": "sha256:0c9d29a7053a0c065b7f0967fcb79f26da20b8d1d85f8c896b7b0d05721141fe"
+    },
+    {
+      "name": "client-rclone.so",
+      "sha256": "a648334f0f9b0142764f323d030a36ccc3a98fa3ecbf6033e2bc2c24e8341ac2",
+      "elf_class": "ELFCLASS64",
+      "machine": "EM_X86_64",
+      "elf_type": "ET_DYN",
+      "needed_libraries": [
+        "libc.so.6"
+      ],
+      "go_version": "go1.27.3",
+      "build_settings": {
+        "-buildmode": "c-shared",
+        "-compiler": "gc",
+        "-trimpath": "true",
+        "CGO_ENABLED": "1",
+        "GOAMD64": "v1",
+        "GOARCH": "amd64",
+        "GOOS": "linux"
+      },
+      "plugin_id": "client.rclone",
+      "descriptor_digest": "sha256:caf5ca222e91c6acd71207e88bf3d7aec7bebeb10c2858f9f82f397ccbc1bf81",
+      "native_build_digest": "sha256:0c9d29a7053a0c065b7f0967fcb79f26da20b8d1d85f8c896b7b0d05721141fe"
+    },
+    {
+      "name": "openlist-control-plane",
+      "sha256": "38baf1cba45c19db4c77dbc7c7bf5aa7f17d4a6381794e6e9a102c81670af13a",
+      "elf_class": "ELFCLASS64",
+      "machine": "EM_X86_64",
+      "elf_type": "ET_EXEC",
+      "needed_libraries": null,
+      "go_version": "go1.27.3",
+      "build_settings": {
+        "-buildmode": "exe",
+        "-compiler": "gc",
+        "-trimpath": "true",
+        "CGO_ENABLED": "0",
+        "GOAMD64": "v1",
+        "GOARCH": "amd64",
+        "GOOS": "linux"
+      },
+      "native_build_digest": null
+    },
+    {
+      "name": "gateway-admin",
+      "sha256": "5102d3489244b6f1f51bfea1397c09a34ed972992870964ab18925da49e22fb8",
+      "elf_class": "ELFCLASS64",
+      "machine": "EM_X86_64",
+      "elf_type": "ET_EXEC",
+      "needed_libraries": [
+        "libc.so.6"
+      ],
+      "go_version": "go1.27.3",
+      "build_settings": {
+        "-buildmode": "exe",
+        "-compiler": "gc",
+        "-trimpath": "true",
+        "CGO_ENABLED": "1",
+        "GOAMD64": "v1",
+        "GOARCH": "amd64",
+        "GOOS": "linux"
+      },
+      "native_build_digest": null
+    }
+  ],
+  "derived_sources": {
+    "openlist": {
+      "relationship": {
+        "schema_version": "git-source-relationship/v1",
+        "kind": "patched_third_party",
+        "path": "third_party/openlist",
+        "owner": "openlistteam",
+        "integration": "submodule",
+        "upstream": {
+          "url": "https://github.com/OpenListTeam/OpenList.git",
+          "commit": "e72822f5390f4272c9fe9da8cabba3c1a270182f"
+        },
+        "patches": [
+          {
+            "order": 1,
+            "path": "patches/openlist/0001-preserve-control-plane-and-object-identity.patch",
+            "sha256": "ea16fd6d3b36c323e2526249806b5020eb988503720e082c3eef2066b19c0d2e"
+          },
+          {
+            "order": 2,
+            "path": "patches/openlist/0002-build-selected-native-client-adapters.patch",
+            "sha256": "cf5c62be2b155539ccb93d6bebbc019bfb475da7979adfcb867449a44186b675"
+          },
+          {
+            "order": 3,
+            "path": "patches/openlist/0003-extract-shared-s3-session-kernel.patch",
+            "sha256": "7bdf0f95253f052ce4769c9684499388cd808ccbc21f64c230620748c03941af"
+          },
+          {
+            "order": 4,
+            "path": "patches/openlist/0004-publish-schemas-at-native-plugin-entry.patch",
+            "sha256": "ebc7a16d208648aa9c34dc99792db461d025d6d94ce741cde1aa09085e1a6f4b"
+          }
+        ],
+        "public_api": "Worker client/v1 native plugin, shared S3 initializer, context-aware WebDAV kernel, OpenList control-plane HTTP API",
+        "result_tree": "debbb1157585071e49a24f45a626636014075105",
+        "licenses": [
+          "third_party/openlist/LICENSE"
+        ]
+      },
+      "tree": "debbb1157585071e49a24f45a626636014075105",
+      "clone_mode": "existing-verified",
+      "source_repository": "/develop/network/remote-storage-gateway",
+      "source_commit": "32306a021a2276f75cec18de2ca11a2d03bb9676",
+      "source_dirty": false
+    },
+    "openlist-ui": {
+      "relationship": {
+        "schema_version": "git-source-relationship/v1",
+        "kind": "upstream_submodule",
+        "path": "third_party/openlist-ui",
+        "owner": "openlistteam",
+        "integration": "submodule",
+        "upstream": {
+          "url": "https://github.com/OpenListTeam/OpenList-Frontend.git",
+          "commit": "20ce8d7d6077a1ee186274c3c0d13aafb5e3833f"
+        },
+        "patches": [],
+        "public_api": "Vite frontend dist built from pinned pnpm-lock.yaml and embedded in the derived OpenList binary",
+        "result_tree": null,
+        "licenses": [
+          "third_party/openlist-ui/LICENSE"
+        ]
+      },
+      "tree": "9e0a01db3bc2add761967fe5a9bbbcd2fd5bc2a4",
+      "clone_mode": "existing-verified",
+      "source_repository": "/develop/network/remote-storage-gateway",
+      "source_commit": "32306a021a2276f75cec18de2ca11a2d03bb9676",
+      "source_dirty": false
+    }
+  },
+  "expected_native_build_digest": "sha256:0c9d29a7053a0c065b7f0967fcb79f26da20b8d1d85f8c896b7b0d05721141fe",
+  "image_inputs": {
+    "control-plane": {
+      "ca-certificates.crt": "714d457d580922dbf1d0be8bd35ba236a842b50b0072ae791582a19adef772a5",
+      "openlist-control-plane": "38baf1cba45c19db4c77dbc7c7bf5aa7f17d4a6381794e6e9a102c81670af13a"
+    },
+    "gateway": {
+      "ca-certificates.crt": "714d457d580922dbf1d0be8bd35ba236a842b50b0072ae791582a19adef772a5",
+      "client-openlist.so": "75f1bc74bbc17552679817f124054e356c05abf270d3076cd475fbdae991f8c9",
+      "client-rclone.so": "a648334f0f9b0142764f323d030a36ccc3a98fa3ecbf6033e2bc2c24e8341ac2",
+      "remote-storage-gateway": "ea1cf6f96c8b19d884558b3afa082fee41ca8aaa91b9f42f18cafefb9ea940eb"
+    }
+  },
+  "infra_commit": "0c136f4b3a1ab1f9b017107a9b473cd7d646b1d7",
+  "mise_cc": "/usr/bin/gcc -B/usr/bin/",
+  "mise_cxx": "/usr/bin/g++ -B/usr/bin/",
+  "module_sources": {
+    "rclone": {
+      "schema": "go-module-derived-source/v1",
+      "module": "github.com/rclone/rclone",
+      "version": "v1.75.2",
+      "module_sum": "h1:0cqa6P3WmhGnu2NeOdZSetJnacpwCRtpsNbHOICqPk8=",
+      "go_mod_sum": "h1:YmKNkhnFIoIwLsEZl7FSN756Iq5ZXy3LPDuypnuFocA=",
+      "canonical_directory": "/develop/go/pkg/mod/github.com/rclone/rclone@v1.75.2",
+      "owner_repository": "/tmp/trade-validation-publication/infra",
+      "owner_go_mod_sha256": "10469a0fb1dcb222b76bb2b781b21e6077bc361b761e4f962e1df7caf5183518",
+      "patch_inventory_sha256": "1e60d4edce37ee073aa1b492996885b30221b4b37344bb4dca1400b41e09aa6a",
+      "patches": [
+        {
+          "order": 1,
+          "path": "patches/rclone/0001-isolate-vfs-cache-directory.patch",
+          "sha256": "0cf68aa9bf872f91fa2b31504493e4d0fc774a940021f6568a93fdc57af4999f"
+        },
+        {
+          "order": 2,
+          "path": "patches/rclone/0002-cancel-individual-vfs-read-waits.patch",
+          "sha256": "a682556db1d0497d978aee9af9e8347cc43229233e667d9b763609eafea90de2"
+        }
+      ],
+      "derived_directory": "/tmp/trade-remote-gateway-derivation-proof/source/rclone-module",
+      "derived_content_hash": "sha256:46b08530b491f32d474a47c741180277d50d91ae2cd5052bcd7048272c714dad"
+    }
+  },
+  "product_commit": "32306a021a2276f75cec18de2ca11a2d03bb9676",
+  "schema": "remote-storage-gateway/artifacts/v1",
+  "ui": {
+    "dist_sha256": "dc01156a5fc0ac2749d838a8a538a7b783280c6d9aebfd5c39b1bf19f100a855",
+    "embedded_input": "/tmp/trade-remote-gateway-derivation-proof/source/openlist/public/dist",
+    "pnpm_lock_sha256": "3197f55ca5f48aa963d744af8cd0a44736bab60589925a24529a6a527acea83a",
+    "toolchain": {
+      "go": "1.27.3",
+      "node": "24.11.0",
+      "pnpm": "11.28.9"
+    },
+    "upstream": {
+      "url": "https://github.com/OpenListTeam/OpenList-Frontend.git",
+      "commit": "20ce8d7d6077a1ee186274c3c0d13aafb5e3833f"
+    },
+    "version": "4.2.9"
+  }
+}

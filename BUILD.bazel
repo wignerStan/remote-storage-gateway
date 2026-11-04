@@ -1,0 +1,91 @@
+load("//build:remote_go.bzl", "remote_go_release")
+load("//build:remote_ui.bzl", "remote_ui")
+load("@rules_img//img:image.bzl", "image_manifest")
+load("@rules_img//img:layer.bzl", "file_metadata", "image_layer")
+platform(
+    name = "linux_x86_64",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+    exec_properties = {
+        "OSFamily": "Linux",
+        "container-image": "docker://localhost/infra-rust-builder@sha256:2ebf13498c35c09fb653bc6c3a74032efdbd64a975532e722a2080f7cc87ac5b",
+        "execution-location": "incus",
+    },
+)
+image_layer(
+    name = "gateway_programs",
+    srcs = {
+        "/opt/gateway/storage-worker": ":native_release/storage-worker",
+        "/opt/gateway/client-openlist.so": ":native_release/client-openlist.so",
+        "/opt/gateway/client-rclone.so": ":native_release/client-rclone.so",
+        "/opt/gateway/transfer-reapi.so": ":native_release/transfer-reapi.so",
+    },
+    default_metadata = file_metadata(mode = "0555", uid = 1001, gid = 1001),
+    include_runfiles = False,
+)
+image_layer(
+    name = "gateway_trust",
+    srcs = {"/etc/ssl/certs/ca-certificates.crt": "@build_inputs//:runtime/ca-certificates.crt"},
+    default_metadata = file_metadata(mode = "0644", uid = 0, gid = 0),
+    include_runfiles = False,
+)
+image_manifest(
+    name = "gateway_image",
+    base = "@gateway_runtime",
+    layers = [":gateway_programs", ":gateway_trust"],
+    user = "1001:1001",
+    entrypoint = ["/opt/gateway/storage-worker"],
+    cmd = ["-config", "/run/gateway-secrets/gateway.json"],
+    working_dir = "/",
+    env = {"SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt"},
+    labels = {"org.opencontainers.image.source": "https://github.com/wignerStan/remote-storage-gateway"},
+)
+image_layer(
+    name = "control_plane_program",
+    srcs = {
+        "/opt/control-plane/openlist": ":native_release/openlist-control-plane",
+        "/opt/gateway/storage-worker": ":native_release/storage-worker",
+        "/opt/materializer/rclone": ":native_release/rclone",
+        "/opt/gateway/client-openlist.so": ":native_release/client-openlist.so",
+        "/opt/gateway/client-rclone.so": ":native_release/client-rclone.so",
+        "/opt/gateway/transfer-reapi.so": ":native_release/transfer-reapi.so",
+        "/opt/openlist/.keep": "//build:working_directory",
+    },
+    default_metadata = file_metadata(mode = "0555", uid = 0, gid = 0),
+    file_metadata = {"/opt/openlist/.keep": file_metadata(mode = "0444", uid = 0, gid = 0)},
+    include_runfiles = False,
+)
+image_layer(
+    name = "control_plane_trust",
+    srcs = {"/etc/ssl/certs/ca-certificates.crt": "@build_inputs//:runtime/ca-certificates.crt"},
+    default_metadata = file_metadata(mode = "0444", uid = 0, gid = 0),
+    include_runfiles = False,
+)
+image_manifest(
+    name = "control_plane_image",
+    base = "@gateway_runtime",
+    layers = [":control_plane_program", ":control_plane_trust"],
+    user = "1001:1001",
+    entrypoint = ["/opt/control-plane/openlist"],
+    cmd = ["server", "--data", "/opt/openlist/data", "--config", "/opt/openlist/data/config.json"],
+    working_dir = "/opt/openlist",
+    env = {"SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt"},
+    labels = {"org.opencontainers.image.source": "https://github.com/wignerStan/remote-storage-gateway"},
+)
+
+remote_ui(
+    name = "ui_dist",
+    srcs = ["@build_inputs//workspace/openlist-ui:ui_sources"],
+    package_json = "@build_inputs//workspace/openlist-ui:package.json",
+    npm = "@build_inputs//workspace/openlist-ui:node_modules",
+    node = "@build_inputs//:tools/node/bin/node",
+    pnpm = "@build_inputs//:tools/pnpm/dist/pnpm.mjs",
+    tools = ["@build_inputs//:node_toolchain", "@build_inputs//:pnpm_toolchain"],
+)
+remote_go_release(
+    name = "native_release",
+    inputs = ["@build_inputs//:files"],
+    source_map = "@build_inputs//:source-map.tsv",
+    build_env = "@build_inputs//:build.env",
+    ui = ":ui_dist",
+    materializer = "@rclone_data_plane//:native_rclone",
+)
