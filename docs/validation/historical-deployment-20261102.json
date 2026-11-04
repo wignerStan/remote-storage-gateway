@@ -1,0 +1,270 @@
+{
+  "schema": "openlist-client-plugins/native-images/v1",
+  "build_variant": "schema-application-support-validation-fixes",
+  "finished_utc": "2026-11-02T11:41:10Z",
+  "bazel_version": "9.3.1",
+  "invocation_id": "d5961652-efbd-4ece-b376-d00197aa18a1",
+  "remote_executor": "grpc://172.16.0.210:8980",
+  "execution_properties": {
+    "OSFamily": "Linux",
+    "container-image": "docker://localhost/infra-rust-builder@sha256:2ebf13498c35c09fb653bc6c3a74032efdbd64a975532e722a2080f7cc87ac5b",
+    "execution-location": "incus"
+  },
+  "execution": {
+    "local_fallback": false,
+    "completed_remote_actions_this_invocation": 2,
+    "remote_cache_hits_this_invocation": 1,
+    "action_cache_hits_this_invocation": 15,
+    "internal_actions_this_invocation": 1,
+    "total_executed_processes_this_invocation": 4,
+    "fresh_remote_mnemonics_this_invocation": {
+      "OCILayout": 2
+    },
+    "completed_remote_image_actions_across_attempts": 6,
+    "fresh_remote_image_mnemonics_across_attempts": {
+      "LayerTar": 2,
+      "ImageManifest": 2,
+      "OCILayout": 2
+    },
+    "normal_global_configuration_no_execution_platform_override": true,
+    "registry_proxy_was_existing": true,
+    "worker_registry_proxy": "http://100.73.12.63:10809",
+    "successful_action_log": "/var/tmp/trade-storage-gateway-20261101/proofs/validation-fixes-20261102/images-execution.json",
+    "initial_attempt": {
+      "invocation_id": "65bec0b6-53aa-4f24-accc-6615ef98acbc",
+      "successful_fresh_remote_image_actions": 4,
+      "failed_action": "DownloadBlob",
+      "failure": "Direct Docker Hub connection timed out. Retried through the existing worker egress proxy; no local fallback or infrastructure changes.",
+      "successful_fresh_remote_mnemonics": {
+        "ImageManifest": 2,
+        "LayerTar": 2
+      }
+    }
+  },
+  "base": {
+    "repository": "index.docker.io/library/debian",
+    "index_digest": "sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4",
+    "layer_digest": "sha256:6fc242d221a673263eabd14a9ad9584d3177c96e5cb504c891497338e2f912f5",
+    "layer_handling": "lazy",
+    "layer_source_successful_invocation": "remote cache hit via existing worker proxy"
+  },
+  "toolchain": {
+    "go": "go1.27.3",
+    "mise": "2026.10.24",
+    "gateway_cgo_enabled": true,
+    "control_plane_cgo_enabled": false,
+    "configured_CC": "/usr/bin/gcc -B/usr/bin/",
+    "configured_CXX": "/usr/bin/g++ -B/usr/bin/",
+    "gcc": "Debian 14.2.0-19",
+    "resolved_assembler": "/usr/bin/x86_64-linux-gnu-as",
+    "resolved_linker": "/usr/bin/x86_64-linux-gnu-ld",
+    "binutils": "2.44",
+    "compiler_prefix_policy": "The native compiler prefix pins subordinate assembler/linker selection and distinguishes Go cache actions across PATH variants.",
+    "gateway_CGO_CFLAGS": "-I/tmp/trade-validation-publication/infra/rust/crates/interop/native-plugin-protocol/include -I/tmp/trade-validation-publication/infra/c/plugin-interop/include",
+    "go_workspace": "/tmp/trade-validation-publication/reviewed.work"
+  },
+  "images": {
+    "gateway": {
+      "manifest_digest": "sha256:afdb8112ceafdaefcd61c1903af63f7370dad8f0776275ba0a3c05be30474651",
+      "archive": "gateway_image_oci_layout.tar",
+      "archive_path": "/tmp/trade-validation-release/bazel/df4e58c33e38404450a58de2c8c0d37e/execroot/_main/bazel-out/k8-fastbuild/bin/gateway_image_oci_layout.tar",
+      "archive_sha256": "18fa4c861db61d063c87486bdb604d8bb615f549cd88269423aef56b153f5a79",
+      "archive_bytes": 53745664,
+      "layers": 3,
+      "user": "1001:1001",
+      "entrypoint": "/opt/gateway/remote-storage-gateway",
+      "gateway_sha256": "6cf36598035066e2ff5f8c70d439972f2d5f36038f61a5b0c0d99be3580cfb46",
+      "plugin_sha256": "829534e64f71bcc3e9627635bce58ead357e0da14a8f504811a1fd04c65ee289",
+      "source_commit": "f7095ccb47caa48ffa7a394b2ea7e4e70a787513",
+      "worker_source_commit": "850e17a053bba12e0c2623677874d7cfd32dde78",
+      "reviewed_infra_source_commit": "41d77022ad28e6c06cd5de6f059837165e2737cd",
+      "infra_canonical_toolchain_source_commit": "2836f45fe6fec006d0ffdc8cb7ef970e193ca074",
+      "infra_canonical_route_hardening_source_commit": "a8a90d0996e7ee23a29b0ecbf18d74d821416d06",
+      "plugin_descriptor_schema": "network-data-plane-worker/plugin-descriptor/v2",
+      "plugin_version": "0.1.0-alpha.2",
+      "client_contract": "network-data-plane-worker/client/v1",
+      "fresh_remote_image_actions_across_attempts": 3,
+      "plugin_artifact": {
+        "reused_unchanged": true,
+        "recompiled_for_this_build": false,
+        "sha256": "829534e64f71bcc3e9627635bce58ead357e0da14a8f504811a1fd04c65ee289",
+        "source_commit": "bbd251f9ec7ea11a8d534c156e1bbcfdb43830ce",
+        "worker_source_commit": "b83ed9dcca5972dc24030bc46d682844673c2106",
+        "infra_source_commit": "c89ee16d1535d6651f59a4b5cab633e51d004374",
+        "selected_published_infra_commit": "6c42678647c5315137f95601508c1bddcc63b00b"
+      },
+      "embedded_vcs_revision_available": false
+    },
+    "control_plane": {
+      "manifest_digest": "sha256:34986705eec291cdaa8e5542be6d909dc3ccb2ffa8697d3eae958add905a0cb7",
+      "archive": "control_plane_image_oci_layout.tar",
+      "archive_path": "/tmp/trade-validation-release/bazel/df4e58c33e38404450a58de2c8c0d37e/execroot/_main/bazel-out/k8-fastbuild/bin/control_plane_image_oci_layout.tar",
+      "archive_sha256": "8dcf2b91fc426f3a1e9cb725306adfd9d2715477626484212234ae5be52878b6",
+      "archive_bytes": 88488960,
+      "layers": 4,
+      "user": "1001:1001",
+      "entrypoint": "/opt/control-plane/openlist",
+      "working_directory": "/opt/openlist",
+      "program_sha256": "9c2a4fef8a04cc72557d4939ac330d96de288d140491697af6f6615f6ab0df33",
+      "source_commit": "cdddb733ac389ab3327a234e5081e901f0ef7804",
+      "worker_source_commit": "850e17a053bba12e0c2623677874d7cfd32dde78",
+      "reviewed_infra_source_commit": "41d77022ad28e6c06cd5de6f059837165e2737cd",
+      "infra_canonical_toolchain_source_commit": "2836f45fe6fec006d0ffdc8cb7ef970e193ca074",
+      "infra_canonical_route_hardening_source_commit": "a8a90d0996e7ee23a29b0ecbf18d74d821416d06",
+      "frontend_version": "v4.2.4",
+      "frontend_archive_sha256": "f8de22c2957a104487b54c10aef511c31baa9b76f556ffdbde4ae595428a7378",
+      "frontend_index_sha256": "a9a4dd0ea3b0acc30d60542f92eeecd514d14750a3997a9a6a37fbca19c3a3b4",
+      "frontend_regular_files": 443,
+      "frontend_entries": 464,
+      "frontend_outside_prefix": 0,
+      "frontend_build_files": 0,
+      "frontend_prefix_tool_sha256": "a3c6ab8d02b2a191076571a391c52a706a3c5ca22279bb29e64a4152a9d62541",
+      "fresh_remote_image_actions_across_attempts": 3,
+      "program_version": "v4.2.9-35-gcdddb733",
+      "program_built_at_utc": "2026-11-02T11:32:20Z",
+      "embedded_vcs_revision_matches": true,
+      "embedded_vcs_modified": false
+    }
+  },
+  "validation": {
+    "all_oci_referenced_blob_hashes_and_sizes_valid": true,
+    "platform": "linux/amd64",
+    "contained_program_hashes_match_reviewed_inputs": true,
+    "approved_plugin_reused_unchanged": true,
+    "frontend_paths_confined_to": "opt/control-plane/public/",
+    "frontend_regular_files": 443,
+    "frontend_entries": 464,
+    "frontend_outside_prefix": 0,
+    "frontend_build_files": 0,
+    "all_infra_modules_resolved_from_reviewed_checkout": true,
+    "published_or_deployed_by_build_task": true,
+    "deployment_gate": "Affected Go support gate accepted; rollout and live probes passed. Unchanged native C source coverage advisories remain."
+  },
+  "build_commands": {
+    "gateway": {
+      "working_directory": "/develop/network/openlist-client-plugins",
+      "environment": {
+        "GOWORK": "/tmp/trade-validation-publication/reviewed.work"
+      },
+      "argv": [
+        "make",
+        "GO=/develop/.linuxbrew/bin/mise exec -- go",
+        "INFRA_ROOT=/tmp/trade-validation-publication/infra",
+        "BUILD_DIR=/tmp/trade-validation-release/programs",
+        "gateway"
+      ]
+    },
+    "control_plane": {
+      "working_directory": "/develop/network/openlist-control-plane",
+      "environment": {
+        "GOWORK": "/tmp/trade-validation-publication/reviewed.work",
+        "CGO_ENABLED": "0"
+      },
+      "argv": [
+        "/develop/.linuxbrew/bin/mise",
+        "exec",
+        "--",
+        "go",
+        "build",
+        "-ldflags=-w -s -X github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=2026-11-02T11:32:20Z -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=Jacob -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=cdddb733ac389ab3327a234e5081e901f0ef7804 -X github.com/OpenListTeam/OpenList/v4/internal/conf.Version=v4.2.9-35-gcdddb733 -X github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=v4.2.4",
+        "-o",
+        "/tmp/trade-validation-release/programs/openlist-control-plane",
+        "."
+      ]
+    },
+    "images": {
+      "working_directory": "/develop/network/openlist-client-plugins",
+      "environment": {
+        "GATEWAY_IMAGE_INPUTS": "/var/tmp/trade-storage-gateway-20261101/image-inputs",
+        "CONTROL_PLANE_IMAGE_INPUTS": "/var/tmp/trade-storage-gateway-20261101/control-plane-image-inputs"
+      },
+      "argv": [
+        "/develop/.linuxbrew/bin/bazel",
+        "--output_user_root=/tmp/trade-validation-release/bazel",
+        "build",
+        "--config=buildbarn",
+        "--lockfile_mode=off",
+        "--remote_timeout=600s",
+        "--output_groups=+oci_tarball,+digest",
+        "--action_env=HTTP_PROXY=http://100.73.12.63:10809",
+        "--action_env=HTTPS_PROXY=http://100.73.12.63:10809",
+        "--build_event_json_file=/tmp/trade-validation-release/proofs/images-bep.json",
+        "--execution_log_json_file=/tmp/trade-validation-release/proofs/images-execution.json",
+        "//:gateway_image",
+        "//:control_plane_image"
+      ]
+    }
+  },
+  "provenance": {
+    "dependency_source_basis": "All ten Infra module resolutions were verified against the clean reviewed checkout. Local Go dependency modules report (devel); dependency source commits are compile-session evidence, not embedded dependency versions.",
+    "previous_receipt_preserved": "native-images-schema-support-20261102.json",
+    "programs_rebuilt_by_image_task": true,
+    "program_compilation": "Existing gateway Make target via Mise; control plane CGO_ENABLED=0 with explicit version metadata. OCI construction and export used native rules_img on Buildbarn.",
+    "control_plane_ldflags": "-w -s -X github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=2026-11-02T11:32:20Z -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=Jacob -X github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=cdddb733ac389ab3327a234e5081e901f0ef7804 -X github.com/OpenListTeam/OpenList/v4/internal/conf.Version=v4.2.9-35-gcdddb733 -X github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=v4.2.4",
+    "unchanged_reused_inputs": [
+      "approved client-openlist.so",
+      "frontend v4.2.4 archive and prefix tool",
+      "CA trust bundle",
+      "pinned runtime base"
+    ],
+    "prior_input_facts_preserved": "/var/tmp/trade-storage-gateway-20261101/proofs/validation-fixes-20261102/*-inputs-before.json",
+    "proof_directory": "/var/tmp/trade-storage-gateway-20261101/proofs/validation-fixes-20261102",
+    "archive_retention_policy": "Reproducible OCI archives and owned import/build copies are removed after deployment and the receipt PR. Containerd retains the live image content; exact digests, reviewed inputs and small verification evidence remain."
+  },
+  "runtime_validation": {
+    "verified_utc": "2026-11-02T12:41:37Z",
+    "only_selected_image_fields_changed": true,
+    "all_four_selfhost_deployments_ready": true,
+    "recreate_strategy_and_deployment_identities_preserved": true,
+    "configuration_secret_tls_port_and_mount_specs_unchanged": true,
+    "openlist_pvc_uid": "13095f9f-0d0e-4fff-b433-e6551fb81167",
+    "pvc_identity_unchanged": true,
+    "running_gateway_elf_sha256": "6cf36598035066e2ff5f8c70d439972f2d5f36038f61a5b0c0d99be3580cfb46",
+    "running_control_plane_elf_sha256": "9c2a4fef8a04cc72557d4939ac330d96de288d140491697af6f6615f6ab0df33",
+    "approved_plugin_sha256": "829534e64f71bcc3e9627635bce58ead357e0da14a8f504811a1fd04c65ee289",
+    "live_probe": {
+      "recorded_utc": "2026-11-02T12:59:01.508334+00:00",
+      "execution_tool_session": 26592,
+      "exit_code": 0,
+      "probe_source_sha256": "6f15537813cc6d6fbf4837825114bb1d1d9c7792eb04689ec19a9c069d139480",
+      "tls_certificate_verification": true,
+      "existing_operator_credential_no_reset": true,
+      "control_plane_typed_operations": 11,
+      "worker_typed_operations": 4,
+      "management_backend_reads": 8,
+      "worker_control_plane_descriptor_exact_bytes_and_digest": true,
+      "published_request_schema_valid_invalid": true,
+      "strict_request_validation_and_response_privacy": true,
+      "control_plane_admin_and_worker_metadata_authentication": true,
+      "authenticated_storage_namespace_probes": 1,
+      "secrets_recorded": false,
+      "performed_by": "parent integration task; not rerun by receipt publisher"
+    },
+    "evidence_files": {
+      "rollout": "rollout/rollout-verification.json",
+      "live_probe": "live-verification.json",
+      "live_probe_source": "live-probe.go"
+    }
+  },
+  "architecture_review": {
+    "source": "Parent integration review of actual native-checker results before rollout",
+    "policy_regressions_passed": 48,
+    "affected_schema_and_codec_closure": {
+      "status": "passed",
+      "blocking_findings": 0,
+      "coverage_complete": true
+    },
+    "control_plane_registered_scan": {
+      "status": "passed",
+      "blocking_findings": 0,
+      "coverage_complete": true
+    },
+    "worker_full_scan": {
+      "blocking_findings": 0,
+      "unchanged_native_c_source_coverage": "advisory/inconclusive; retained, not a proven defect",
+      "complete_architecture_pass_claimed": false
+    },
+    "related_infra_review": "https://github.com/wignerStan/infra/pull/76",
+    "related_review_scope": "The PR head is a policy-only descendant; these images retain the exact reviewed runtime commit recorded above."
+  }
+}
