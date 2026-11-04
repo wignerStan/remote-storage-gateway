@@ -1,0 +1,117 @@
+diff --git a/server/managed.go b/server/managed.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7daecd2e92b6f442fffbb6e748803e3821e64807
+--- /dev/null
++++ b/server/managed.go
+@@ -0,0 +1,111 @@
++package server
++
++import (
++	"github.com/OpenListTeam/OpenList/v4/internal/conf"
++	"github.com/OpenListTeam/OpenList/v4/server/common"
++	"github.com/OpenListTeam/OpenList/v4/server/handles"
++	"github.com/OpenListTeam/OpenList/v4/server/middlewares"
++	"github.com/OpenListTeam/OpenList/v4/server/static"
++	"github.com/gin-gonic/gin"
++	"net/http"
++	"strings"
++)
++
++// initManaged registers only identity, persisted metadata and typed control
++// operations. It never registers legacy payload routes or their GC/task hooks.
++func initManaged(e *gin.Engine) {
++	e.ContextWithFallback = true
++	Cors(e)
++	g := e.Group(conf.URL.Path)
++	common.SecretKey = []byte(conf.Conf.JwtSecret)
++	if conf.URL.Path != "" && conf.URL.Path != "/" {
++		e.GET("/", func(c *gin.Context) { c.Redirect(302, conf.URL.Path) })
++	}
++	g.Any("/ping", func(c *gin.Context) {
++		if GatewayControl != nil && !GatewayControl.Ready() {
++			c.Status(503)
++			return
++		}
++		c.String(200, "pong")
++	})
++	g.GET("/favicon.ico", handles.Favicon)
++	g.GET("/robots.txt", handles.Robots)
++	g.GET("/manifest.json", static.ManifestJSON)
++	g.Use(middlewares.StoragesLoaded)
++	if conf.Conf.MaxConnections > 0 {
++		g.Use(middlewares.MaxAllowed(conf.Conf.MaxConnections))
++	}
++	api := g.Group("/api")
++	auth := api.Group("", middlewares.Auth(false))
++	webauthn := api.Group("/authn", middlewares.Authn)
++	api.POST("/auth/login", handles.Login)
++	api.POST("/auth/login/hash", handles.LoginHash)
++	api.POST("/auth/login/ldap", handles.LoginLdap)
++	auth.GET("/me", handles.CurrentUser)
++	auth.POST("/me/update", handles.UpdateCurrent)
++	auth.GET("/me/sshkey/list", handles.ListMyPublicKey)
++	auth.POST("/me/sshkey/add", handles.AddMyPublicKey)
++	auth.POST("/me/sshkey/delete", handles.DeleteMyPublicKey)
++	auth.POST("/auth/2fa/generate", handles.Generate2FA)
++	auth.POST("/auth/2fa/verify", handles.Verify2FA)
++	auth.GET("/auth/logout", handles.LogOut)
++	api.GET("/auth/sso", handles.SSOLoginRedirect)
++	api.GET("/auth/sso_callback", handles.SSOLoginCallback)
++	api.GET("/auth/get_sso_id", handles.SSOLoginCallback)
++	api.GET("/auth/sso_get_token", handles.SSOLoginCallback)
++	api.GET("/authn/webauthn_begin_login", handles.BeginAuthnLogin)
++	api.POST("/authn/webauthn_finish_login", handles.FinishAuthnLogin)
++	webauthn.GET("/webauthn_begin_registration", handles.BeginAuthnRegistration)
++	webauthn.POST("/webauthn_finish_registration", handles.FinishAuthnRegistration)
++	webauthn.POST("/delete_authn", handles.DeleteAuthnLogin)
++	webauthn.GET("/getcredentials", handles.GetAuthnCredentials)
++	public := api.Group("/public")
++	public.Any("/settings", handles.PublicSettings)
++	public.Any("/init_status", handles.InitStatus)
++	public.POST("/init/setup", handles.InitSetup)
++	admin := auth.Group("/admin", middlewares.AuthAdmin)
++	registerControlRoutes(e, admin)
++	meta := admin.Group("/meta")
++	meta.GET("/list", handles.ListMetas)
++	meta.GET("/get", handles.GetMeta)
++	meta.POST("/create", handles.CreateMeta)
++	meta.POST("/update", handles.UpdateMeta)
++	meta.POST("/delete", handles.DeleteMeta)
++	user := admin.Group("/user")
++	user.GET("/list", handles.ListUsers)
++	user.GET("/get", handles.GetUser)
++	user.POST("/create", handles.CreateUser)
++	user.POST("/update", handles.UpdateUser)
++	user.POST("/cancel_2fa", handles.Cancel2FAById)
++	user.POST("/delete", handles.DeleteUser)
++	user.POST("/del_cache", handles.DelUserCache)
++	user.GET("/sshkey/list", handles.ListPublicKeys)
++	user.POST("/sshkey/delete", handles.DeletePublicKey)
++	storage := admin.Group("/storage")
++	storage.GET("/list", handles.ListStorages)
++	storage.GET("/get", handles.GetStorage)
++	setting := admin.Group("/setting")
++	setting.GET("/get", handles.GetSetting)
++	setting.GET("/list", handles.ListSettings)
++	setting.POST("/save", handles.SaveSettings)
++	setting.POST("/delete", handles.DeleteSetting)
++	setting.POST("/default", handles.DefaultSettings)
++	setting.POST("/reset_token", handles.ResetToken)
++	static.Static(g, func(h ...gin.HandlerFunc) {
++		guard := func(c *gin.Context) {
++			p := strings.TrimPrefix(c.Request.URL.Path, strings.TrimSuffix(conf.URL.Path, "/"))
++			if p == "/api" || strings.HasPrefix(p, "/api/") {
++				c.AbortWithStatus(http.StatusNotFound)
++				return
++			}
++			for _, prefix := range []string{"/dav", "/s3", "/d/", "/p/", "/ad/", "/ap/", "/ae/", "/sd/", "/sad/", "/tc/", "/@emby", "/@mediabrowser", "/@rest", "/i/", "/debug"} {
++				if strings.HasPrefix(p, prefix) {
++					c.AbortWithStatus(http.StatusNotFound)
++					return
++				}
++			}
++			c.Next()
++		}
++		e.NoRoute(append([]gin.HandlerFunc{guard}, h...)...)
++	})
++}

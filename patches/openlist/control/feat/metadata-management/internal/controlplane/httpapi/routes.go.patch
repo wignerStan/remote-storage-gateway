@@ -1,0 +1,278 @@
+diff --git a/internal/controlplane/httpapi/routes.go b/internal/controlplane/httpapi/routes.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7e09d5727a99bb82e2eb82949c89fb077475a1a
+--- /dev/null
++++ b/internal/controlplane/httpapi/routes.go
+@@ -0,0 +1,272 @@
++// Package httpapi owns the typed administrative management entry.
++package httpapi
++
++import (
++	"context"
++	"errors"
++	"net/http"
++
++	"github.com/OpenListTeam/OpenList/v4/internal/controlplane"
++	api "github.com/wignerStan/infra/go/network/http/openapi"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
++	worker "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
++	"github.com/wignerStan/network-data-plane-worker/go/management"
++)
++
++type APIError struct {
++	Code    int       `json:"code"`
++	Message string    `json:"message"`
++	Data    *struct{} `json:"data"`
++}
++
++func (e *APIError) Error() string  { return e.Message }
++func (e *APIError) GetStatus() int { return e.Code }
++func rejected(code int) error      { return &APIError{Code: code, Message: http.StatusText(code)} }
++func errorStatus(err error) int {
++	if errors.Is(err, controlplane.ErrInvalid) {
++		return 400
++	}
++	if errors.Is(err, controlplane.ErrConflict) {
++		return 409
++	}
++	var upstream *management.StatusError
++	if errors.As(err, &upstream) && upstream.StatusCode == 409 {
++		return 409
++	}
++	return 502
++}
++
++type Envelope[T any] struct {
++	Code    int    `json:"code"`
++	Message string `json:"message"`
++	Data    T      `json:"data"`
++}
++type Output[T any] struct{ Body Envelope[T] }
++type TargetInput struct {
++	Target string `path:"target"`
++}
++type DescriptorInput struct {
++	TargetInput
++	Digest string `path:"digest"`
++}
++type ReplaceInput struct {
++	TargetInput
++	Name string `path:"name"`
++	// Worker-owned body is forwarded unchanged; its schema and semantic validation
++	// remain authoritative in the Worker contract.
++	Body management.ReplaceRequest
++}
++type JobInput struct {
++	TargetInput
++	ID int64 `path:"id" minimum:"1"`
++}
++type StopRequest struct {
++	ExecuteID string `json:"execute_id" minLength:"1" maxLength:"128"`
++}
++type StopInput struct {
++	JobInput
++	Body StopRequest
++}
++
++// ManagementEntry is the complete administrative entry contract. Each named
++// method consumes typed input. RegisterRoutes contributes these concrete methods
++// to the schema effect tool; the host supplies the HTTP runtime binding.
++type ManagementEntry interface {
++	RegisterRoutes(api.RouteTable) error
++	Targets(context.Context, *EmptyInput) (*Output[[]controlplane.Summary], error)
++	Manifest(context.Context, *TargetInput) (*Output[worker.Manifest], error)
++	Observed(context.Context, *TargetInput) (*Output[[]worker.Observed], error)
++	Replace(context.Context, *ReplaceInput) (*Output[worker.Version], error)
++	Descriptor(context.Context, *DescriptorInput) (*api.RawJSON, error)
++	Version(context.Context, *TargetInput) (*Output[controlplane.RcloneVersion], error)
++	Stats(context.Context, *TargetInput) (*Output[controlplane.RcloneStats], error)
++	Jobs(context.Context, *TargetInput) (*Output[controlplane.RcloneJobs], error)
++	Job(context.Context, *JobInput) (*Output[controlplane.RcloneJob], error)
++	Stop(context.Context, *StopInput) (*Output[struct{}], error)
++	Probe(context.Context, *TargetInput) (*Output[controlplane.OriginStatus], error)
++}
++
++type EmptyInput struct{}
++type registryEntry struct {
++	registry *controlplane.Registry
++	loadErr  error
++}
++
++func NewEntry(registry *controlplane.Registry, loadErr error) ManagementEntry {
++	return &registryEntry{registry: registry, loadErr: loadErr}
++}
++func (e *registryEntry) ready() error {
++	if e.loadErr != nil || e.registry == nil {
++		return rejected(503)
++	}
++	return nil
++}
++func output[T any](value T, err error) (*Output[T], error) {
++	if err != nil {
++		return nil, rejected(errorStatus(err))
++	}
++	return &Output[T]{Body: Envelope[T]{Code: 200, Message: http.StatusText(200), Data: value}}, nil
++}
++func (e *registryEntry) worker(name string) (*management.Client, error) {
++	if err := e.ready(); err != nil {
++		return nil, err
++	}
++	c, err := e.registry.WorkerClient(name)
++	if err != nil {
++		return nil, rejected(404)
++	}
++	return c, nil
++}
++func (e *registryEntry) rclone(name string) (*controlplane.Rclone, error) {
++	if err := e.ready(); err != nil {
++		return nil, err
++	}
++	c, err := e.registry.RcloneClient(name)
++	if err != nil {
++		return nil, rejected(404)
++	}
++	return c, nil
++}
++func (e *registryEntry) Targets(ctx context.Context, in *EmptyInput) (*Output[[]controlplane.Summary], error) {
++	if err := e.ready(); err != nil {
++		return nil, err
++	}
++	return output(e.registry.Summaries(), nil)
++}
++func (e *registryEntry) Manifest(ctx context.Context, in *TargetInput) (*Output[worker.Manifest], error) {
++	c, err := e.worker(in.Target)
++	if err != nil {
++		return nil, err
++	}
++	return output(c.Manifest(ctx))
++}
++func (e *registryEntry) Observed(ctx context.Context, in *TargetInput) (*Output[[]worker.Observed], error) {
++	c, err := e.worker(in.Target)
++	if err != nil {
++		return nil, err
++	}
++	return output(c.Observed(ctx))
++}
++func (e *registryEntry) Replace(ctx context.Context, in *ReplaceInput) (*Output[worker.Version], error) {
++	c, err := e.worker(in.Target)
++	if err != nil {
++		return nil, err
++	}
++	if in.Body.Selection.Name != in.Name {
++		return nil, rejected(400)
++	}
++	return output(c.Replace(ctx, in.Name, in.Body.Expected, in.Body.Selection))
++}
++func (e *registryEntry) Descriptor(ctx context.Context, in *DescriptorInput) (*api.RawJSON, error) {
++	c, err := e.worker(in.Target)
++	if err != nil {
++		return nil, err
++	}
++	r, err := c.Descriptor(ctx, in.Digest)
++	if err != nil {
++		return nil, rejected(errorStatus(err))
++	}
++	return &api.RawJSON{Body: r.Bytes, ContentType: "application/json", ETag: `"` + r.Digest + `"`}, nil
++}
++func (e *registryEntry) Version(ctx context.Context, in *TargetInput) (*Output[controlplane.RcloneVersion], error) {
++	c, err := e.rclone(in.Target)
++	if err != nil {
++		return nil, err
++	}
++	return output(c.Version(ctx))
++}
++func (e *registryEntry) Stats(ctx context.Context, in *TargetInput) (*Output[controlplane.RcloneStats], error) {
++	c, err := e.rclone(in.Target)
++	if err != nil {
++		return nil, err
++	}
++	return output(c.Stats(ctx))
++}
++func (e *registryEntry) Jobs(ctx context.Context, in *TargetInput) (*Output[controlplane.RcloneJobs], error) {
++	c, err := e.rclone(in.Target)
++	if err != nil {
++		return nil, err
++	}
++	return output(c.Jobs(ctx))
++}
++func (e *registryEntry) Job(ctx context.Context, in *JobInput) (*Output[controlplane.RcloneJob], error) {
++	c, err := e.rclone(in.Target)
++	if err != nil {
++		return nil, err
++	}
++	return output(c.Job(ctx, in.ID))
++}
++func (e *registryEntry) Stop(ctx context.Context, in *StopInput) (*Output[struct{}], error) {
++	c, err := e.rclone(in.Target)
++	if err != nil {
++		return nil, err
++	}
++	return output(struct{}{}, c.Stop(ctx, in.ID, in.Body.ExecuteID))
++}
++func (e *registryEntry) Probe(ctx context.Context, in *TargetInput) (*Output[controlplane.OriginStatus], error) {
++	if err := e.ready(); err != nil {
++		return nil, err
++	}
++	v, err := e.registry.Probe(ctx, in.Target)
++	if errors.Is(err, controlplane.ErrInvalid) {
++		return nil, rejected(404)
++	}
++	return output(v, err)
++}
++
++// APIConfig describes the owned HTTP document without transport policy.
++func APIConfig() api.Config {
++	return api.Config{Title: "OpenList control management", Version: "1.0.0"}
++}
++
++// ErrorPolicy preserves the public envelope for typed and parser rejections.
++// Host assembly supplies it to the separate Gin publication facet.
++func ErrorPolicy() api.ErrorPolicy {
++	return api.JSONErrors([]int{400, 404, 409, 502, 503}, func(code int) APIError {
++		return APIError{Code: code, Message: http.StatusText(code)}
++	}, func(code int) int {
++		if code == http.StatusRequestEntityTooLarge || code == http.StatusUnprocessableEntity {
++			return http.StatusBadRequest
++		}
++		return code
++	})
++}
++
++// RegisterRoutes contributes the named entry methods to the schema effect tool.
++// The same typed contributions generate schemas and drive HTTP publication.
++func (e *registryEntry) RegisterRoutes(table api.RouteTable) error {
++	if err := api.Register[EmptyInput, Output[[]controlplane.Summary]](table, operation("control-targets", "GET", "/targets"), e.Targets); err != nil {
++		return err
++	}
++	if err := api.Register[TargetInput, Output[worker.Manifest]](table, operation("control-worker-manifest", "GET", "/targets/{target}/manifest"), e.Manifest); err != nil {
++		return err
++	}
++	if err := api.Register[TargetInput, Output[[]worker.Observed]](table, operation("control-worker-observed", "GET", "/targets/{target}/observed"), e.Observed); err != nil {
++		return err
++	}
++	if err := api.Register[ReplaceInput, Output[worker.Version]](table, operation("control-worker-replace", "POST", "/targets/{target}/clients/{name}"), e.Replace); err != nil {
++		return err
++	}
++	if err := api.Register[TargetInput, Output[controlplane.RcloneVersion]](table, operation("control-rclone-version", "GET", "/targets/{target}/version"), e.Version); err != nil {
++		return err
++	}
++	if err := api.Register[TargetInput, Output[controlplane.RcloneStats]](table, operation("control-rclone-stats", "GET", "/targets/{target}/stats"), e.Stats); err != nil {
++		return err
++	}
++	if err := api.Register[TargetInput, Output[controlplane.RcloneJobs]](table, operation("control-rclone-jobs", "GET", "/targets/{target}/jobs"), e.Jobs); err != nil {
++		return err
++	}
++	if err := api.Register[JobInput, Output[controlplane.RcloneJob]](table, operation("control-rclone-job", "GET", "/targets/{target}/jobs/{id}"), e.Job); err != nil {
++		return err
++	}
++	if err := api.Register[StopInput, Output[struct{}]](table, operation("control-rclone-stop", "POST", "/targets/{target}/jobs/{id}/stop"), e.Stop); err != nil {
++		return err
++	}
++	if err := api.Register[TargetInput, Output[controlplane.OriginStatus]](table, operation("control-origin-probe", "GET", "/targets/{target}/probe"), e.Probe); err != nil {
++		return err
++	}
++	return api.RegisterRawJSON[DescriptorInput, descriptor.Descriptor](table, operation("control-worker-descriptor", "GET", "/targets/{target}/descriptors/{digest}"), e.Descriptor)
++}
++func operation(id, method, path string) api.Operation {
++	return api.Operation{ID: id, Method: method, Path: path, MaxBodyBytes: controlplane.MaxMetadata, RejectUnknownQueryParameters: true}
++}

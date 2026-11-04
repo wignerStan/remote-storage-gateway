@@ -1,0 +1,80 @@
+diff --git a/clientplugin/s3_test.go b/clientplugin/s3_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d1b61fbe67f92772c748b150b1c1cf9472ea5130
+--- /dev/null
++++ b/clientplugin/s3_test.go
+@@ -0,0 +1,74 @@
++package clientplugin
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++)
++
++func TestS3PrefixRangeAndImplicitDirectory(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") {
++			t.Error("request was not signed")
++		}
++		switch {
++		case r.Method == "HEAD" && r.URL.Path == "/bucket":
++			w.WriteHeader(200)
++		case r.Method == "HEAD" && r.URL.Path == "/bucket/prefix/item":
++			w.Header().Set("Content-Length", "6")
++			w.Header().Set("Etag", `"test"`)
++			w.WriteHeader(200)
++		case r.Method == "GET" && r.URL.Path == "/bucket/prefix/item":
++			if r.Header.Get("Range") != "bytes=1-3" {
++				t.Errorf("range=%s", r.Header.Get("Range"))
++			}
++			w.Header().Set("Content-Range", "bytes 1-3/6")
++			w.Header().Set("Content-Length", "3")
++			w.WriteHeader(206)
++			io.WriteString(w, "bcd")
++		case r.Method == "HEAD" && r.URL.Path == "/bucket/prefix/dir":
++			w.WriteHeader(404)
++		case r.Method == "GET" && r.URL.Path == "/bucket":
++			if r.URL.Query().Get("prefix") != "prefix/dir/" {
++				t.Error("prefix escaped scope")
++			}
++			io.WriteString(w, `<ListBucketResult><Contents><Key>prefix/dir/child</Key><Size>1</Size></Contents></ListBucketResult>`)
++		default:
++			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
++			w.WriteHeader(500)
++		}
++	}))
++	defer server.Close()
++	c, e := newS3(s3Config{Endpoint: server.URL, Bucket: "bucket", Region: "us-east-1", Root: "prefix", ForcePathStyle: true}, "test-access", "test-secret", "")
++	if e != nil {
++		t.Fatal(e)
++	}
++	defer c.Close(context.Background())
++	if e = c.validate(context.Background()); e != nil {
++		t.Fatal(e)
++	}
++	plan, e := c.Open(context.Background(), port.OpenRequest{Path: "/item", Offset: 1, Length: 3})
++	if e != nil {
++		t.Fatal(e)
++	}
++	b, e := io.ReadAll(plan.Body)
++	plan.Body.Close()
++	if e != nil || string(b) != "bcd" {
++		t.Fatal(string(b), e)
++	}
++	info, e := c.Stat(context.Background(), port.ObjectRef{Path: "/dir"})
++	if e != nil || !info.IsDir {
++		t.Fatalf("directory %+v %v", info, e)
++	}
++	if k, _ := c.key("/.kopiaignore"); k != "prefix/.kopiaignore" {
++		t.Fatal("hidden object name changed", k)
++	}
++	if e = c.Delete(context.Background(), port.ObjectRef{Path: "/dir"}); e != port.ErrUnsupported {
++		t.Fatal("directory delete silently succeeded", e)
++	}
++}

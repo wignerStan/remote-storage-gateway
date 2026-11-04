@@ -1,0 +1,13 @@
+diff --git a/internal/op/managed.go b/internal/op/managed.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c05e634c6c8066c744f8888f732e443c43fbb2f1
+--- /dev/null
++++ b/internal/op/managed.go
+@@ -0,0 +1,7 @@
++package op
++
++import "errors"
++
++// ErrManagedGateway prevents the legacy provider runtime from mutating persisted
++// storage state or constructing authenticated providers in metadata-only mode.
++var ErrManagedGateway = errors.New("legacy storage runtime disabled in managed gateway mode")

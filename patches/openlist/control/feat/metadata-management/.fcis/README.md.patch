@@ -1,0 +1,43 @@
+diff --git a/.fcis/README.md b/.fcis/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..8347f11226dbaadd53fb8665589616eaf4f0d22d
+--- /dev/null
++++ b/.fcis/README.md
+@@ -0,0 +1,37 @@
++This register covers the management SDK, HTTP entry and selected native client
++publication/runtime, not the inherited OpenList application as a whole.
++
++The HTTP entry owns its public request/response DTOs, named ManagementEntry
++methods, typed route contributions and product-specific JSON error policy.
++It contributes those bound methods to the generic `code/schema/api` schema
++effect tool. That application-support tool admits and composes the typed
++operations, rejects duplicates, and derives and publishes their OpenAPI schemas.
++The same admitted operations drive HTTP binding; there is no separate route or
++schema inventory.
++
++Server assembly composes the entry contributions and binds the result to the
++existing Gin administrator route group. The generic schema tool keeps its Huma
++implementation private; the entry exposes no Huma or Gin interface. HTTP runtime
++ownership remains independent of schema composition, and Infra `httpserver`
++contains no Huma binding. AuthAdmin guards both execution and generated metadata.
++There is no competing provider configuration schema.
++
++The target registry remains the SDK handler-adapter owner for selected
++Worker/rclone/S3/WebDAV administrative operations and secret resolution. Raw
++approved Worker descriptors remain byte-exact. Object bodies, arbitrary RC
++methods, inline credentials and request-selected origins are excluded.
++
++Existing route, administrator-boundary, schema determinism, response privacy,
++strict decoding and size-limit tests exercise these responsibilities. The
++register records source ownership; neither declaration shape nor a historical
++checker run establishes whole-repository architecture acceptance. Incomplete
++framework recognition or acquired-source evidence must be reported directly,
++without changing a real entry's role to obtain a passing graph.
++
++Native publication belongs to `pluginentry`: it derives the concrete plugin's
++exported configuration models through the schema effect tool, assembles and
++admits the Worker-owned descriptor, and injects an immutable copy into the
++`clientplugin` runtime handler. The handler performs no schema generation and
++imports no schema application-support package. Its descriptor results are deep
++copies. The tiny native command assembles that entry with the shared first-party
++ABI provider; it does not duplicate the C bridge.

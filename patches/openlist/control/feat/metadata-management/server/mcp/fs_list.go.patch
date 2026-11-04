@@ -1,0 +1,12 @@
+diff --git a/server/mcp/fs_list.go b/server/mcp/fs_list.go
+index ac28cf756125603c038eed1720c25da22ee911b4..eef0dcaf52abe3d6a1f699a953da18a1842759fa 100644
+--- a/server/mcp/fs_list.go
++++ b/server/mcp/fs_list.go
+@@ -141,6 +141,7 @@ func toObjResp(objs []model.Obj, parent string, encrypt bool) []handles.ObjResp
+ 		thumb, _ := model.GetThumb(obj)
+ 		mountDetails, _ := model.GetStorageDetails(obj)
+ 		resp = append(resp, handles.ObjResp{
++			ID:           obj.GetID(),
+ 			Name:         obj.GetName(),
+ 			Size:         obj.GetSize(),
+ 			IsDir:        obj.IsDir(),

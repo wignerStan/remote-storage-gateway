@@ -1,0 +1,19 @@
+{
+  "schema_version": "git-source-relationship/v5",
+  "kind": "upstream_product_build",
+  "path": "build/openlist",
+  "owner": "openlistteam",
+  "integration": "build",
+  "upstream": {
+    "url": "https://github.com/OpenListTeam/OpenList.git",
+    "commit": "e72822f5390f4272c9fe9da8cabba3c1a270182f"
+  },
+  "dependency_manifest": null,
+  "patch_bundle": "patches/openlist",
+  "public_api": "Worker client/v1 native plugin, shared S3 initializer, context-aware WebDAV kernel, managed metadata-only OpenList control-plane HTTP API",
+  "result_tree": "a0aeb5f267daacdf9498bf7c2d5637805bc59124",
+  "build_path": "build/openlist",
+  "licenses": [
+    "build/openlist/LICENSE"
+  ]
+}

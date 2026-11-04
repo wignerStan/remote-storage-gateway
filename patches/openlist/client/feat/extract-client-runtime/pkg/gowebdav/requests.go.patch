@@ -1,0 +1,24 @@
+diff --git a/pkg/gowebdav/requests.go b/pkg/gowebdav/requests.go
+index d6237767d38160f8bab3dbcb6963473e17316817..1566ecd2e4ae6c1c4abbf3d05667aa8c563be6f2 100644
+--- a/pkg/gowebdav/requests.go
++++ b/pkg/gowebdav/requests.go
+@@ -32,9 +32,9 @@ func (c *Client) req(method, path string, body io.Reader, intercept func(*http.R
+ 			retryBuf = buff
+ 			body = io.TeeReader(body, buff)
+ 		}
+-		r, err = http.NewRequest(method, PathEscape(Join(c.root, path)), body)
++		r, err = http.NewRequestWithContext(c.ctx, method, PathEscape(Join(c.root, path)), body)
+ 	} else {
+-		r, err = http.NewRequest(method, PathEscape(Join(c.root, path)), nil)
++		r, err = http.NewRequestWithContext(c.ctx, method, PathEscape(Join(c.root, path)), nil)
+ 	}
+ 
+ 	if err != nil {
+@@ -86,6 +86,7 @@ func (c *Client) req(method, path string, body io.Reader, intercept func(*http.R
+ 		// retryBuf will be nil if body was nil initially so no check
+ 		// for body == nil is required here.
+ 		if canRetry {
++			rs.Body.Close()
+ 			return c.req(method, path, retryBuf, intercept)
+ 		}
+ 	} else if rs.StatusCode == 401 {

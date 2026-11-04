@@ -1,0 +1,15 @@
+diff --git a/internal/bootstrap/storage.go b/internal/bootstrap/storage.go
+index 1389095bf55f31f2cabb85580f240959d1db2e53..48614d6efd9fabf5e60b8443e25cf07fc7df45d1 100644
+--- a/internal/bootstrap/storage.go
++++ b/internal/bootstrap/storage.go
+@@ -11,6 +11,10 @@ import (
+ )
+ 
+ func LoadStorages() {
++	if conf.GatewayManaged() {
++		conf.SendStoragesLoadedSignal()
++		return
++	}
+ 	storages, err := db.GetEnabledStorages()
+ 	if err != nil {
+ 		utils.Log.Fatalf("failed get enabled storages: %+v", err)

@@ -1,0 +1,87 @@
+diff --git a/.fcis/role_register.json b/.fcis/role_register.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..16d7f1fa447069b0df506b3107cfca411baa055b
+--- /dev/null
++++ b/.fcis/role_register.json
+@@ -0,0 +1,81 @@
++{
++  "schema_version": 10,
++  "units": [
++    {
++      "path": "internal/controlplane",
++      "names": [
++        "go_openlist_management_clients"
++      ],
++      "role": "effect_tool",
++      "role_stratum": "handler_adapter",
++      "effect_family": "storage",
++      "effect_operation": {
++        "name": "administrative_origin_worker_management",
++        "mechanisms": [
++          "network",
++          "file",
++          "config_source"
++        ],
++        "controls": [
++          "cancellation"
++        ]
++      }
++    },
++    {
++      "path": "internal/controlplane/httpapi",
++      "names": [
++        "go_openlist_management_httpapi"
++      ],
++      "role": "front_door",
++      "role_stratum": "entry",
++      "entry_type": [
++        "server"
++      ]
++    },
++    {
++      "path": "clientplugin",
++      "names": [
++        "go_openlist_storage_client_runtime"
++      ],
++      "role": "effect_tool",
++      "role_stratum": "handler_adapter",
++      "effect_family": "storage",
++      "effect_operation": {
++        "name": "s3_webdav_provider_io",
++        "mechanisms": [
++          "network",
++          "open_input"
++        ],
++        "controls": [
++          "cancellation",
++          "backpressure",
++          "lifecycle"
++        ]
++      }
++    },
++    {
++      "path": "pluginentry",
++      "names": [
++        "go_openlist_plugin_publication_entry"
++      ],
++      "role": "front_door",
++      "role_stratum": "entry",
++      "entry_type": [
++        "direct"
++      ],
++      "route_axes": []
++    },
++    {
++      "path": "cmd/openlist-client-plugin",
++      "names": [
++        "go_openlist_plugin_native_assembly"
++      ],
++      "role": "front_door",
++      "role_stratum": "assembly",
++      "entry_type": [
++        "direct"
++      ],
++      "subsystem": "openlist_native_plugin"
++    }
++  ]
++}

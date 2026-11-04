@@ -1,0 +1,209 @@
+diff --git a/clientplugin/factory.go b/clientplugin/factory.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b19b12a18ec60abed169144f0d90649751adaf35
+--- /dev/null
++++ b/clientplugin/factory.go
+@@ -0,0 +1,203 @@
++// Package clientplugin publishes OpenList-derived providers against the Worker contract.
++package clientplugin
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"net/url"
++	"path"
++	"strings"
++	"sync"
++
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
++)
++
++const PluginID = "client.openlist"
++const Version = "0.1.0-alpha.2"
++
++// Factory executes provider operations with a frozen, entry-published descriptor.
++type Factory struct{ published descriptor.Descriptor }
++
++func NewFactory(published descriptor.Descriptor) *Factory {
++	return &Factory{published: cloneDescriptor(published)}
++}
++
++func (f *Factory) Descriptor() descriptor.Descriptor { return cloneDescriptor(f.published) }
++
++func cloneDescriptor(input descriptor.Descriptor) descriptor.Descriptor {
++	out := input
++	out.Implementations = append([]descriptor.Implementation(nil), input.Implementations...)
++	for i := range out.Implementations {
++		out.Implementations[i].ConfigSchema = append([]byte(nil), input.Implementations[i].ConfigSchema...)
++		out.Implementations[i].Capabilities = append([]string(nil), input.Implementations[i].Capabilities...)
++	}
++	return out
++}
++
++func endpoint(raw string) error {
++	u, e := url.Parse(raw)
++	if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
++		return port.ErrInvalid
++	}
++	return nil
++}
++func secret(ctx context.Context, r port.SecretResolver, name string, required bool) (string, error) {
++	if r == nil {
++		if required {
++			return "", port.ErrInvalid
++		}
++		return "", nil
++	}
++	s, e := r.Resolve(ctx, name)
++	if e != nil {
++		if required || !errors.Is(e, port.ErrNotFound) {
++			return "", port.ErrInvalid
++		}
++		return "", nil
++	}
++	if s == nil {
++		return "", port.ErrInvalid
++	}
++	defer s.Close()
++	b := s.Bytes()
++	if len(b) > 65536 || required && len(b) == 0 {
++		return "", port.ErrInvalid
++	}
++	return string(b), nil
++}
++func (f *Factory) Prepare(ctx context.Context, c port.PluginConfig) (port.Candidate, error) {
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	if err := admission.Validate(f.Descriptor()); err != nil {
++		return nil, port.ErrInvalid
++	}
++	var cli port.Client
++	var err error
++	switch c.ImplementationID {
++	case "s3":
++		var cfg s3Config
++		if admission.StrictJSON(c.Public, &cfg) != nil || endpoint(cfg.Endpoint) != nil || cfg.Bucket == "" || cfg.Region == "" {
++			return nil, port.ErrInvalid
++		}
++		if _, err = clean(cfg.Root); err != nil {
++			return nil, err
++		}
++		var access, key, token string
++		access, err = secret(ctx, c.Secrets, "access_key_id", true)
++		if err != nil {
++			return nil, err
++		}
++		key, err = secret(ctx, c.Secrets, "secret_access_key", true)
++		if err != nil {
++			return nil, err
++		}
++		token, err = secret(ctx, c.Secrets, "session_token", false)
++		if err != nil {
++			return nil, err
++		}
++		cli, err = newS3(cfg, access, key, token)
++	case "webdav":
++		var cfg davConfig
++		if admission.StrictJSON(c.Public, &cfg) != nil || endpoint(cfg.Address) != nil {
++			return nil, port.ErrInvalid
++		}
++		if _, err = clean(cfg.Root); err != nil {
++			return nil, err
++		}
++		var password string
++		password, err = secret(ctx, c.Secrets, "password", false)
++		if err != nil {
++			return nil, err
++		}
++		cli = newWebDAV(cfg, password)
++	default:
++		return nil, port.ErrUnsupported
++	}
++	if err != nil {
++		return nil, err
++	}
++	return &candidate{client: cli}, nil
++}
++
++type candidate struct {
++	mu                            sync.Mutex
++	client                        port.Client
++	validated, published, aborted bool
++}
++
++func (c *candidate) Validate(ctx context.Context) error {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.aborted || c.published {
++		return port.ErrInvalid
++	}
++	var e error
++	if v, ok := c.client.(interface{ validate(context.Context) error }); ok {
++		e = v.validate(ctx)
++	} else {
++		_, e = c.client.Stat(ctx, port.ObjectRef{Path: "/"})
++	}
++	if e == nil {
++		c.validated = true
++	}
++	return e
++}
++func (c *candidate) Publish() (port.Client, error) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if !c.validated || c.published || c.aborted {
++		return nil, port.ErrInvalid
++	}
++	c.published = true
++	return c.client, nil
++}
++func (c *candidate) Abort(ctx context.Context) error {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.aborted {
++		return nil
++	}
++	if c.published {
++		return port.ErrInvalid
++	}
++	c.aborted = true
++	return c.client.Close(ctx)
++}
++func clean(p string) (string, error) {
++	if strings.ContainsAny(p, "\\\x00") {
++		return "", port.ErrInvalid
++	}
++	for _, x := range strings.Split(p, "/") {
++		if x == ".." || x == "." {
++			return "", port.ErrInvalid
++		}
++	}
++	return strings.Trim(path.Clean("/"+p), "/"), nil
++}
++func objectPath(p string) string { return "/" + strings.TrimPrefix(p, "/") }
++func checkedRange(q port.OpenRequest, size int64) (int64, error) {
++	if q.Offset < 0 || q.Length < -1 || q.Offset > size || q.Length > 0 && q.Offset > int64(^uint64(0)>>1)-q.Length {
++		return 0, port.ErrInvalid
++	}
++	n := size - q.Offset
++	if q.Length >= 0 && q.Length < n {
++		n = q.Length
++	}
++	return n, nil
++}
++func providerError(err error) error {
++	if err == nil {
++		return nil
++	}
++	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
++		return err
++	}
++	return port.ErrProvider
++}
++func closeTransport(t *http.Transport) { t.CloseIdleConnections() }
++
++var _ port.Factory = (*Factory)(nil)

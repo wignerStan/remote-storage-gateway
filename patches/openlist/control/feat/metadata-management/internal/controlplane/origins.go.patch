@@ -1,0 +1,113 @@
+diff --git a/internal/controlplane/origins.go b/internal/controlplane/origins.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f6d4d6f542d0942803f44342283e5b2a794c19e
+--- /dev/null
++++ b/internal/controlplane/origins.go
+@@ -0,0 +1,107 @@
++package controlplane
++
++import (
++	"context"
++	"net/http"
++	"path"
++	"strings"
++	"time"
++
++	"github.com/OpenListTeam/OpenList/v4/pkg/gowebdav"
++	"github.com/aws/aws-sdk-go/aws"
++	"github.com/aws/aws-sdk-go/aws/credentials"
++	"github.com/aws/aws-sdk-go/aws/session"
++	"github.com/aws/aws-sdk-go/service/s3"
++)
++
++// OriginStatus is administrative availability metadata for the initially
++// selected S3 and WebDAV origins, not the legacy OpenList driver inventory or
++// a replacement for Worker-owned plugin capabilities. Probe constructs SDK
++// clients only for an explicit administrator request; inventory stays passive.
++type OriginStatus struct {
++	Kind            string    `json:"kind"`
++	Available       bool      `json:"available"`
++	Bucket          string    `json:"bucket,omitempty"`
++	Region          string    `json:"region,omitempty"`
++	RootIsDirectory bool      `json:"root_is_directory,omitempty"`
++	RootModified    time.Time `json:"root_modified,omitempty"`
++	Allow           []string  `json:"allow,omitempty"`
++}
++
++func (r *Registry) Probe(ctx context.Context, name string) (OriginStatus, error) {
++	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
++	defer cancel()
++	target := r.targets[name]
++	if target == nil {
++		return OriginStatus{}, ErrInvalid
++	}
++	cfg := target.config
++	v := OriginStatus{Kind: cfg.Kind}
++	switch cfg.Kind {
++	case "origin-s3":
++		access, e := secret(ctx, r.secrets, cfg.AccessKeySecretRef)
++		if e != nil {
++			return v, e
++		}
++		key, e := secret(ctx, r.secrets, cfg.SecretKeySecretRef)
++		if e != nil {
++			return v, e
++		}
++		token, e := secret(ctx, r.secrets, cfg.SessionTokenSecretRef)
++		if e != nil {
++			return v, e
++		}
++		if access == "" || key == "" {
++			return v, ErrUpstream
++		}
++		sess, e := session.NewSession(aws.NewConfig().WithEndpoint(cfg.Endpoint).WithRegion(cfg.Region).WithS3ForcePathStyle(cfg.ForcePathStyle).WithCredentials(credentials.NewStaticCredentials(access, key, token)).WithHTTPClient(target.http).WithMaxRetries(0))
++		if e != nil {
++			return v, ErrUpstream
++		}
++		if _, e = s3.New(sess).HeadBucketWithContext(ctx, &s3.HeadBucketInput{Bucket: &cfg.Bucket}); e != nil {
++			return v, ErrUpstream
++		}
++		v.Bucket = cfg.Bucket
++		v.Region = cfg.Region
++		v.Available = true
++	case "origin-webdav":
++		root := path.Clean("/" + strings.TrimPrefix(cfg.Root, "/"))
++		u := strings.TrimRight(cfg.Endpoint, "/") + root
++		q, e := http.NewRequestWithContext(ctx, http.MethodOptions, u, nil)
++		if e != nil {
++			return v, ErrInvalid
++		}
++		response, e := target.http.Do(q)
++		if e != nil {
++			return v, ErrUpstream
++		}
++		response.Body.Close()
++		if response.StatusCode < 200 || response.StatusCode >= 300 {
++			return v, ErrUpstream
++		}
++		if len(response.Header.Get("Allow")) > 4096 {
++			return v, ErrUpstream
++		}
++		// Only recognized metadata verbs are projected, never arbitrary headers.
++		for _, method := range strings.Split(response.Header.Get("Allow"), ",") {
++			method = strings.TrimSpace(method)
++			switch method {
++			case "OPTIONS", "PROPFIND", "GET", "HEAD", "PUT", "DELETE", "MKCOL", "MOVE", "COPY", "LOCK", "UNLOCK":
++				v.Allow = append(v.Allow, method)
++			}
++		}
++		d := gowebdav.NewClient(cfg.Endpoint, "", "")
++		d.SetTransport(target.http.Transport)
++		d.SetInterceptor(func(_ string, q *http.Request) { *q = *q.WithContext(ctx) })
++		info, e := d.Stat(root)
++		if e != nil {
++			return v, ErrUpstream
++		}
++		v.RootIsDirectory = info.IsDir()
++		v.RootModified = info.ModTime()
++		v.Available = true
++	default:
++		return v, ErrInvalid
++	}
++	return v, nil
++}
