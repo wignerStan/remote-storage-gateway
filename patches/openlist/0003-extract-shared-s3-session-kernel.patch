@@ -1,0 +1,96 @@
+diff --git a/clientplugin/s3.go b/clientplugin/s3.go
+index b59f54f51a522d5138b56716e2c3eb40f985f2f4..4048f5a95b8effdfeb1be114d06e7535bd092d3e 100644
+--- a/clientplugin/s3.go
++++ b/clientplugin/s3.go
+@@ -9,9 +9,9 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"github.com/OpenListTeam/OpenList/v4/pkg/storage/s3session"
+ 	"github.com/aws/aws-sdk-go/aws"
+ 	"github.com/aws/aws-sdk-go/aws/awserr"
+-	"github.com/aws/aws-sdk-go/aws/credentials"
+ 	"github.com/aws/aws-sdk-go/aws/session"
+ 	"github.com/aws/aws-sdk-go/service/s3"
+ 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+@@ -27,8 +27,11 @@ type s3Client struct {
+ 
+ func newS3(c s3Config, access, key, token string) (*s3Client, error) {
+ 	t := http.DefaultTransport.(*http.Transport).Clone()
+-	cfg := aws.NewConfig().WithRegion(c.Region).WithEndpoint(c.Endpoint).WithS3ForcePathStyle(c.ForcePathStyle).WithCredentials(credentials.NewStaticCredentials(access, key, token)).WithHTTPClient(&http.Client{Transport: t}).WithMaxRetries(0)
+-	s, e := session.NewSession(cfg)
++	s, e := s3session.New(s3session.Config{
++		Region: c.Region, Endpoint: c.Endpoint, ForcePathStyle: c.ForcePathStyle,
++		AccessKeyID: access, SecretAccessKey: key, SessionToken: token,
++		HTTPClient: &http.Client{Transport: t}, MaxRetries: aws.Int(0),
++	})
+ 	if e != nil {
+ 		return nil, port.ErrInvalid
+ 	}
+diff --git a/drivers/s3/util.go b/drivers/s3/util.go
+index cba8698fae60fede416f7a9d4f980d070a7523f6..05d975616d7b7c723a15b963c149536078eac089 100644
+--- a/drivers/s3/util.go
++++ b/drivers/s3/util.go
+@@ -11,11 +11,10 @@ import (
+ 
+ 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+ 	"github.com/OpenListTeam/OpenList/v4/internal/op"
++	"github.com/OpenListTeam/OpenList/v4/pkg/storage/s3session"
+ 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+ 	"github.com/aws/aws-sdk-go/aws"
+-	"github.com/aws/aws-sdk-go/aws/credentials"
+ 	"github.com/aws/aws-sdk-go/aws/request"
+-	"github.com/aws/aws-sdk-go/aws/session"
+ 	"github.com/aws/aws-sdk-go/service/s3"
+ 	log "github.com/sirupsen/logrus"
+ )
+@@ -39,13 +38,10 @@ func (d *S3) initSession() error {
+ 		}
+ 		accessKeyID, secretAccessKey, sessionToken = credentialsTmp.AccessKeyId, credentialsTmp.SecretAccessKey, credentialsTmp.SessionToken
+ 	}
+-	cfg := &aws.Config{
+-		Credentials:      credentials.NewStaticCredentials(accessKeyID, secretAccessKey, sessionToken),
+-		Region:           &d.Region,
+-		Endpoint:         &d.Endpoint,
+-		S3ForcePathStyle: aws.Bool(d.ForcePathStyle),
+-	}
+-	d.Session, err = session.NewSession(cfg)
++	d.Session, err = s3session.New(s3session.Config{
++		AccessKeyID: accessKeyID, SecretAccessKey: secretAccessKey, SessionToken: sessionToken,
++		Region: d.Region, Endpoint: d.Endpoint, ForcePathStyle: d.ForcePathStyle,
++	})
+ 	return err
+ }
+ 
+diff --git a/pkg/storage/s3session/session.go b/pkg/storage/s3session/session.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c314db9d496f9cf1084ea7bd5bfe7c074a5b48cf
+--- /dev/null
++++ b/pkg/storage/s3session/session.go
+@@ -0,0 +1,26 @@
++// Package s3session shares the initializer extracted from drivers/s3.
++package s3session
++
++import (
++	"github.com/aws/aws-sdk-go/aws"
++	"github.com/aws/aws-sdk-go/aws/credentials"
++	"github.com/aws/aws-sdk-go/aws/session"
++	"net/http"
++)
++
++type Config struct {
++	Endpoint, Region, AccessKeyID, SecretAccessKey, SessionToken string
++	ForcePathStyle                                               bool
++	HTTPClient                                                   *http.Client
++	MaxRetries                                                   *int
++}
++
++func New(config Config) (*session.Session, error) {
++	cfg := &aws.Config{
++		Credentials: credentials.NewStaticCredentials(config.AccessKeyID, config.SecretAccessKey, config.SessionToken),
++		Region:      &config.Region, Endpoint: &config.Endpoint,
++		S3ForcePathStyle: aws.Bool(config.ForcePathStyle),
++		HTTPClient:       config.HTTPClient, MaxRetries: config.MaxRetries,
++	}
++	return session.NewSession(cfg)
++}

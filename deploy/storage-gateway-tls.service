@@ -1,0 +1,15 @@
+[Unit]
+Description=Renew data-plane TLS and publish private gateway configuration
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/storage-gateway-admin tls-sync --domain incus.tail5ced8c.ts.net
+TimeoutStartSec=10min
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/etc/storage-gateway /var/lib/storage-gateway
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
