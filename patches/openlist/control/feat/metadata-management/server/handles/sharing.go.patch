@@ -1,0 +1,20 @@
+diff --git a/server/handles/sharing.go b/server/handles/sharing.go
+index af96b25ab4c8b5efc8bd58620b402d93d80919f9..ba67e699e6d5a226c5ef4c19f09ee5c96d9856cd 100644
+--- a/server/handles/sharing.go
++++ b/server/handles/sharing.go
+@@ -46,6 +46,7 @@ func SharingGet(c *gin.Context, req *FsGetReq) {
+ 	thumb, _ := model.GetThumb(obj)
+ 	common.SuccessResp(c, FsGetResp{
+ 		ObjResp: ObjResp{
++			ID:          obj.GetID(),
+ 			Name:        obj.GetName(),
+ 			Size:        obj.GetSize(),
+ 			IsDir:       obj.IsDir(),
+@@ -84,6 +85,7 @@ func SharingList(c *gin.Context, req *ListReq) {
+ 		Content: utils.MustSliceConvert(objs, func(obj model.Obj) ObjResp {
+ 			thumb, _ := model.GetThumb(obj)
+ 			return ObjResp{
++				ID:          obj.GetID(),
+ 				Name:        obj.GetName(),
+ 				Size:        obj.GetSize(),
+ 				IsDir:       obj.IsDir(),

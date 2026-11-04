@@ -1,0 +1,72 @@
+diff --git a/clientplugin/stream.go b/clientplugin/stream.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae6b918f98276620eab50129b240f1d814c6a36c
+--- /dev/null
++++ b/clientplugin/stream.go
+@@ -0,0 +1,66 @@
++package clientplugin
++
++import (
++	"errors"
++	"io"
++	"sync/atomic"
++
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++)
++
++// A mismatch terminates the upload reader before a multipart completion request.
++// No request body is cached or replayed to repair a mismatch.
++type sizedReader struct {
++	body      io.Reader
++	remaining int64
++	ended     bool
++}
++
++func checkedBody(body io.Reader, size int64) io.Reader {
++	if size < 0 {
++		return body
++	}
++	return &sizedReader{body: body, remaining: size}
++}
++func (r *sizedReader) Read(p []byte) (int, error) {
++	if len(p) == 0 {
++		return 0, nil
++	}
++	if r.ended {
++		return 0, io.EOF
++	}
++	if r.remaining == 0 {
++		var b [1]byte
++		n, e := r.body.Read(b[:])
++		if n > 0 {
++			return 0, port.ErrInvalid
++		}
++		if e == io.EOF {
++			r.ended = true
++		}
++		return 0, e
++	}
++	if int64(len(p)) > r.remaining {
++		p = p[:r.remaining]
++	}
++	n, e := r.body.Read(p)
++	r.remaining -= int64(n)
++	if errors.Is(e, io.EOF) {
++		if r.remaining != 0 {
++			return n, io.ErrUnexpectedEOF
++		}
++		r.ended = true
++	}
++	return n, e
++}
++
++type uploadReader struct {
++	reader io.Reader
++	bytes  atomic.Int64
++}
++
++func (r *uploadReader) Read(p []byte) (int, error) {
++	n, e := r.reader.Read(p)
++	r.bytes.Add(int64(n))
++	return n, e
++}

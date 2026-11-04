@@ -1,0 +1,204 @@
+diff --git a/clientplugin/s3.go b/clientplugin/s3.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4048f5a95b8effdfeb1be114d06e7535bd092d3e
+--- /dev/null
++++ b/clientplugin/s3.go
+@@ -0,0 +1,198 @@
++package clientplugin
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"net/http"
++	"path"
++	"strings"
++	"time"
++
++	"github.com/OpenListTeam/OpenList/v4/pkg/storage/s3session"
++	"github.com/aws/aws-sdk-go/aws"
++	"github.com/aws/aws-sdk-go/aws/awserr"
++	"github.com/aws/aws-sdk-go/aws/session"
++	"github.com/aws/aws-sdk-go/service/s3"
++	"github.com/aws/aws-sdk-go/service/s3/s3manager"
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++)
++
++type s3Client struct {
++	api          *s3.S3
++	session      *session.Session
++	bucket, root string
++	transport    *http.Transport
++}
++
++func newS3(c s3Config, access, key, token string) (*s3Client, error) {
++	t := http.DefaultTransport.(*http.Transport).Clone()
++	s, e := s3session.New(s3session.Config{
++		Region: c.Region, Endpoint: c.Endpoint, ForcePathStyle: c.ForcePathStyle,
++		AccessKeyID: access, SecretAccessKey: key, SessionToken: token,
++		HTTPClient: &http.Client{Transport: t}, MaxRetries: aws.Int(0),
++	})
++	if e != nil {
++		return nil, port.ErrInvalid
++	}
++	root, _ := clean(c.Root)
++	return &s3Client{s3.New(s), s, c.Bucket, root, t}, nil
++}
++func (d *s3Client) key(p string) (string, error) {
++	p, e := clean(p)
++	if e != nil {
++		return "", e
++	}
++	k := path.Join(d.root, p)
++	if k == "." {
++		k = ""
++	}
++	return k, nil
++}
++func (d *s3Client) validate(ctx context.Context) error {
++	_, e := d.api.HeadBucketWithContext(ctx, &s3.HeadBucketInput{Bucket: &d.bucket})
++	return s3Error(ctx, e)
++}
++func (d *s3Client) public(k string) string {
++	if d.root != "" {
++		k = strings.TrimPrefix(k, d.root+"/")
++	}
++	return objectPath(k)
++}
++func s3Error(ctx context.Context, e error) error {
++	if e == nil {
++		return nil
++	}
++	if ctx.Err() != nil {
++		return ctx.Err()
++	}
++	if a, ok := e.(awserr.RequestFailure); ok && a.StatusCode() == http.StatusNotFound {
++		return port.ErrNotFound
++	}
++	return providerError(e)
++}
++func (d *s3Client) Stat(ctx context.Context, q port.ObjectRef) (port.ObjectInfo, error) {
++	k, e := d.key(q.Path)
++	if e != nil {
++		return port.ObjectInfo{}, e
++	}
++	if k == "" || k == d.root && strings.Trim(q.Path, "/") == "" {
++		return port.ObjectInfo{Path: "/", IsDir: true}, nil
++	}
++	o, e := d.api.HeadObjectWithContext(ctx, &s3.HeadObjectInput{Bucket: &d.bucket, Key: &k})
++	if e != nil {
++		if s3Error(ctx, e) == port.ErrNotFound {
++			prefix := strings.TrimSuffix(k, "/") + "/"
++			listed, err := d.api.ListObjectsV2WithContext(ctx, &s3.ListObjectsV2Input{Bucket: &d.bucket, Prefix: &prefix, MaxKeys: aws.Int64(1)})
++			if err == nil && len(listed.Contents) > 0 {
++				return port.ObjectInfo{Path: objectPath(q.Path), IsDir: true}, nil
++			}
++			if err != nil {
++				return port.ObjectInfo{}, s3Error(ctx, err)
++			}
++		}
++		return port.ObjectInfo{}, s3Error(ctx, e)
++	}
++	return port.ObjectInfo{Path: objectPath(q.Path), Size: aws.Int64Value(o.ContentLength), ModTime: aws.TimeValue(o.LastModified), ETag: aws.StringValue(o.ETag), ContentType: aws.StringValue(o.ContentType)}, nil
++}
++func (d *s3Client) List(ctx context.Context, q port.ListRequest) (port.ListResult, error) {
++	if q.Limit < 0 || q.Limit > 1000 {
++		return port.ListResult{}, port.ErrInvalid
++	}
++	k, e := d.key(q.Path)
++	if e != nil {
++		return port.ListResult{}, e
++	}
++	if k != "" {
++		k += "/"
++	}
++	n := q.Limit
++	if n == 0 {
++		n = 1000
++	}
++	in := &s3.ListObjectsV2Input{Bucket: &d.bucket, Prefix: &k, Delimiter: aws.String("/"), MaxKeys: aws.Int64(int64(n))}
++	if q.Cursor != "" {
++		in.ContinuationToken = &q.Cursor
++	}
++	v, e := d.api.ListObjectsV2WithContext(ctx, in)
++	if e != nil {
++		return port.ListResult{}, s3Error(ctx, e)
++	}
++	out := port.ListResult{Objects: []port.ObjectInfo{}, NextCursor: aws.StringValue(v.NextContinuationToken)}
++	for _, x := range v.CommonPrefixes {
++		out.Objects = append(out.Objects, port.ObjectInfo{Path: d.public(strings.TrimSuffix(aws.StringValue(x.Prefix), "/")), IsDir: true})
++	}
++	for _, x := range v.Contents {
++		key := aws.StringValue(x.Key)
++		if key == k {
++			continue
++		}
++		out.Objects = append(out.Objects, port.ObjectInfo{Path: d.public(key), Size: aws.Int64Value(x.Size), ModTime: aws.TimeValue(x.LastModified), ETag: aws.StringValue(x.ETag)})
++	}
++	return out, nil
++}
++func (d *s3Client) Open(ctx context.Context, q port.OpenRequest) (port.ReadPlan, error) {
++	info, e := d.Stat(ctx, port.ObjectRef{Path: q.Path})
++	if e != nil {
++		return port.ReadPlan{}, e
++	}
++	n, e := checkedRange(q, info.Size)
++	if e != nil || info.IsDir {
++		return port.ReadPlan{}, port.ErrInvalid
++	}
++	if n == 0 {
++		return port.ReadPlan{Info: info, Body: io.NopCloser(strings.NewReader(""))}, nil
++	}
++	k, _ := d.key(q.Path)
++	in := &s3.GetObjectInput{Bucket: &d.bucket, Key: &k, Range: aws.String(fmt.Sprintf("bytes=%d-%d", q.Offset, q.Offset+n-1))}
++	o, e := d.api.GetObjectWithContext(ctx, in)
++	if e != nil {
++		return port.ReadPlan{}, s3Error(ctx, e)
++	}
++	if aws.Int64Value(o.ContentLength) != n || ((q.Offset != 0 || n != info.Size) && aws.StringValue(o.ContentRange) != fmt.Sprintf("bytes %d-%d/%d", q.Offset, q.Offset+n-1, info.Size)) {
++		if o.Body != nil {
++			o.Body.Close()
++		}
++		return port.ReadPlan{}, port.ErrProvider
++	}
++	return port.ReadPlan{Info: info, Body: o.Body}, nil
++}
++func (d *s3Client) Put(ctx context.Context, q port.PutRequest) (port.PutResult, error) {
++	if q.Body == nil || q.Size < -1 || len(q.Metadata) > 0 {
++		return port.PutResult{}, port.ErrInvalid
++	}
++	k, e := d.key(q.Path)
++	if e != nil || strings.Trim(q.Path, "/") == "" {
++		return port.PutResult{}, port.ErrInvalid
++	}
++	meta := map[string]*string{}
++	for key, value := range q.Metadata {
++		v := value
++		meta[key] = &v
++	}
++	body := &uploadReader{reader: checkedBody(q.Body, q.Size)}
++	u := s3manager.NewUploader(d.session, func(u *s3manager.Uploader) { u.Concurrency = 1; u.PartSize = 5 << 20 })
++	_, e = u.UploadWithContext(ctx, &s3manager.UploadInput{Bucket: &d.bucket, Key: &k, Body: body, ContentType: aws.String(q.ContentType), Metadata: meta})
++	if e != nil {
++		return port.PutResult{}, s3Error(ctx, e)
++	}
++	return port.PutResult{Info: port.ObjectInfo{Path: objectPath(q.Path), Size: body.bytes.Load(), ModTime: time.Now().UTC(), ContentType: q.ContentType}}, nil
++}
++func (d *s3Client) Delete(ctx context.Context, q port.ObjectRef) error {
++	k, e := d.key(q.Path)
++	if e != nil || strings.Trim(q.Path, "/") == "" {
++		return port.ErrInvalid
++	}
++	info, err := d.Stat(ctx, q)
++	if err != nil {
++		return err
++	}
++	if info.IsDir {
++		return port.ErrUnsupported
++	}
++	_, e = d.api.DeleteObjectWithContext(ctx, &s3.DeleteObjectInput{Bucket: &d.bucket, Key: &k})
++	return s3Error(ctx, e)
++}
++func (d *s3Client) Close(context.Context) error { closeTransport(d.transport); return nil }
++
++var _ port.Client = (*s3Client)(nil)

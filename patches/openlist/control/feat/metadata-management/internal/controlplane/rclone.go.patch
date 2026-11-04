@@ -1,0 +1,155 @@
+diff --git a/internal/controlplane/rclone.go b/internal/controlplane/rclone.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e42daf2b777a8ea278abd25afde7c8885b3cf93a
+--- /dev/null
++++ b/internal/controlplane/rclone.go
+@@ -0,0 +1,149 @@
++package controlplane
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/url"
++	"strings"
++	"time"
++)
++
++// RC's public API is projected into finite administrative methods. Error text,
++// output, config/dump and arbitrary invocation are intentionally not exposed.
++// Protocol authority: https://rclone.org/rc/ .
++type Rclone struct {
++	base string
++	http *http.Client
++}
++
++func NewRclone(base string, h *http.Client) (*Rclone, error) {
++	u, e := url.Parse(base)
++	if e != nil || u.Host == "" || u.Scheme != "http" && u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || h == nil {
++		return nil, ErrInvalid
++	}
++	copyClient := *h
++	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
++	if copyClient.Timeout <= 0 || copyClient.Timeout > 30*time.Second {
++		copyClient.Timeout = 30 * time.Second
++	}
++	return &Rclone{strings.TrimRight(base, "/"), &copyClient}, nil
++}
++func (c *Rclone) call(ctx context.Context, method string, input, output any) error {
++	b, e := json.Marshal(input)
++	if e != nil || len(b) > MaxMetadata {
++		return ErrInvalid
++	}
++	q, e := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/"+method, bytes.NewReader(b))
++	if e != nil {
++		return ErrInvalid
++	}
++	q.Header.Set("Content-Type", "application/json")
++	r, e := c.http.Do(q)
++	if e != nil {
++		return ErrUpstream
++	}
++	defer r.Body.Close()
++	if r.StatusCode != http.StatusOK {
++		return ErrUpstream
++	}
++	b, e = io.ReadAll(io.LimitReader(r.Body, MaxMetadata+1))
++	if e != nil || len(b) > MaxMetadata {
++		return ErrUpstream
++	}
++	if json.Unmarshal(b, output) != nil {
++		return ErrUpstream
++	}
++	return nil
++}
++
++type RcloneVersion struct {
++	Version   string `json:"version"`
++	OS        string `json:"os"`
++	Arch      string `json:"arch"`
++	GoVersion string `json:"goVersion"`
++	IsBeta    bool   `json:"isBeta"`
++}
++
++func (c *Rclone) Version(ctx context.Context) (RcloneVersion, error) {
++	var v RcloneVersion
++	e := c.call(ctx, "core/version", struct{}{}, &v)
++	return v, e
++}
++
++type RcloneStats struct {
++	Bytes       int64   `json:"bytes"`
++	Checks      int64   `json:"checks"`
++	Deletes     int64   `json:"deletes"`
++	Errors      int64   `json:"errors"`
++	Transfers   int64   `json:"transfers"`
++	Speed       float64 `json:"speed"`
++	ElapsedTime float64 `json:"elapsedTime"`
++	FatalError  bool    `json:"fatalError"`
++}
++
++func (c *Rclone) Stats(ctx context.Context) (RcloneStats, error) {
++	var v RcloneStats
++	e := c.call(ctx, "core/stats", struct {
++		Short bool `json:"short"`
++	}{true}, &v)
++	return v, e
++}
++
++type RcloneJobs struct {
++	ExecuteID string  `json:"executeId"`
++	IDs       []int64 `json:"jobids"`
++	Running   []int64 `json:"running_ids"`
++	Finished  []int64 `json:"finished_ids"`
++}
++
++func (c *Rclone) Jobs(ctx context.Context) (RcloneJobs, error) {
++	var v RcloneJobs
++	e := c.call(ctx, "job/list", struct{}{}, &v)
++	return v, e
++}
++
++type RcloneJob struct {
++	ID        int64   `json:"id"`
++	ExecuteID string  `json:"executeId"`
++	Finished  bool    `json:"finished"`
++	Success   bool    `json:"success"`
++	Duration  float64 `json:"duration"`
++	StartTime string  `json:"startTime"`
++	EndTime   string  `json:"endTime"`
++}
++
++func (c *Rclone) Job(ctx context.Context, id int64) (RcloneJob, error) {
++	var v RcloneJob
++	if id <= 0 {
++		return v, ErrInvalid
++	}
++	e := c.call(ctx, "job/status", struct {
++		ID int64 `json:"jobid"`
++	}{id}, &v)
++	if e == nil && v.ID != id {
++		return RcloneJob{}, ErrUpstream
++	}
++	return v, e
++}
++func (c *Rclone) Stop(ctx context.Context, id int64, executeID string) error {
++	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
++	defer cancel()
++	if id <= 0 || executeID == "" || len(executeID) > 128 {
++		return ErrInvalid
++	}
++	job, e := c.Job(ctx, id)
++	if e != nil {
++		return e
++	}
++	if job.ExecuteID != executeID {
++		return ErrConflict
++	}
++	// RC stop has no atomic execute-ID precondition. This check catches stale UI
++	// submissions, but an external process restart can race the subsequent call.
++	return c.call(ctx, "job/stop", struct {
++		ID int64 `json:"jobid"`
++	}{id}, &struct{}{})
++}

@@ -1,0 +1,60 @@
+diff --git a/pluginentry/immutability_test.go b/pluginentry/immutability_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..632a3879a223fef8a9b3abff8a2dda922c499f1f
+--- /dev/null
++++ b/pluginentry/immutability_test.go
+@@ -0,0 +1,54 @@
++package pluginentry
++
++import (
++	"bytes"
++	"github.com/OpenListTeam/OpenList/v4/clientplugin"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
++	"strings"
++	"sync"
++	"testing"
++)
++
++func TestRuntimeDescriptorHasNoMutableAliases(t *testing.T) {
++	entryFactory, err := NewFactory("sha256:" + strings.Repeat("1", 64))
++	if err != nil {
++		t.Fatal(err)
++	}
++	published := entryFactory.Descriptor()
++	baseline, err := admission.Encode(published)
++	if err != nil {
++		t.Fatal(err)
++	}
++	handler := clientplugin.NewFactory(published)
++	published.PluginID = "mutated"
++	published.Implementations[0].ID = "mutated"
++	published.Implementations[0].Capabilities[0] = "mutated"
++	published.Implementations[0].ConfigSchema[0] = '!'
++	if got, err := admission.Encode(handler.Descriptor()); err != nil || !bytes.Equal(got.Bytes, baseline.Bytes) {
++		t.Fatalf("constructor input escaped: %v", err)
++	}
++	var wg sync.WaitGroup
++	for n := 0; n < 12; n++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			for i := 0; i < 20; i++ {
++				view := handler.Descriptor()
++				view.Implementations[0].ID = "changed"
++				view.Implementations[0].ConfigSchema[0] = '!'
++				view.Implementations[0].Capabilities[0] = "changed"
++			}
++		}()
++	}
++	wg.Wait()
++	got, err := admission.Encode(handler.Descriptor())
++	if err != nil || !bytes.Equal(got.Bytes, baseline.Bytes) {
++		t.Fatalf("returned descriptor mutated runtime state: %v", err)
++	}
++}
++
++func TestPublicationRejectsInvalidBuildIdentity(t *testing.T) {
++	if _, err := NewFactory("missing-digest"); err == nil {
++		t.Fatal("invalid publication identity accepted")
++	}
++}

@@ -1,0 +1,67 @@
+diff --git a/pluginentry/entry.go b/pluginentry/entry.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8248a9bcdcfb2a7091fbe0a1b32de338f196b620
+--- /dev/null
++++ b/pluginentry/entry.go
+@@ -0,0 +1,61 @@
++// Package pluginentry owns native OpenList plugin publication and schema derivation.
++package pluginentry
++
++import (
++	"encoding/json"
++	"github.com/danielgtaylor/huma/v2"
++
++	"github.com/OpenListTeam/OpenList/v4/clientplugin"
++	"github.com/wignerStan/infra/go/config/schema"
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
++)
++
++type ProviderConfigurationSchemas struct {
++	S3     *huma.Schema
++	WebDAV *huma.Schema
++}
++
++// ConfigurationSchemas derives this plugin's implementation-owned public models
++// at its publication entry. It performs no provider initialization or I/O.
++func ConfigurationSchemas() (ProviderConfigurationSchemas, error) {
++	s3, err := schema.Derive[clientplugin.S3Configuration]()
++	if err != nil {
++		return ProviderConfigurationSchemas{}, err
++	}
++	dav, err := schema.Derive[clientplugin.WebDAVConfiguration]()
++	if err != nil {
++		return ProviderConfigurationSchemas{}, err
++	}
++	return ProviderConfigurationSchemas{S3: s3, WebDAV: dav}, nil
++}
++
++// NewFactory publishes a concrete descriptor once, then injects its immutable
++// values into the runtime handler. Worker remains the descriptor contract owner.
++func NewFactory(buildDigest string) (*clientplugin.Factory, error) {
++	schemas, err := ConfigurationSchemas()
++	if err != nil {
++		return nil, err
++	}
++	s3, err := json.Marshal(schemas.S3)
++	if err != nil {
++		return nil, err
++	}
++	dav, err := json.Marshal(schemas.WebDAV)
++	if err != nil {
++		return nil, err
++	}
++	published := descriptor.Descriptor{
++		Schema: descriptor.Schema, PluginID: clientplugin.PluginID, PluginVersion: clientplugin.Version,
++		Contract: port.Contract, Runtime: "go", BuildDigest: buildDigest,
++		Implementations: []descriptor.Implementation{
++			{ID: "s3", DisplayName: "OpenList S3", ConfigSchema: s3, Capabilities: []string{"stat", "list", "open", "put", "delete", "range", "unknown-size-put", "list-pagination"}},
++			{ID: "webdav", DisplayName: "OpenList WebDAV", ConfigSchema: dav, Capabilities: []string{"stat", "list", "open", "put", "delete", "range", "unknown-size-put"}},
++		},
++	}
++	if err = admission.Validate(published); err != nil {
++		return nil, err
++	}
++	return clientplugin.NewFactory(published), nil
++}
