@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -183,6 +184,78 @@ func TestInvalidArchiveSelectionAndDescriptorResolveNoSecrets(t *testing.T) {
 	_, err := NewFactory(value).Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: []byte(`{"url":"https://fixture.invalid/dav/"}`), Secrets: secrets})
 	if !errors.Is(err, port.ErrInvalid) || resolves.Load() != 0 {
 		t.Fatal("descriptor/public admission resolved undeclared secrets", err, resolves.Load())
+	}
+}
+
+func TestSourceArchiveWebDAVPreservesTypedModesAndLinkData(t *testing.T) {
+	testSourceArchive(t, testFactory(t))
+}
+
+func testSourceArchive(t *testing.T, factory port.Factory) {
+	t.Helper()
+	var buffer bytes.Buffer
+	w := zip.NewWriter(&buffer)
+	for _, entry := range []struct {
+		name, body string
+		mode       os.FileMode
+	}{
+		{"src/tool", "#!/bin/sh\necho source\n", 0755},
+		{"run", "src/tool", os.ModeSymlink | 0777},
+	} {
+		header := &zip.FileHeader{Name: entry.name, Method: zip.Deflate}
+		header.SetMode(entry.mode)
+		member, err := w.CreateHeader(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = io.WriteString(member, entry.body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f := newDAV(t)
+	f.write(t, "source-v1.zip", buffer.Bytes())
+	ctx := context.Background()
+	input := WebDAVArchivePublicConfig{WebDAVPublicConfig: WebDAVPublicConfig{URL: f.URL(), Username: "fixture"}, ArchivePath: "source-v1.zip"}
+	// Selecting an ordinary archive never silently enables source link handling.
+	if candidate, err := factory.Prepare(ctx, port.PluginConfig{ImplementationID: "archive-webdav", Public: mustJSON(t, input), Secrets: passwordResolver()}); err == nil {
+		_ = candidate.Abort(ctx)
+		t.Fatal("ordinary archive admitted a source symlink")
+	}
+	input.SourceView = true
+	candidate, err := factory.Prepare(ctx, port.PluginConfig{ImplementationID: "archive-webdav", Public: mustJSON(t, input), Secrets: passwordResolver()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := candidate.Validate(ctx); err != nil {
+		_ = candidate.Abort(ctx)
+		t.Fatal(err)
+	}
+	client, err := candidate.Publish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeClient(t, client)
+	for name, expected := range map[string]os.FileMode{"/": os.ModeDir | 0555, "/src": os.ModeDir | 0555, "/src/tool": 0755, "/run": os.ModeSymlink | 0777} {
+		entry, err := client.Stat(ctx, port.ObjectRef{Path: name})
+		if err != nil || entry.Mode == nil || *entry.Mode != uint32(expected) || !port.ValidFileMode(*entry.Mode, entry.IsDir) {
+			t.Fatalf("typed source stat %s: %+v %v", name, entry, err)
+		}
+	}
+	page, err := client.List(ctx, port.ListRequest{Path: "/", Limit: 1})
+	if err != nil || len(page.Objects) != 1 || page.Objects[0].Path != "/run" || page.Objects[0].Mode == nil || *page.Objects[0].Mode != uint32(os.ModeSymlink|0777) {
+		t.Fatal("source list lost link type", page, err)
+	}
+	plan, err := client.Open(ctx, port.OpenRequest{Path: "/run", Offset: 0, Length: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(plan.Body)
+	closeErr := plan.Body.Close()
+	if readErr != nil || closeErr != nil || string(body) != "src/tool" || plan.Info.Mode == nil || *plan.Info.Mode != uint32(os.ModeSymlink|0777) {
+		t.Fatalf("source link bytes or mode: %q %+v %v %v", body, plan.Info, readErr, closeErr)
 	}
 }
 

@@ -44,7 +44,12 @@ func failure(err error) error {
 }
 
 func info(entry rclonestore.Entry) port.ObjectInfo {
-	return port.ObjectInfo{Path: entry.Path, Size: entry.Size, IsDir: entry.IsDir, ModTime: entry.ModTime, ContentType: entry.ContentType, Metadata: entry.Metadata}
+	result := port.ObjectInfo{Path: entry.Path, Size: entry.Size, IsDir: entry.IsDir, ModTime: entry.ModTime, ContentType: entry.ContentType, Metadata: entry.Metadata}
+	if entry.Mode != nil {
+		mode := uint32(*entry.Mode)
+		result.Mode = &mode
+	}
+	return result
 }
 
 func (c *Client) Stat(ctx context.Context, ref port.ObjectRef) (port.ObjectInfo, error) {

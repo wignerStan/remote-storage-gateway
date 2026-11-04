@@ -108,6 +108,7 @@ func TestActualRcloneNativePluginLifecycle(t *testing.T) {
 	if f.requests.Load() != 0 || record.Descriptor.PluginID != PluginID {
 		t.Fatal("native passive discovery contacted backend or changed identity")
 	}
+	t.Run("source-view", func(t *testing.T) { testSourceArchive(t, factory) })
 	for _, test := range []struct {
 		implementation, public string
 		missing                bool

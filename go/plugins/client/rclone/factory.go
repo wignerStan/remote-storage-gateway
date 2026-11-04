@@ -57,26 +57,32 @@ type DriveConfiguration struct {
 type S3ArchivePublicConfig struct {
 	S3PublicConfig
 	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+	SourceView  bool   `json:"source_view,omitempty"`
 }
 type S3ArchiveConfiguration struct {
 	S3Configuration
 	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+	SourceView  bool   `json:"source_view,omitempty"`
 }
 type WebDAVArchivePublicConfig struct {
 	WebDAVPublicConfig
 	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+	SourceView  bool   `json:"source_view,omitempty"`
 }
 type WebDAVArchiveConfiguration struct {
 	WebDAVConfiguration
 	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+	SourceView  bool   `json:"source_view,omitempty"`
 }
 type DriveArchivePublicConfig struct {
 	DrivePublicConfig
 	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+	SourceView  bool   `json:"source_view,omitempty"`
 }
 type DriveArchiveConfiguration struct {
 	DriveConfiguration
 	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+	SourceView  bool   `json:"source_view,omitempty"`
 }
 
 // Factory retains the descriptor published by the plugin entry. Configuration
@@ -162,6 +168,7 @@ func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Ca
 		return nil, port.ErrUnsupported
 	}
 	var archivePath string
+	var sourceView bool
 	switch backend {
 	case "s3":
 		var config S3PublicConfig
@@ -171,6 +178,7 @@ func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Ca
 			decode = admission.StrictJSON(input.Public, &ac)
 			config = ac.S3PublicConfig
 			archivePath = ac.ArchivePath
+			sourceView = ac.SourceView
 		} else {
 			decode = admission.StrictJSON(input.Public, &config)
 		}
@@ -194,6 +202,7 @@ func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Ca
 			decode = admission.StrictJSON(input.Public, &ac)
 			config = ac.WebDAVPublicConfig
 			archivePath = ac.ArchivePath
+			sourceView = ac.SourceView
 		} else {
 			decode = admission.StrictJSON(input.Public, &config)
 		}
@@ -216,6 +225,7 @@ func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Ca
 			decode = admission.StrictJSON(input.Public, &ac)
 			config = ac.DrivePublicConfig
 			archivePath = ac.ArchivePath
+			sourceView = ac.SourceView
 		} else {
 			decode = admission.StrictJSON(input.Public, &config)
 		}
@@ -231,7 +241,7 @@ func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Ca
 	}
 	var archive *rclonestore.ArchiveOptions
 	if archived {
-		archive = &rclonestore.ArchiveOptions{Path: archivePath}
+		archive = &rclonestore.ArchiveOptions{Path: archivePath, SourceView: sourceView}
 	}
 	options := rclonestore.FilesystemOptions{Archive: archive}
 	if rclonestore.ValidateFilesystemOptions(options) != nil || !declaresSecrets(implementation, expectedSecrets) {
