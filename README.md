@@ -112,6 +112,7 @@ make all GO=/opt/go1.27.3/bin/go NODE=/opt/node24.11.0/bin/node \
   INFRA_ROOT=/path/to/reviewed/infra \
   DATA_PLANE_ROOT=/path/to/reviewed/network-data-plane-worker \
   RCLONE_ROOT=/path/to/reviewed/rclone \
+  BUILDBARN_ROOT=/path/to/reviewed/buildbarn-storage \
   BUILD_DIR=/build/storage-gateway
 ```
 

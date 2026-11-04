@@ -503,12 +503,15 @@ func TestNativeBuildIdentityTracksBackendPatchesAndRecipe(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
-	productInputs := map[string]string{"go/client.go": "package client\n", ".git-source-relationships/openlist.json": "product source\n", "patches/openlist/0001.patch": "OpenList patch\n", "build/toolchain.json": "tools\n", "Makefile": "flags\n"}
+	productInputs := map[string]string{"go/client.go": "package client\n", "go/go.mod": "module github.com/wignerStan/remote-storage-gateway/go\n\ngo 1.27.3\n\nrequire (\n github.com/wignerStan/rclone/go v0.1.1\n github.com/wignerStan/buildbarn-storage/go v0.1.0\n)\n", ".git-source-relationships/openlist.json": "product source\n", "patches/openlist/0001.patch": "OpenList patch\n", "build/toolchain.json": "tools\n", "Makefile": "flags\n"}
 	infraInputs := map[string]string{"go/storage/vfs/remote/backend.go": "package remote\n", "go/storage/vfs/cache.go": "package vfs\n", "go/schema.go": "package schema\n", "c/interop/plugins/bridge.c": "/* canonical ABI */\n"}
+	b.materializer, b.buildbarn = t.TempDir(), t.TempDir()
+	rcloneInputs := map[string]string{"go/go.mod": "module github.com/wignerStan/rclone/go\n\ngo 1.27.3\n", "go/box/config.go": "package box\n"}
+	buildbarnInputs := map[string]string{"go/go.mod": "module github.com/wignerStan/buildbarn-storage/go\n\ngo 1.27.3\n", "go/vfs/rclone/mount/config.go": "package box\n"}
 	for _, input := range []struct {
 		root   string
 		values map[string]string
-	}{{b.root, productInputs}, {b.infra, infraInputs}} {
+	}{{b.root, productInputs}, {b.infra, infraInputs}, {b.materializer, rcloneInputs}, {b.buildbarn, buildbarnInputs}} {
 		for name, content := range input.values {
 			path := filepath.Join(input.root, name)
 			if e := os.MkdirAll(filepath.Dir(path), 0755); e != nil {
@@ -537,7 +540,7 @@ func TestNativeBuildIdentityTracksBackendPatchesAndRecipe(t *testing.T) {
 	for _, input := range []struct {
 		label, root string
 		values      map[string]string
-	}{{"product", b.root, productInputs}, {"infra", b.infra, infraInputs}} {
+	}{{"product", b.root, productInputs}, {"infra", b.infra, infraInputs}, {"rclone", b.materializer, rcloneInputs}, {"buildbarn", b.buildbarn, buildbarnInputs}} {
 		for name, original := range input.values {
 			t.Run(input.label+"/"+name, func(t *testing.T) {
 				path := filepath.Join(input.root, name)

@@ -2,7 +2,7 @@
 # Bootstrap only the selected first-party module graph. All generated files stay
 # in a caller-owned build directory; third-party dependencies keep their versions.
 set -euo pipefail
-[[ $# -ge 6 ]] || { echo 'usage: bootstrap OUTPUT GO MISE PRODUCT INFRA WORKER [RCLONE]' >&2; exit 2; }
+[[ $# -ge 6 ]] || { echo 'usage: bootstrap OUTPUT GO MISE PRODUCT INFRA WORKER [RCLONE] [BUILDBARN]' >&2; exit 2; }
 output=$(realpath -m "$1")
 go_bin=$2
 mise=$3

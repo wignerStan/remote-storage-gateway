@@ -92,6 +92,7 @@ func (b *builder) remoteInputs() error {
 		{Source: filepath.Join(b.infra, "c"), Stage: "workspace/infra/c"},
 		{Source: filepath.Join(b.dataPlane, "go"), Stage: "workspace/worker/go"},
 		{Source: filepath.Join(b.materializer, "go"), Stage: "workspace/rclone/go"},
+		{Source: filepath.Join(b.buildbarn, "go"), Stage: "workspace/buildbarn/go"},
 		{Source: b.sourcePath("openlist"), Stage: "workspace/openlist", Exclude: []string{".git", "node_modules"}},
 		{Source: b.sourcePath("openlist-ui"), Stage: "workspace/openlist-ui", Exclude: []string{".git", "dist", "node_modules"}},
 		{Source: b.rcloneModulePath(), Stage: "workspace/rclone-common"},

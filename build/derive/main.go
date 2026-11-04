@@ -56,6 +56,7 @@ type toolchain struct {
 type builder struct {
 	nativeSDKRoot, pkgConfig                           string
 	root, output, infra, dataPlane, materializer, mise string
+	buildbarn                                          string
 	goBinary, nodeBinary, pnpmBinary                   string
 	jobs                                               int
 	withRclone                                         bool
@@ -329,6 +330,7 @@ func main() {
 	flag.StringVar(&b.infra, "infra-root", "/develop/infra", "explicit Infra source checkout (reviewed and clean for release)")
 	flag.StringVar(&b.dataPlane, "data-plane-root", "/develop/network/data-plane-worker", "explicit independently owned Data Plane module checkout")
 	flag.StringVar(&b.materializer, "rclone-root", "/develop/network/rclone", "independently derived rclone application and process module")
+	flag.StringVar(&b.buildbarn, "buildbarn-root", "", "explicit BuildBarn source materializer module checkout")
 	flag.StringVar(&b.mise, "mise", "", "optional Mise executable for pinned toolchains")
 	flag.StringVar(&b.goBinary, "go", "go", "native Go executable")
 	flag.StringVar(&b.nativeSDKRoot, "native-sdk-root", "", "optional verified canonical shared-memory SDK prefix; defaults to pkg-config discovery")
@@ -688,13 +690,16 @@ func (b *builder) verifyDerived(r relationship) error {
 }
 func (b *builder) run(stage string) error {
 	var e error
-	for _, p := range []*string{&b.root, &b.output, &b.infra, &b.dataPlane, &b.materializer} {
+	if strings.TrimSpace(b.buildbarn) == "" {
+		return errors.New("select the BuildBarn source materializer module with -buildbarn-root (BUILDBARN_ROOT)")
+	}
+	for _, p := range []*string{&b.root, &b.output, &b.infra, &b.dataPlane, &b.materializer, &b.buildbarn} {
 		*p, e = filepath.Abs(*p)
 		if e != nil {
 			return e
 		}
 	}
-	if e = validateOutput(b.output, b.root, b.infra, b.dataPlane, b.materializer); e != nil {
+	if e = validateOutput(b.output, b.root, b.infra, b.dataPlane, b.materializer, b.buildbarn); e != nil {
 		return e
 	}
 	if b.jobs < 1 || b.jobs > 16 {
@@ -707,7 +712,7 @@ func (b *builder) run(stage string) error {
 		return e
 	}
 	if b.release {
-		for _, p := range []string{b.root, b.infra, b.dataPlane, b.materializer} {
+		for _, p := range []string{b.root, b.infra, b.dataPlane, b.materializer, b.buildbarn} {
 			s, e := b.git(p, "status", "--porcelain", "--untracked-files=all")
 			if e != nil {
 				return e
@@ -875,6 +880,11 @@ func (b *builder) workspace() error {
 		return e
 	}
 	available["github.com/wignerStan/rclone/go"] = materializerDir
+	buildbarnDir, e := b.externalModule(b.buildbarn, "github.com/wignerStan/buildbarn-storage/go")
+	if e != nil {
+		return e
+	}
+	available["github.com/wignerStan/buildbarn-storage/go"] = buildbarnDir
 	available[workerModule.Module.Path] = workerDir
 	queue := []string{filepath.Join(b.root, "go"), b.sourcePath("openlist")}
 	used := map[string]bool{}
@@ -920,7 +930,7 @@ func (b *builder) workspace() error {
 	if _, e := b.goCommand(b.output, nil, args...); e != nil {
 		return e
 	}
-	return writeJSON(filepath.Join(b.output, "receipts/workspace.json"), map[string]any{"modules": dirs, "infra_root": b.infra, "gateway_module": filepath.Join(b.root, "go"), "data_plane_module": coreDir, "rclone_module": materializerDir})
+	return writeJSON(filepath.Join(b.output, "receipts/workspace.json"), map[string]any{"modules": dirs, "infra_root": b.infra, "gateway_module": filepath.Join(b.root, "go"), "data_plane_module": coreDir, "rclone_module": materializerDir, "buildbarn_module": buildbarnDir})
 }
 
 // externalModule admits an explicitly selected independent checkout by module
@@ -1139,6 +1149,25 @@ func (b *builder) provenanceDigest() (string, error) {
 			return "", e
 		}
 		fmt.Fprintf(h, "data-plane/go %s\n", digest)
+	}
+	// Manager links both external process bindings even when no materializer
+	// executable is bundled. Bind their selected source bytes to its build ID.
+	for _, input := range []struct{ root, module, label string }{
+		{b.materializer, "github.com/wignerStan/rclone/go", "rclone/go"},
+		{b.buildbarn, "github.com/wignerStan/buildbarn-storage/go", "buildbarn/go"},
+	} {
+		if input.root == "" {
+			continue
+		}
+		dir, e := b.externalModule(input.root, input.module)
+		if e != nil {
+			return "", e
+		}
+		digest, e := treeDigest(dir)
+		if e != nil {
+			return "", e
+		}
+		fmt.Fprintf(h, "%s %s\n", input.label, digest)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

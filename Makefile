@@ -10,6 +10,7 @@ WITH_RCLONE ?= 0
 INFRA_ROOT ?= /develop/infra
 DATA_PLANE_ROOT ?= /develop/network/data-plane-worker
 RCLONE_ROOT ?= /develop/network/rclone
+BUILDBARN_ROOT ?=
 BUILD_DIR ?= $(abspath $(CURDIR)/../build-output/storage-gateway)
 SOURCE_REFERENCES ?=
 export GOMAXPROCS ?= $(JOBS)
@@ -17,10 +18,10 @@ export GOMEMLIMIT ?= 768MiB
 GO_RUN = $(if $(strip $(MISE)),$(MISE) exec go@1.27.3 -- go,$(GO))
 DERIVE = ../build/derive/main.go ../build/derive/remote_inputs.go ../build/derive/remote_release.go ../build/derive/native_build.go
 DERIVE_TESTS = $(addprefix ../,$(wildcard build/derive/*_test.go))
-SOURCE_TOOL = cd go && GOWORK=$(BUILD_DIR)/bootstrap/go.work GOTOOLCHAIN=local $(GO_RUN) run $(DERIVE) -root $(CURDIR) -out $(BUILD_DIR) -infra-root $(INFRA_ROOT) -data-plane-root $(DATA_PLANE_ROOT) -rclone-root $(RCLONE_ROOT) -source-references "$(SOURCE_REFERENCES)" -go "$(GO)" -node "$(NODE)" -pnpm "$(PNPM)" -mise "$(MISE)" -native-sdk-root "$(NATIVE_SDK_ROOT)" -pkg-config "$(PKG_CONFIG)" -jobs $(JOBS) -with-rclone=$(WITH_RCLONE)
+SOURCE_TOOL = cd go && GOWORK=$(BUILD_DIR)/bootstrap/go.work GOTOOLCHAIN=local $(GO_RUN) run $(DERIVE) -root $(CURDIR) -out $(BUILD_DIR) -infra-root $(INFRA_ROOT) -data-plane-root $(DATA_PLANE_ROOT) -rclone-root $(RCLONE_ROOT) -buildbarn-root "$(BUILDBARN_ROOT)" -source-references "$(SOURCE_REFERENCES)" -go "$(GO)" -node "$(NODE)" -pnpm "$(PNPM)" -mise "$(MISE)" -native-sdk-root "$(NATIVE_SDK_ROOT)" -pkg-config "$(PKG_CONFIG)" -jobs $(JOBS) -with-rclone=$(WITH_RCLONE)
 .PHONY: all build bootstrap source prepare ui control-plane plugin worker materializer rclone transfer admin test test-build test-derived test-core image-inputs
 bootstrap:
-	bash build/bootstrap-workspace.sh "$(BUILD_DIR)" "$(GO)" "$(MISE)" "$(CURDIR)" "$(INFRA_ROOT)" "$(DATA_PLANE_ROOT)" "$(RCLONE_ROOT)"
+	bash build/bootstrap-workspace.sh "$(BUILD_DIR)" "$(GO)" "$(MISE)" "$(CURDIR)" "$(INFRA_ROOT)" "$(DATA_PLANE_ROOT)" "$(RCLONE_ROOT)" $(if $(strip $(BUILDBARN_ROOT)),"$(BUILDBARN_ROOT)")
 source: bootstrap
 	$(SOURCE_TOOL) source
 prepare: source
