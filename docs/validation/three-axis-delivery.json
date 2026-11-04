@@ -1,0 +1,305 @@
+{
+  "schema": "remote-storage-gateway/three-axis-delivery/v1",
+  "source_commits": {
+    "gateway": "60ae554a4ddc999534192ffca125270b3faaf2be",
+    "data_plane": "15c2b4400c7c42ab6f798796c3acb343793e099b",
+    "infra_review_bundle": "ffcfb2faa3315f7bb330c83d95a648f5d5379e03"
+  },
+  "repositories": {
+    "gateway": {
+      "url": "https://github.com/wignerStan/remote-storage-gateway",
+      "id": 1443344039,
+      "module": "github.com/wignerStan/remote-storage-gateway/go",
+      "module_version": "v0.1.0"
+    },
+    "data_plane": {
+      "url": "https://github.com/wignerStan/network-data-plane-worker",
+      "id": 1442271176,
+      "module": "github.com/wignerStan/network-data-plane-worker/go",
+      "module_version": "v0.1.0"
+    }
+  },
+  "application_axes": [
+    "control-plane",
+    "worker",
+    "independent-vfs"
+  ],
+  "plugin_axes": [
+    "client",
+    "encoded-transfer"
+  ],
+  "dynamic_plugins": [
+    "client-openlist.so",
+    "client-rclone.so",
+    "transfer-reapi.so"
+  ],
+  "authority": "Data Plane owns plugin contracts; concrete plugins publish descriptor values; CP consumes exact digests; Infra owns generic mechanisms.",
+  "control": "Metadata-only ttrpc; no payload operation.",
+  "materialization": "Independent process, authenticated private Worker raw HTTP UDS, public TLS preserved, readonly cache activation only.",
+  "rclone": {
+    "version": "v1.75.2",
+    "authority": "Infra go/go.mod",
+    "git_pin": false,
+    "patches": 3,
+    "measured_derived_hash": "sha256:90bfec5b65ba9f11ccb0bbba4e99e454e809c13ee81bac663d93e03c752c0199"
+  },
+  "validation": {
+    "gateway": {
+      "race": true,
+      "force_fresh": true,
+      "tests_and_subtests": 71,
+      "test_failures": 0,
+      "test_skips": 0,
+      "tested_packages": 11,
+      "no_test_packages": 11,
+      "proof": "gateway-final-race.jsonl"
+    },
+    "core": {
+      "race": true,
+      "force_fresh": true,
+      "tests_and_subtests": 32,
+      "test_failures": 0,
+      "test_skips": 0,
+      "tested_packages": 7,
+      "no_test_packages": 11,
+      "proof": "core-final-race.jsonl"
+    },
+    "derived_openlist": {
+      "race": true,
+      "tested_packages": 5,
+      "no_test_packages": 2,
+      "proof": "derived-final-race.log"
+    },
+    "source_tracking": {
+      "all_compiler_visible_first_party_go_files_tracked": true,
+      "go_fmt_pending": 0,
+      "global_ignore_unchanged": true,
+      "note": "New UDS files renamed to capability-accurate visible paths rather than changing global **/*local* ignore."
+    }
+  },
+  "cp_master_smoke": {
+    "both_child_pids_reaped": true,
+    "cache_empty_after_retirement": true,
+    "cache_hit_added_origin_gets": 0,
+    "cache_miss_origin_gets": 4,
+    "cp_cgo_enabled": "0",
+    "credential_output_redacted": true,
+    "fixture_only": true,
+    "instances": [
+      {
+        "kind": "vfs",
+        "id": "vfs-one",
+        "pid": 3085631,
+        "phase": "ready"
+      },
+      {
+        "kind": "worker",
+        "id": "worker-one",
+        "pid": 3085587,
+        "phase": "ready"
+      }
+    ],
+    "legacy_cp_dav_status": 404,
+    "live_pvc_config_or_cluster_touched": false,
+    "master_pid": 3085570,
+    "plugin_descriptor_digest": "sha256:2f0376f3e334b7add75429eea09784cce843dfac4b4c554ab7ac8ab49d367f28",
+    "private_raw_http_uds": true,
+    "program_sha256": {
+      "client-openlist.so": "6aa18584e99d0ce7e45db854a4816cb57fcfed2ddd3f15ca9554848f558a3f1e",
+      "client-rclone.so": "44b782a7d130aedf4b5930227efb667a56baa03c9e0b7ba5116d6b892957bb91",
+      "openlist-control-plane": "3e678d3c91e843a5e138acf5e54517306a64bd6188e268967ca57f68256a51df",
+      "storage-vfs": "555e2f7d66477531b0e0c745e03715349836b571c94dbf30a4be2e53d80d626a",
+      "storage-worker": "2862ef6374c2901227c868dab6fedfa752618e2509dc613e72b0fa34ce1ca501",
+      "transfer-reapi.so": "c8a47011e096fa339d2a3a392fa536fec8b8be2f07cacb4eff03f3846b9ec18c"
+    },
+    "public_tls_dns_san": "cp-master.test",
+    "public_tls_ping": "pong",
+    "raw_alias_bypass": true,
+    "raw_socket_removed": true,
+    "schema": "gateway/full-cp-master-smoke/v1",
+    "sigterm_clean_exit": true,
+    "source_data_plane": "15c2b4400c7c42ab6f798796c3acb343793e099b",
+    "source_infra": "ffcfb2faa3315f7bb330c83d95a648f5d5379e03",
+    "source_product": "60ae554a4ddc999534192ffca125270b3faaf2be",
+    "sqlite_file_nonempty": true,
+    "harness_sha256": "f59f74a2c4f5c6d8dc533168309aa01c3678d085c26b1893864477ba5c80a916",
+    "harness_binary_sha256": "7609dcac4cc19597205840a9fdf28d8d5c15906eba833175d35e529cb4ce079d",
+    "harness_workspace": "/tmp/trade-gateway-axes-build/go.work",
+    "harness_command": "GOWORK=/tmp/trade-gateway-axes-build/go.work mise exec go@1.27.3 -- go build -trimpath -o /tmp/trade-cp-master-smoke/driver /tmp/trade-cp-master-smoke/main.go; /tmp/trade-cp-master-smoke/driver",
+    "harness_source_scope": "External task fixture harness, not product source.",
+    "fixture_admin_password": "Cryptographically randomized per run; never written to disk or unredacted logs.",
+    "redacted_log_verified_no_fixture_passwords": true,
+    "redacted_log_sha256": "03cd017cbd853c81cf49d3c425ab096d7519184ee9754e238c1c8e6e9143af6c",
+    "post_run_proc_absent": {
+      "3085570": true,
+      "3085631": true,
+      "3085587": true
+    }
+  },
+  "assessments": {
+    "gateway-architecture": {
+      "decision": "inconclusive",
+      "summary": {
+        "blocking_findings": 0,
+        "advisory_findings": 21,
+        "suppressed_findings": 0,
+        "infrastructure_failures": 0,
+        "completeness": "incomplete",
+        "diagnostics": [
+          {
+            "source": "architecture model",
+            "code": "ARCH-MODEL-INCOMPLETE",
+            "message": "1 required architecture model node(s) could not be resolved with complete owner-local evidence",
+            "severity": "medium"
+          }
+        ],
+        "metadata": {
+          "architecture.config_profile": "role-register",
+          "assessment.content_digest": "fnv1a64:61b96a5cd2560aee",
+          "aw-checker.version": "0.1.0",
+          "mode": "strict"
+        }
+      }
+    },
+    "core-architecture": {
+      "decision": "inconclusive",
+      "summary": {
+        "blocking_findings": 0,
+        "advisory_findings": 18,
+        "suppressed_findings": 0,
+        "infrastructure_failures": 0,
+        "completeness": "incomplete",
+        "diagnostics": [
+          {
+            "source": "architecture rule execution",
+            "code": "ARCH-RULES-SKIPPED",
+            "message": "1 selected architecture rule(s) were not assessed: axis-ownership-violation: inactive-no-axes-declared: cross-axis ownership is unassessed; no declared semantic axis establishes this rule's premise; full premises remain in rule_execution",
+            "severity": "medium"
+          },
+          {
+            "source": "architecture model",
+            "code": "ARCH-MODEL-INCOMPLETE",
+            "message": "6 required architecture model node(s) could not be resolved with complete owner-local evidence",
+            "severity": "medium"
+          },
+          {
+            "source": "architecture source observations",
+            "code": "ARCH-SOURCE-OBSERVATIONS",
+            "message": "cmd/network-data-plane-worker/main.go [semantic-source-digest-normalized:sha256:5ff207e32e492d1231c9adb06b0650506316ad1cddd08f48a8dc29a492aae8b3->fnv1a64:729473c45e0b70f5; 1 observation notes]; contracts/plugin/descriptor/admission/config.go [semantic-source-digest-normalized:sha256:cab6944b9d2b75e41b42bc14cca2ac49bef26e45ad82555f9c6c968878287038->fnv1a64:e5c95f62547a8154; 1 observation notes]; contracts/plugin/descriptor/admission/descriptor.go [semantic-source-digest-normalized:sha256:7dc34f9e69b9c7d8a5bf0bfed9924147d1c7e0538cb43e6e71142446990cb705->fnv1a64:1d377119743e478f; 1 observation notes]; contracts/plugin/descriptor/admission/descriptor_test.go [semantic-source-digest-normalized:sha256:958c7971e6270bfdcb3150cabf69c5dbf22ff97c21fc0c5941dc11833a917c13->fnv1a64:5a4e78f81ebb589c; 1 observation notes]; contracts/plugin/descriptor/types.go [semantic-source-digest-normalized:sha256:40ae63e9b90ea4630bf9056cc9c2c38345be99dbf698eedc4b52c38134cc273d->fnv1a64:664bcef89695da5d; 1 observation notes]; first 5 inputs / 5 notes shown",
+            "severity": "low"
+          }
+        ],
+        "metadata": {
+          "architecture.config_profile": "role-register",
+          "assessment.content_digest": "fnv1a64:90629cec896a23ae",
+          "aw-checker.version": "0.1.0",
+          "mode": "strict"
+        }
+      }
+    },
+    "gateway-source-scan": {
+      "decision": "pass",
+      "summary": {
+        "blocking_findings": 0,
+        "advisory_findings": 0,
+        "suppressed_findings": 0,
+        "infrastructure_failures": 0,
+        "diagnostics": [
+          {
+            "source": "naming-collection",
+            "code": "sys-naming-observation-limits",
+            "message": "Naming checks observed segment and identifier spellings. Python directories after a visible src component are advisory package candidates. Acquisition does not establish authored/generated authority. Resolved CLI names and semantic name reviews require explicit typed facts. Relative source roots, ownership and call relationships are architecture checks.",
+            "severity": "low"
+          }
+        ],
+        "metadata": {
+          "assessment.content_digest": "fnv1a64:7f52288ace0e17c4",
+          "mode": "strict"
+        }
+      }
+    },
+    "core-seven-domains": {
+      "decision": "pass",
+      "summary": {
+        "blocking_findings": 0,
+        "advisory_findings": 0,
+        "suppressed_findings": 0,
+        "infrastructure_failures": 0,
+        "diagnostics": [
+          {
+            "source": "source-tool-evidence",
+            "code": "sys-public-api-evidence-incomplete",
+            "message": "Cargo tool invocation failed: process exited exit status: 101 (accepted: [0])",
+            "severity": "medium",
+            "range": {
+              "file": "/develop/network/data-plane-worker/",
+              "start": {
+                "line": 1,
+                "col": 1
+              },
+              "end": {
+                "line": 1,
+                "col": 1
+              }
+            }
+          },
+          {
+            "source": "naming-collection",
+            "code": "sys-naming-observation-limits",
+            "message": "Naming checks observed segment and identifier spellings. Python directories after a visible src component are advisory package candidates. Acquisition does not establish authored/generated authority. Resolved CLI names and semantic name reviews require explicit typed facts. Relative source roots, ownership and call relationships are architecture checks.",
+            "severity": "low"
+          }
+        ],
+        "metadata": {
+          "assessment.content_digest": "fnv1a64:c3c466de331a4105",
+          "mode": "strict"
+        }
+      }
+    }
+  },
+  "buildbarn": {
+    "successful": true,
+    "remote_actions": 12,
+    "remote_cache_hits": 4,
+    "internal_actions": 7,
+    "local_fallback": false,
+    "bep": "three-axis-images-bep.json",
+    "execution": "three-axis-images-execution.json"
+  },
+  "images": {
+    "control_plane_image": {
+      "manifest_digest": "sha256:710af4a93994438d8a77f02c72d028d2ba708b8a394079dd47b6b7d1ba9153bc",
+      "archive": "/var/tmp/trade-gateway-axes-20261102/images/control_plane_image_oci_layout.tar",
+      "archive_sha256": "6b42a448697dd4d37421a375609a9e7f36495b4ad00a1891382c878a1e9978ae",
+      "archive_size": 234447872
+    },
+    "gateway_image": {
+      "manifest_digest": "sha256:b4ea17b4e28cdc8dba170d2bdda7e33bccd93b1ac65cab80d2fb93acdc6f641f",
+      "archive": "/var/tmp/trade-gateway-axes-20261102/images/gateway_image_oci_layout.tar",
+      "archive_sha256": "55d138d17aab5220b2c41bdbce3748d6ec2ca550337a012a7cd722278b3ed930",
+      "archive_size": 101944832
+    },
+    "vfs_image": {
+      "manifest_digest": "sha256:084fb46c3855ac2bc52ed703ceae3dbe0601a204cf7139bedf9cbe8d7aa8ae2b",
+      "archive": "/var/tmp/trade-gateway-axes-20261102/images/vfs_image_oci_layout.tar",
+      "archive_sha256": "d13d211a81a7124da94abfd1553eea7a22dbc200f81d18b471550937d3029d5e",
+      "archive_size": 65833984
+    }
+  },
+  "infra_prs": [
+    "https://github.com/wignerStan/infra/pull/78",
+    "https://github.com/wignerStan/infra/pull/79",
+    "https://github.com/wignerStan/infra/pull/80"
+  ],
+  "scope_limits": [
+    "No production rollout or completed legacy endpoint/PVC-writer cutover is claimed.",
+    "Managed CP disables legacy payload execution; legacy SDKs remain linked.",
+    "Cached materialization is read-only; ordinary remote streaming mounts retain writes.",
+    "Encoded gRPC shares application buffer backing; client/v1 JSON chunk copies remain. No kernel/TLS/protobuf/total-process-memory zero-copy claim.",
+    "Aggregate admission bounds decoding and host frame leases, not separately owned gRPC transport memory.",
+    "Architecture analysis retains unresolved model/native/compiler evidence; zero blockers is not complete architectural acceptance.",
+    "Infra PRs remain review deliveries; global CI is not claimed green."
+  ],
+  "operator_profile": "Opt-in separately named resources; explicit PVC selection and old writer/legacy HTTP-S3 traffic migration required. gateway-admin tls-sync is the standalone Worker profile.",
+  "production_deployment_changed": false
+}
