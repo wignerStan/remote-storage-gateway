@@ -16,6 +16,7 @@ export GOMAXPROCS ?= $(JOBS)
 export GOMEMLIMIT ?= 768MiB
 GO_RUN = $(if $(strip $(MISE)),$(MISE) exec go@1.27.3 -- go,$(GO))
 DERIVE = ../build/derive/main.go ../build/derive/remote_inputs.go ../build/derive/remote_release.go ../build/derive/native_build.go
+DERIVE_TESTS = $(addprefix ../,$(wildcard build/derive/*_test.go))
 SOURCE_TOOL = cd go && GOWORK=$(BUILD_DIR)/bootstrap/go.work GOTOOLCHAIN=local $(GO_RUN) run $(DERIVE) -root $(CURDIR) -out $(BUILD_DIR) -infra-root $(INFRA_ROOT) -data-plane-root $(DATA_PLANE_ROOT) -rclone-root $(RCLONE_ROOT) -source-references "$(SOURCE_REFERENCES)" -go "$(GO)" -node "$(NODE)" -pnpm "$(PNPM)" -mise "$(MISE)" -native-sdk-root "$(NATIVE_SDK_ROOT)" -pkg-config "$(PKG_CONFIG)" -jobs $(JOBS) -with-rclone=$(WITH_RCLONE)
 .PHONY: all build bootstrap source prepare ui control-plane plugin worker materializer rclone transfer admin test test-build test-derived test-core image-inputs
 bootstrap:
@@ -32,7 +33,7 @@ control-plane plugin worker transfer admin: all
 materializer rclone:
 	$(MAKE) -C "$(RCLONE_ROOT)" GO="$(GO)" MISE="$(MISE)" JOBS=$(JOBS) NATIVE_SDK_ROOT="$(NATIVE_SDK_ROOT)" PKG_CONFIG="$(PKG_CONFIG)" INFRA_ROOT="$(INFRA_ROOT)" DATA_PLANE_ROOT="$(DATA_PLANE_ROOT)" BUILD_DIR="$(BUILD_DIR)/materializer" all
 test-build: bootstrap
-	cd go && GOWORK=$(BUILD_DIR)/bootstrap/go.work GOTOOLCHAIN=local $(GO_RUN) test -p=$(JOBS) -race $(DERIVE) ../build/derive/main_test.go ../build/derive/remote_inputs_test.go ../build/derive/remote_release_test.go
+	cd go && GOWORK=$(BUILD_DIR)/bootstrap/go.work GOTOOLCHAIN=local $(GO_RUN) test -p=$(JOBS) -race $(DERIVE) $(DERIVE_TESTS)
 test-derived: source
 	$(SOURCE_TOOL) test
 test-core: all
