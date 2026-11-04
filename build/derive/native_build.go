@@ -480,7 +480,7 @@ func (b *builder) buildNative() error {
 	receipts := make(map[string]any)
 	for _, specification := range specifications {
 		env := b.nativeEnvironment()
-		env["GOPROXY"], env["GOSUMDB"] = "off", "off"
+		env["GOPROXY"], env["GOSUMDB"], env["GONOPROXY"] = "off", "off", "none"
 		if !specification.cgo {
 			env["CGO_ENABLED"] = "0"
 		}
