@@ -1,0 +1,82 @@
+{
+  "schema": "remote-storage-gateway/cloud-vfs-delivery/v1",
+  "executable_build_source": "32306a021a2276f75cec18de2ca11a2d03bb9676",
+  "runtime_infra_source": "0c136f4b3a1ab1f9b017107a9b473cd7d646b1d7",
+  "infra_delivery_head": "bd3e0969ac20e702fdc16d4860defb19cf583736",
+  "infra_pr": "https://github.com/wignerStan/infra/pull/78",
+  "infra_pr_dependency": "https://github.com/wignerStan/infra/pull/76",
+  "delivery_policy": "Gateway and Worker integrate directly without a PR; Infra and aw-checker remain PR-only. Product PR2 was closed per user instruction.",
+  "source_ownership": {
+    "cloud_backend_and_remote_operations": "Infra go/storage/cloud",
+    "optional_read_materialization_and_cache_lifetime": "Infra go/storage/vfs",
+    "worker_wire_adapter_config_secrets": "product go/storage/rcloneclient",
+    "descriptor_schema_publication": "product go/plugins/rclone entry",
+    "rclone_dependency_authority": "Infra go/go.mod require github.com/rclone/rclone v1.75.2",
+    "integrity_only": "Go module checksums and ordered patch checksums",
+    "rclone_git_pin": false,
+    "go_compatibility_aliases": false
+  },
+  "validation": {
+    "infra_root_go_build": "passed",
+    "infra_root_go_tests_ok_packages": 101,
+    "infra_cloud_vfs_race": {
+      "passed_top_level": 15,
+      "passed_subtests": 4
+    },
+    "product_full_native_go_race": {
+      "tested_packages": 9,
+      "failures": 0,
+      "skips": 0,
+      "fresh_native_so": "a648334f0f9b0142764f323d030a36ccc3a98fa3ecbf6033e2bc2c24e8341ac2",
+      "actual_native_vfs_subtests": 3,
+      "fd_and_delayed_write_probe": "passed beyond the prior five-second timer horizon"
+    },
+    "source_and_patch_mutation_tests": "passed",
+    "infra_architecture": {
+      "blocking": 0,
+      "advisory": 204,
+      "decision": "inconclusive"
+    },
+    "product_architecture": {
+      "blocking": 0,
+      "advisory": 50,
+      "decision": "inconclusive"
+    },
+    "product_seven_domain_source_scan": {
+      "blocking": 0,
+      "advisory": 0,
+      "decision": "pass"
+    },
+    "infra_source_scan": {
+      "blocking": 0,
+      "advisory": 1,
+      "advisory_scope": "existing crypto/hash.go comment"
+    },
+    "oci_payload_and_blob_verification": "passed"
+  },
+  "ci_profile_followup": {
+    "initial_go_job": "https://github.com/wignerStan/infra/actions/runs/41489506575/job/125428491558",
+    "failure": "stock SDK lacked the deliberately patched CacheDir interface; tests did not run",
+    "fix": "bd3e0969 changes only CI source assembly: declared module version, readonly shared-cache verification, patched task copy, explicit managed workspace",
+    "local_workflow_profile_prepare_build_tests": "passed; derived source byte-identical to verified version-module input",
+    "runtime_go_and_patch_trees_unchanged": true,
+    "remote_ci": "followup pushed; no complete-CI acceptance claimed"
+  },
+  "artifacts": "cloud-vfs-artifacts-20261102.json",
+  "images": "cloud-vfs-images-20261102.json",
+  "proofs": "/var/tmp/trade-cloud-vfs-gateway-20261102/proofs",
+  "candidate_images": {
+    "control_plane_image": {
+      "archive": "/var/tmp/trade-cloud-vfs-gateway-20261102/images/control_plane_image_oci_layout.tar",
+      "archive_sha256": "d8f9469c29b5c356bd82c45f2bc83fc082a4dd06cc1e0f799bfd9177879488fc",
+      "manifest_digest": "sha256:6d5281bcc8dbfe6d59c946d2206dc539ecdcef7ca80bf6123df4adaca4626f19"
+    },
+    "gateway_image": {
+      "archive": "/var/tmp/trade-cloud-vfs-gateway-20261102/images/gateway_image_oci_layout.tar",
+      "archive_sha256": "7e55272678ad5825b60e6b36c64c5cd7c3a0b7a10e66737ac78085b2962aafd2",
+      "manifest_digest": "sha256:57f70cdbb70c1f46bec3b2056ffa16b1a66358b695b93edb7104897f5d37abf5"
+    }
+  },
+  "production_changed": false,
+  "supersedes": "4fa2be0 monorepo candidate with product-owned rclone Git source and cache implementation"
+}

@@ -1,0 +1,530 @@
+diff --git a/.fcis/README.md b/.fcis/README.md
+index e719d97ccf0ce34f631926e25c4a8fa0938fd8fe..8347f11226dbaadd53fb8665589616eaf4f0d22d 100644
+--- a/.fcis/README.md
++++ b/.fcis/README.md
+@@ -1,5 +1,5 @@
+-This register covers the management SDK and its HTTP entry, not the inherited
+-OpenList application as a whole.
++This register covers the management SDK, HTTP entry and selected native client
++publication/runtime, not the inherited OpenList application as a whole.
+ 
+ The HTTP entry owns its public request/response DTOs, named ManagementEntry
+ methods, typed route contributions and product-specific JSON error policy.
+@@ -27,3 +27,11 @@ register records source ownership; neither declaration shape nor a historical
+ checker run establishes whole-repository architecture acceptance. Incomplete
+ framework recognition or acquired-source evidence must be reported directly,
+ without changing a real entry's role to obtain a passing graph.
++
++Native publication belongs to `pluginentry`: it derives the concrete plugin's
++exported configuration models through the schema effect tool, assembles and
++admits the Worker-owned descriptor, and injects an immutable copy into the
++`clientplugin` runtime handler. The handler performs no schema generation and
++imports no schema application-support package. Its descriptor results are deep
++copies. The tiny native command assembles that entry with the shared first-party
++ABI provider; it does not duplicate the C bridge.
+diff --git a/.fcis/role_register.json b/.fcis/role_register.json
+index 1f286498d31d10d3bf229229e6db1bff08b5aa14..16d7f1fa447069b0df506b3107cfca411baa055b 100644
+--- a/.fcis/role_register.json
++++ b/.fcis/role_register.json
+@@ -31,6 +31,51 @@
+       "entry_type": [
+         "server"
+       ]
++    },
++    {
++      "path": "clientplugin",
++      "names": [
++        "go_openlist_storage_client_runtime"
++      ],
++      "role": "effect_tool",
++      "role_stratum": "handler_adapter",
++      "effect_family": "storage",
++      "effect_operation": {
++        "name": "s3_webdav_provider_io",
++        "mechanisms": [
++          "network",
++          "open_input"
++        ],
++        "controls": [
++          "cancellation",
++          "backpressure",
++          "lifecycle"
++        ]
++      }
++    },
++    {
++      "path": "pluginentry",
++      "names": [
++        "go_openlist_plugin_publication_entry"
++      ],
++      "role": "front_door",
++      "role_stratum": "entry",
++      "entry_type": [
++        "direct"
++      ],
++      "route_axes": []
++    },
++    {
++      "path": "cmd/openlist-client-plugin",
++      "names": [
++        "go_openlist_plugin_native_assembly"
++      ],
++      "role": "front_door",
++      "role_stratum": "assembly",
++      "entry_type": [
++        "direct"
++      ],
++      "subsystem": "openlist_native_plugin"
+     }
+   ]
+ }
+diff --git a/clientplugin/client_test.go b/clientplugin/client_test.go
+index aedf00259a3ff303c131b46a7734304c8540e667..299f04ddea224c03aa723097b331c2f5301a1434 100644
+--- a/clientplugin/client_test.go
++++ b/clientplugin/client_test.go
+@@ -1,4 +1,4 @@
+-package clientplugin
++package clientplugin_test
+ 
+ import (
+ 	"context"
+@@ -14,6 +14,8 @@ import (
+ 	"testing"
+ 	"time"
+ 
++	"github.com/OpenListTeam/OpenList/v4/clientplugin"
++	"github.com/OpenListTeam/OpenList/v4/pluginentry"
+ 	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
+ 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
+ 	"golang.org/x/net/webdav"
+@@ -27,7 +29,10 @@ func (emptySecrets) Resolve(context.Context, string) (port.Secret, error) {
+ 	return nil, port.ErrNotFound
+ }
+ func TestPassiveDescriptorAndTypedValidation(t *testing.T) {
+-	f := NewFactory(digest)
++	f, e := pluginentry.NewFactory(digest)
++	if e != nil {
++		t.Fatal(e)
++	}
+ 	a, e := admission.Encode(f.Descriptor())
+ 	if e != nil {
+ 		t.Fatal(e)
+@@ -41,7 +46,7 @@ func TestPassiveDescriptorAndTypedValidation(t *testing.T) {
+ 		w.WriteHeader(500)
+ 	}))
+ 	defer s.Close()
+-	public, _ := json.Marshal(davConfig{Address: s.URL})
++	public, _ := json.Marshal(clientplugin.WebDAVPublicConfig{Address: s.URL})
+ 	candidate, e := f.Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: public, Secrets: emptySecrets{}})
+ 	if e != nil {
+ 		t.Fatal(e)
+@@ -93,8 +98,12 @@ func TestWebDAVStreamRangeUnknownSizeAndCancellation(t *testing.T) {
+ 		handler.ServeHTTP(w, r)
+ 	}))
+ 	defer server.Close()
+-	public, _ := json.Marshal(davConfig{Address: server.URL})
+-	ca, e := NewFactory(digest).Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: public, Secrets: emptySecrets{}})
++	public, _ := json.Marshal(clientplugin.WebDAVPublicConfig{Address: server.URL})
++	factory, e := pluginentry.NewFactory(digest)
++	if e != nil {
++		t.Fatal(e)
++	}
++	ca, e := factory.Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: public, Secrets: emptySecrets{}})
+ 	if e != nil {
+ 		t.Fatal(e)
+ 	}
+@@ -174,14 +183,3 @@ func TestWebDAVStreamRangeUnknownSizeAndCancellation(t *testing.T) {
+ 		t.Fatal("delete did not reach backend")
+ 	}
+ }
+-func TestKnownSizeReaderRejectsMismatch(t *testing.T) {
+-	for _, n := range []int64{2, 4} {
+-		if _, e := io.ReadAll(checkedBody(strings.NewReader("abc"), n)); e == nil {
+-			t.Fatalf("accepted wrong size%d", n)
+-		}
+-	}
+-	b, e := io.ReadAll(checkedBody(strings.NewReader("abc"), 3))
+-	if e != nil || string(b) != "abc" {
+-		t.Fatal(e)
+-	}
+-}
+diff --git a/clientplugin/configuration.go b/clientplugin/configuration.go
+index b8ec4beccab5197b325dcb1811623943f4648962..1fa389e769b9c7242ad77a8b26caa4b85d7f8e40 100644
+--- a/clientplugin/configuration.go
++++ b/clientplugin/configuration.go
+@@ -1,11 +1,5 @@
+ package clientplugin
+ 
+-import (
+-	"encoding/json"
+-
+-	"github.com/wignerStan/infra/go/code/schema"
+-)
+-
+ // S3PublicConfig is the non-secret provider configuration accepted by Prepare.
+ // Public field definitions are reused by the full published schema model.
+ type S3PublicConfig struct {
+@@ -38,34 +32,5 @@ type WebDAVConfiguration struct {
+ 	Password string `json:"password,omitempty" writeOnly:"true"`
+ }
+ 
+-type ProviderConfigurationSchemas struct {
+-	S3     schema.Document
+-	WebDAV schema.Document
+-}
+-
+-// ConfigurationSchemas describes only this component's own public config
+-// types. It is passive and returns library-native structured schemas; output
+-// encoding and descriptor publication happen separately in Descriptor.
+-func ConfigurationSchemas() (ProviderConfigurationSchemas, error) {
+-	s3, e := schema.Derive[S3Configuration](schema.Identity{ID: "client.openlist/configuration/s3", Version: "1", Owner: PluginID})
+-	if e != nil {
+-		return ProviderConfigurationSchemas{}, e
+-	}
+-	dav, e := schema.Derive[WebDAVConfiguration](schema.Identity{ID: "client.openlist/configuration/webdav", Version: "1", Owner: PluginID})
+-	if e != nil {
+-		return ProviderConfigurationSchemas{}, e
+-	}
+-	return ProviderConfigurationSchemas{S3: s3, WebDAV: dav}, nil
+-}
+-
+-// Serialization is deliberately separate from owned structured generation.
+-func encodeConfigurationSchema(document schema.Document) json.RawMessage {
+-	encoded, e := json.Marshal(document.Schema)
+-	if e != nil {
+-		panic("generated provider schema cannot encode")
+-	}
+-	return encoded
+-}
+-
+ type s3Config = S3PublicConfig
+ type davConfig = WebDAVPublicConfig
+diff --git a/clientplugin/factory.go b/clientplugin/factory.go
+index e16fc473accf5e73efafdfae6e1505b6e21dc203..b19b12a18ec60abed169144f0d90649751adaf35 100644
+--- a/clientplugin/factory.go
++++ b/clientplugin/factory.go
+@@ -18,18 +18,23 @@ import (
+ const PluginID = "client.openlist"
+ const Version = "0.1.0-alpha.2"
+ 
+-type Factory struct{ build string }
++// Factory executes provider operations with a frozen, entry-published descriptor.
++type Factory struct{ published descriptor.Descriptor }
+ 
+-func NewFactory(buildDigest string) *Factory { return &Factory{build: buildDigest} }
+-func (f *Factory) Descriptor() descriptor.Descriptor {
+-	schemas, e := ConfigurationSchemas()
+-	if e != nil {
+-		return descriptor.Descriptor{}
+-	}
+-	return descriptor.Descriptor{Schema: descriptor.Schema, PluginID: PluginID, PluginVersion: Version, Contract: port.Contract, Runtime: "go", BuildDigest: f.build, Implementations: []descriptor.Implementation{
+-		{ID: "s3", DisplayName: "OpenList S3", ConfigSchema: encodeConfigurationSchema(schemas.S3), Capabilities: []string{"stat", "list", "open", "put", "delete", "range", "unknown-size-put", "list-pagination"}},
+-		{ID: "webdav", DisplayName: "OpenList WebDAV", ConfigSchema: encodeConfigurationSchema(schemas.WebDAV), Capabilities: []string{"stat", "list", "open", "put", "delete", "range", "unknown-size-put"}},
+-	}}
++func NewFactory(published descriptor.Descriptor) *Factory {
++	return &Factory{published: cloneDescriptor(published)}
++}
++
++func (f *Factory) Descriptor() descriptor.Descriptor { return cloneDescriptor(f.published) }
++
++func cloneDescriptor(input descriptor.Descriptor) descriptor.Descriptor {
++	out := input
++	out.Implementations = append([]descriptor.Implementation(nil), input.Implementations...)
++	for i := range out.Implementations {
++		out.Implementations[i].ConfigSchema = append([]byte(nil), input.Implementations[i].ConfigSchema...)
++		out.Implementations[i].Capabilities = append([]string(nil), input.Implementations[i].Capabilities...)
++	}
++	return out
+ }
+ 
+ func endpoint(raw string) error {
+diff --git a/clientplugin/invalid_publication_test.go b/clientplugin/invalid_publication_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..662ee1a46cf3340e8a7d8ae798a37db74af3110b
+--- /dev/null
++++ b/clientplugin/invalid_publication_test.go
+@@ -0,0 +1,51 @@
++package clientplugin_test
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"os"
++	"path/filepath"
++	"runtime"
++	"strings"
++	"testing"
++	"time"
++
++	infraexec "github.com/wignerStan/infra/go/process/exec"
++	"github.com/wignerStan/network-data-plane-worker/go/nativeclient"
++)
++
++func TestInvalidPublicationIdentityFailsWithoutAbortingHost(t *testing.T) {
++	if path := os.Getenv("OPENLIST_INVALID_PUBLICATION_PATH"); path != "" {
++		body, err := os.ReadFile(path)
++		if err != nil {
++			t.Fatal(err)
++		}
++		digest := sha256.Sum256(body)
++		if _, err = nativeclient.Inspect(context.Background(), path, hex.EncodeToString(digest[:]), "client.openlist", "go"); err == nil {
++			t.Fatal("unregistered publication was admitted")
++		}
++		return
++	}
++	_, source, _, _ := runtime.Caller(0)
++	root := filepath.Dir(filepath.Dir(source))
++	path := filepath.Join(t.TempDir(), "unregistered-openlist.so")
++	build := infraexec.NewSpec(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-buildmode=c-shared", "-buildvcs=false", "-o", path, "./cmd/openlist-client-plugin").WithTimeout(3 * time.Minute).WithEnv(infraexec.EnvInheritAllButRedacted())
++	build.Dir = root
++	out, err := infraexec.RunContext(context.Background(), build)
++	if err != nil {
++		t.Fatalf("build unregistered fixture: %v %s%s", err, out.StdoutString(), out.StderrString())
++	}
++	values := map[string]string{}
++	for _, item := range os.Environ() {
++		if key, value, ok := strings.Cut(item, "="); ok {
++			values[key] = value
++		}
++	}
++	values["OPENLIST_INVALID_PUBLICATION_PATH"] = path
++	child := infraexec.NewSpec(os.Args[0], "-test.run=^TestInvalidPublicationIdentityFailsWithoutAbortingHost$", "-test.v").WithTimeout(30 * time.Second).WithEnv(infraexec.EnvClean(values))
++	out, err = infraexec.RunContext(context.Background(), child)
++	if err != nil {
++		t.Fatalf("artifact rejection aborted its host: %v %s%s", err, out.StdoutString(), out.StderrString())
++	}
++}
+diff --git a/clientplugin/stream_test.go b/clientplugin/stream_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f8822548b7b939f14c510dc6608759d0bb55b94a
+--- /dev/null
++++ b/clientplugin/stream_test.go
+@@ -0,0 +1,19 @@
++package clientplugin
++
++import (
++	"io"
++	"strings"
++	"testing"
++)
++
++func TestKnownSizeReaderRejectsMismatch(t *testing.T) {
++	for _, n := range []int64{2, 4} {
++		if _, e := io.ReadAll(checkedBody(strings.NewReader("abc"), n)); e == nil {
++			t.Fatalf("accepted wrong size%d", n)
++		}
++	}
++	b, e := io.ReadAll(checkedBody(strings.NewReader("abc"), 3))
++	if e != nil || string(b) != "abc" {
++		t.Fatal(e)
++	}
++}
+diff --git a/clientplugin/webdav.go b/clientplugin/webdav.go
+index 50aee135b1bbbac3728f8c8dcdf6022537d78f36..baf20f2aa03581d9c33b9b865c325248cc9ff099 100644
+--- a/clientplugin/webdav.go
++++ b/clientplugin/webdav.go
+@@ -8,8 +8,8 @@ import (
+ 	"strings"
+ 	"time"
+ 
+-	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
+ 	dav "github.com/OpenListTeam/OpenList/v4/pkg/gowebdav"
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
+ )
+ 
+ type davClient struct {
+diff --git a/cmd/openlist-client-plugin/main.go b/cmd/openlist-client-plugin/main.go
+index cfa7bd57b43c0bf82226dcd2030c425be81c95b7..be3f6f0a1f215d0b43c9a7b8f1b53fcae4aa62c6 100644
+--- a/cmd/openlist-client-plugin/main.go
++++ b/cmd/openlist-client-plugin/main.go
+@@ -1,11 +1,19 @@
+ package main
+ 
+ import (
+-	"github.com/OpenListTeam/OpenList/v4/clientplugin"
++	"github.com/OpenListTeam/OpenList/v4/pluginentry"
+ 	"github.com/wignerStan/network-data-plane-worker/go/nativeclient/provider"
+ )
+ 
+ var buildDigest string
+ 
+-func init() { provider.RegisterFactory(clientplugin.NewFactory(buildDigest)) }
++func init() {
++	factory, err := pluginentry.NewFactory(buildDigest)
++	if err != nil {
++		// Leave the bridge unregistered: the host must reject this artifact,
++		// rather than aborting its process during dynamic library initialization.
++		return
++	}
++	provider.RegisterFactory(factory)
++}
+ func main() {}
+diff --git a/clientplugin/configuration_test.go b/pluginentry/configuration_test.go
+similarity index 92%
+rename from clientplugin/configuration_test.go
+rename to pluginentry/configuration_test.go
+index 87db6af3b6da1c48e461ff13d685b47371da4c4b..ae4b9f115b860d142afdb508e88bc812da0315d6 100644
+--- a/clientplugin/configuration_test.go
++++ b/pluginentry/configuration_test.go
+@@ -1,10 +1,11 @@
+-package clientplugin
++package pluginentry
+ 
+ import (
+ 	"bytes"
+ 	"encoding/json"
+ 	"testing"
+ 
++	"github.com/OpenListTeam/OpenList/v4/clientplugin"
+ 	"github.com/wignerStan/infra/go/code/schema"
+ 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
+ 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
+@@ -21,7 +22,7 @@ func TestOwnedConfigurationSchemasGenerateStandardSecretSemantics(t *testing.T)
+ 	}
+ 	a, _ := json.Marshal(first)
+ 	b, _ := json.Marshal(second)
+-	if !bytes.Equal(a, b) || first.S3.ID == first.WebDAV.ID || first.S3.Owner != PluginID {
++	if !bytes.Equal(a, b) || first.S3.ID == first.WebDAV.ID || first.S3.Owner != clientplugin.PluginID {
+ 		t.Fatal("owned schema identity/generation is unstable")
+ 	}
+ 	for _, doc := range []schema.Document{first.S3, first.WebDAV} {
+@@ -33,7 +34,11 @@ func TestOwnedConfigurationSchemasGenerateStandardSecretSemantics(t *testing.T)
+ 			t.Fatal("owned generation returned formatted bytes instead of structured schema")
+ 		}
+ 	}
+-	published := NewFactory("sha256:" + string(bytes.Repeat([]byte("1"), 64))).Descriptor()
++	factory, e := NewFactory("sha256:" + string(bytes.Repeat([]byte("1"), 64)))
++	if e != nil {
++		t.Fatal(e)
++	}
++	published := factory.Descriptor()
+ 	if published.Schema != "network-data-plane-worker/plugin-descriptor/v2" {
+ 		t.Fatal("breaking schema shape was published under old descriptor version")
+ 	}
+diff --git a/pluginentry/entry.go b/pluginentry/entry.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..04c94f349d23b0c410217df4f3ab9bf052aaf3a5
+--- /dev/null
++++ b/pluginentry/entry.go
+@@ -0,0 +1,60 @@
++// Package pluginentry owns native OpenList plugin publication and schema derivation.
++package pluginentry
++
++import (
++	"encoding/json"
++
++	"github.com/OpenListTeam/OpenList/v4/clientplugin"
++	"github.com/wignerStan/infra/go/code/schema"
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
++)
++
++type ProviderConfigurationSchemas struct {
++	S3     schema.Document
++	WebDAV schema.Document
++}
++
++// ConfigurationSchemas derives this plugin's implementation-owned public models
++// at its publication entry. It performs no provider initialization or I/O.
++func ConfigurationSchemas() (ProviderConfigurationSchemas, error) {
++	s3, err := schema.Derive[clientplugin.S3Configuration](schema.Identity{ID: "client.openlist/configuration/s3", Version: "1", Owner: clientplugin.PluginID})
++	if err != nil {
++		return ProviderConfigurationSchemas{}, err
++	}
++	dav, err := schema.Derive[clientplugin.WebDAVConfiguration](schema.Identity{ID: "client.openlist/configuration/webdav", Version: "1", Owner: clientplugin.PluginID})
++	if err != nil {
++		return ProviderConfigurationSchemas{}, err
++	}
++	return ProviderConfigurationSchemas{S3: s3, WebDAV: dav}, nil
++}
++
++// NewFactory publishes a concrete descriptor once, then injects its immutable
++// values into the runtime handler. Worker remains the descriptor contract owner.
++func NewFactory(buildDigest string) (*clientplugin.Factory, error) {
++	schemas, err := ConfigurationSchemas()
++	if err != nil {
++		return nil, err
++	}
++	s3, err := json.Marshal(schemas.S3.Schema)
++	if err != nil {
++		return nil, err
++	}
++	dav, err := json.Marshal(schemas.WebDAV.Schema)
++	if err != nil {
++		return nil, err
++	}
++	published := descriptor.Descriptor{
++		Schema: descriptor.Schema, PluginID: clientplugin.PluginID, PluginVersion: clientplugin.Version,
++		Contract: port.Contract, Runtime: "go", BuildDigest: buildDigest,
++		Implementations: []descriptor.Implementation{
++			{ID: "s3", DisplayName: "OpenList S3", ConfigSchema: s3, Capabilities: []string{"stat", "list", "open", "put", "delete", "range", "unknown-size-put", "list-pagination"}},
++			{ID: "webdav", DisplayName: "OpenList WebDAV", ConfigSchema: dav, Capabilities: []string{"stat", "list", "open", "put", "delete", "range", "unknown-size-put"}},
++		},
++	}
++	if err = admission.Validate(published); err != nil {
++		return nil, err
++	}
++	return clientplugin.NewFactory(published), nil
++}
+diff --git a/pluginentry/immutability_test.go b/pluginentry/immutability_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..632a3879a223fef8a9b3abff8a2dda922c499f1f
+--- /dev/null
++++ b/pluginentry/immutability_test.go
+@@ -0,0 +1,54 @@
++package pluginentry
++
++import (
++	"bytes"
++	"github.com/OpenListTeam/OpenList/v4/clientplugin"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
++	"strings"
++	"sync"
++	"testing"
++)
++
++func TestRuntimeDescriptorHasNoMutableAliases(t *testing.T) {
++	entryFactory, err := NewFactory("sha256:" + strings.Repeat("1", 64))
++	if err != nil {
++		t.Fatal(err)
++	}
++	published := entryFactory.Descriptor()
++	baseline, err := admission.Encode(published)
++	if err != nil {
++		t.Fatal(err)
++	}
++	handler := clientplugin.NewFactory(published)
++	published.PluginID = "mutated"
++	published.Implementations[0].ID = "mutated"
++	published.Implementations[0].Capabilities[0] = "mutated"
++	published.Implementations[0].ConfigSchema[0] = '!'
++	if got, err := admission.Encode(handler.Descriptor()); err != nil || !bytes.Equal(got.Bytes, baseline.Bytes) {
++		t.Fatalf("constructor input escaped: %v", err)
++	}
++	var wg sync.WaitGroup
++	for n := 0; n < 12; n++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			for i := 0; i < 20; i++ {
++				view := handler.Descriptor()
++				view.Implementations[0].ID = "changed"
++				view.Implementations[0].ConfigSchema[0] = '!'
++				view.Implementations[0].Capabilities[0] = "changed"
++			}
++		}()
++	}
++	wg.Wait()
++	got, err := admission.Encode(handler.Descriptor())
++	if err != nil || !bytes.Equal(got.Bytes, baseline.Bytes) {
++		t.Fatalf("returned descriptor mutated runtime state: %v", err)
++	}
++}
++
++func TestPublicationRejectsInvalidBuildIdentity(t *testing.T) {
++	if _, err := NewFactory("missing-digest"); err == nil {
++		t.Fatal("invalid publication identity accepted")
++	}
++}

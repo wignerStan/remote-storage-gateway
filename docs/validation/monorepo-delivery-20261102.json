@@ -1,0 +1,83 @@
+{
+  "schema": "remote-storage-gateway/monorepo-delivery/v1",
+  "product_build_commit": "4fa2be0b91d381d7a35ec1a6ceadd1400c4dea72",
+  "review_base": "850e17a053bba12e0c2623677874d7cfd32dde78",
+  "topic": "storage/remote-gateway/refactor/derive-openlist-product",
+  "source_owner": "https://github.com/wignerStan/remote-storage-gateway",
+  "previous_repository_name": "wignerStan/network-data-plane-worker",
+  "worker_protocol_identity_unchanged": true,
+  "reviewed_infra": {
+    "base": "c9f29a9c350c23ddca59cdd4239d0bac183308ed",
+    "head": "d4a80fcccc1cc0bd01c3bb432b2743168ab3aa22",
+    "pr": "https://github.com/wignerStan/infra/pull/76"
+  },
+  "checker": {
+    "active_baseline_checkout": "/develop/agent-platform/.worktrees/aw-native-binding-demands/checker",
+    "base": "29eae18ae8fef12252268b0635e07350379265bf",
+    "head": "a099acb508b05949d311eb2ee489bd5604d13ae3",
+    "pr": "https://github.com/wignerStan/aw-checker/pull/29",
+    "sdk_head": "76b47130313fe4087a67d6f3b5942b334e1aac2b",
+    "sdk_pr": "https://github.com/wignerStan/infra/pull/77",
+    "executable_sha256": "41e5f21177382e5607cfd6172af2739326cd37584d753192ed50c8a872757d98",
+    "native_suite_passed": 2055,
+    "native_suite_failed": 0
+  },
+  "validation": {
+    "source_admission_and_mutation_tests": "passed",
+    "derived_openlist_provider_entry_management_tests": "passed",
+    "full_go_race": {
+      "result": "passed",
+      "details": "93f43af source; only route_axes metadata changed during execution to build commit4fa2be0; runtime and Go test source byte-identical",
+      "proof": "/var/tmp/trade-remote-gateway-20261102/proofs/verification.json"
+    },
+    "final_release_native_rclone": {
+      "result": "passed",
+      "sha256": "5eb9db2e7f6ba569e788e639c0b511364c92f9ff377f55bf393b43d83fc693cc",
+      "seconds": 9.176,
+      "covers": "actual dynamic generation drain, peer-preserving cancellation, last handle cleanup and delayed cache FD/write probe",
+      "proof": "/var/tmp/trade-remote-gateway-20261102/proofs/final-release-native.log"
+    },
+    "product_source_scan": {
+      "decision": "pass",
+      "blocking": 0,
+      "advisory": 0
+    },
+    "product_registered_architecture": {
+      "decision": "inconclusive",
+      "blocking": 0,
+      "advisory": 50,
+      "required_unresolved_nodes": 8,
+      "remaining": "native C/C++ selected-build/binding acquisition and incomplete constructor call/body/purity closure"
+    },
+    "native_oci_archive_verification": "passed",
+    "related_github_ci": "not_passed; complete observed matrix and examined stop causes in related-ci-20261102.json"
+  },
+  "receipts": {
+    "artifacts": "monorepo-artifacts-20261102.json",
+    "images": "monorepo-images-20261102.json",
+    "related_ci": "related-ci-20261102.json",
+    "historical_production": "historical-deployment-20261102.json"
+  },
+  "buildbarn": {
+    "native_rules_img": "0.3.23",
+    "successful_invocation": "cf6d05dd-e2ff-4bfc-83bf-36507aa3c7b9",
+    "local_fallback": false,
+    "remote_actions_successful_attempt": 3,
+    "initial_failure": "direct base registry connection timed out; retry forwarded existing proxy through action_env"
+  },
+  "artifacts_directory": "/var/tmp/trade-remote-gateway-20261102/images",
+  "proofs_directory": "/var/tmp/trade-remote-gateway-20261102/proofs",
+  "deployment": {
+    "candidate_only": true,
+    "production_changed": false,
+    "existing_pvc_identity_preserved": true,
+    "pre_rollout_requirement": "approve exact new ELF and descriptor digests; persisted CP dist_dir must be empty for embedded UI; optional VFS needs writable regenerable volume"
+  },
+  "source_consolidation": {
+    "old_prototype": "wignerStan/openlist-client-plugins",
+    "old_source_preserved_by": "Git history plus docs/source-transfer.json and build/source-history.json; historical deployment receipt copied byte-for-byte",
+    "ambient_old_network_go_work": "retired to /var/tmp/trade-validation-fix/retired-network-workspace; generated isolated build workspace is authoritative",
+    "other_existing_worktrees": "preserved; not build dependencies"
+  },
+  "followup_commit_scope": "Only deployment templates, operator documentation and evidence; artifacts were built at the exact product_build_commit above."
+}
