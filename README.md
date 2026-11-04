@@ -106,19 +106,36 @@ Git submodule or commit pin.
 Use the selected, reviewed Infra and Data Plane sources explicitly:
 
 ```sh
-make all MISE=mise INFRA_ROOT=/path/to/reviewed/infra \
-  DATA_PLANE_ROOT=/develop/network/data-plane-worker \
-  RCLONE_ROOT=/develop/network/rclone \
-  BUILD_DIR=/tmp/trade-remote-gateway-build
-make test INFRA_ROOT=/path/to/reviewed/infra \
-  DATA_PLANE_ROOT=/develop/network/data-plane-worker
+make all GO=/opt/go1.27.3/bin/go NODE=/opt/node24.11.0/bin/node \
+  PNPM=/opt/pnpm11.28.9/bin/pnpm JOBS=2 \
+  NATIVE_SDK_ROOT=/build/native-sdk PKG_CONFIG=/usr/bin/pkg-config \
+  INFRA_ROOT=/path/to/reviewed/infra \
+  DATA_PLANE_ROOT=/path/to/reviewed/network-data-plane-worker \
+  RCLONE_ROOT=/path/to/reviewed/rclone \
+  BUILDBARN_ROOT=/path/to/reviewed/buildbarn-storage \
+  BUILD_DIR=/build/storage-gateway
 ```
 
-Development tools are managed by mise; `build/toolchain.json` declares build
-versions. Bootstrap also requires Git and jq. The generated development workspace
-selects independent local modules; package versions remain in their owners'
-`go.mod` files. Release builds require clean source and record measured source
-and artifact identities.
+The native entry point validates the executable versions pinned by
+`build/toolchain.json`. Mise is optional through `MISE=/path/to/mise`.
+Bootstrap also requires Git, Bash, coreutils and jq; native plugins require a C
+compiler and the canonical shared-memory SDK selected by `NATIVE_SDK_ROOT`;
+the build checks the producer receipt, header/archive hashes and selected
+pkg-config file. See the SDK install command in [build/README.md](build/README.md).
+`BUILD_DIR` may be any absolute directory outside the selected source
+repositories and module cache. `JOBS` defaults to 2 and `GOMEMLIMIT` to 768 MiB per
+Go process. Existing Go and pnpm caches are reused.
+
+The build derives exact sources, runs the upstream pnpm UI build with its frozen
+lockfile, embeds that measured UI, and compiles the product ELF, component
+executables and dynamic plugins with local Go. Infra `code/build/source`
+captures and verifies the source/dependency closure before and after native
+compilation. Official Huma and the current `go/patches/rclone` inventory are
+consumed directly. Receipts bind actual source/artifact hashes, SDK/compiler/link inputs and local
+execution. Set `WITH_RCLONE=1` to build and assemble the separate rclone executable
+through its owner's recipe; the default product does not require that optional
+artifact. See [Native product derivation](build/README.md) for stages, outputs
+and validation commands.
 
 `deploy/managed-gateway.yaml` runs the top-level manager and its separate child
 processes in one container, with a dedicated Deployment/Service and explicitly
@@ -127,14 +144,10 @@ selected CP PVC. The public port belongs to Worker TLS; CP and VFS bind loopback
 with mTLS workload identities. See [deployment.md](docs/deployment.md) for the two
 assemblies, scaling boundaries, identities and readiness.
 
-Bazel builds the gateway ELF, standalone component binaries, native plugins, UI
-and OCI images through the shared Buildbarn executor and AC/CAS. `rules_img`
-assembles `bundle_image`, Worker and CP images; independent rclone owns its image.
-The bundle image carries one gateway ELF plus dynamic plugins and optional
-rclone. The CP component image carries no Worker/rclone child executables.
-`make images` uses this same graph. Remote Go compilation is offline, uses
-disposable action scratch space, and creates no persistent private Go/pnpm cache.
-Use the configured shared Bazel user root; do not override it per build directory.
+`make image-inputs` emits verified native artifact and public CA inputs for
+separate OCI assembly. Native Make targets do not invoke Bazel, Buildbarn or
+GitHub Actions. An input composition alone does not establish a built image or
+a production deployment.
 
 Validation receipts under `docs/validation` describe their exact revisions.
 Older receipts and image candidates are historical evidence; they do not imply

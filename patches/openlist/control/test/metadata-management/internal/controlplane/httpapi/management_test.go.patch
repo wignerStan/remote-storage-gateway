@@ -1,6 +1,6 @@
 diff --git a/internal/controlplane/httpapi/management_test.go b/internal/controlplane/httpapi/management_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..be8da692298203f21ccb3caa8613323ffcc1e605
+index 0000000000000000000000000000000000000000..fed1b25113f7f68e98ec0bd20072103b8d354787
 --- /dev/null
 +++ b/internal/controlplane/httpapi/management_test.go
 @@ -0,0 +1,377 @@
@@ -43,20 +43,20 @@ index 0000000000000000000000000000000000000000..be8da692298203f21ccb3caa8613323f
 +	}
 +	return p
 +}
-+func fixtureAPI(engine *gin.Engine, r *cp.Registry) {
++func fixtureAPI(r *cp.Registry) *gin.Engine {
 +	entry := httpapi.NewEntry(r, nil)
 +	table, err := schemaapi.Compose(httpapi.APIConfig(), entry.RegisterRoutes)
 +	if err != nil {
 +		panic(err)
 +	}
-+	if err = openapigin.Mount(engine, engine.Group("/api/admin/control"), table, openapigin.Options{OpenAPIPath: "/openapi", SchemasPath: "/schemas", Errors: httpapi.ErrorPolicy()}); err != nil {
++	engine, err := openapigin.New(table, openapigin.Options{Prefix: "/api/admin/control", OpenAPIPath: "/openapi", SchemasPath: "/schemas", Errors: httpapi.ErrorPolicy()})
++	if err != nil {
 +		panic(err)
 +	}
++	return engine
 +}
 +func router(r *cp.Registry) http.Handler {
-+	engine := gin.New()
-+	fixtureAPI(engine, r)
-+	return engine
++	return fixtureAPI(r)
 +}
 +func request(t *testing.T, r http.Handler, method, path, body string) *httptest.ResponseRecorder {
 +	t.Helper()

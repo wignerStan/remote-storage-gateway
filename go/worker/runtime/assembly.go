@@ -147,14 +147,8 @@ func assemble(ctx context.Context, c workerconfig.RuntimeConfig) (runtime *Runti
 	if err != nil {
 		return nil, err
 	}
-	engine := gin.New()
-	engine.RedirectTrailingSlash = false
-	engine.RedirectFixedPath = false
-	engine.HandleMethodNotAllowed = true
-	if err = engine.SetTrustedProxies(nil); err != nil {
-		return nil, err
-	}
-	if err = openapigin.Mount(engine, nil, routes, openapigin.Options{OpenAPIPath: "/v1/openapi", SchemasPath: "/v1/schemas", Guard: entry.Guard, Headers: map[string]string{"Cache-Control": "no-store"}}); err != nil {
+	engine, err := openapigin.New(routes, openapigin.Options{OpenAPIPath: "/v1/openapi", SchemasPath: "/v1/schemas", Guard: entry.Guard, Headers: map[string]string{"Cache-Control": "no-store"}})
+	if err != nil {
 		return nil, err
 	}
 	r.control = engine

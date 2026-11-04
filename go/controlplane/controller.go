@@ -74,7 +74,7 @@ func New(c cpconfig.Config) (*Controller, error) {
 	}
 	return &Controller{config: c, clients: map[string]*control.WorkerClient{}, remotes: map[string]broker.WorkerControl{}, closeDone: make(chan struct{})}, nil
 }
-func (c *Controller) Start(ctx context.Context) error {
+func (c *Controller) Start(ctx context.Context) (err error) {
 	if ctx == nil {
 		return broker.ErrInvalid
 	}
@@ -83,17 +83,36 @@ func (c *Controller) Start(ctx context.Context) error {
 	if c.started || c.closing {
 		return broker.ErrUnavailable
 	}
-	c.started = true
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	remotes := make(map[string]broker.WorkerControl)
+	defer func() {
+		if err == nil {
+			return
+		}
+		// A partial startup never becomes ready and never retains a client that
+		// can outlive the failed attempt. Nothing has been exposed to callers yet.
+		for _, remote := range remotes {
+			if closer, ok := remote.(interface{ Close(context.Context) error }); ok {
+				err = errors.Join(err, closer.Close(context.Background()))
+			}
+		}
+	}()
 	for _, w := range c.config.Workers {
 		if w.Remote != nil {
-			client, err := newRemote(w)
-			if err != nil {
-				return err
+			client, e := newRemote(w)
+			if e != nil {
+				return e
 			}
-			c.remotes[w.ID] = client
+			remotes[w.ID] = client
 		}
 	}
-
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	c.remotes = remotes
+	c.started = true
 	return nil
 }
 
@@ -142,7 +161,7 @@ func (c *Controller) Instances() []Instance {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			info, e := client.Info(ctx)
 			cancel()
-			if e == nil && info.Ready && info.ID == w.ID {
+			if e == nil && assignedInfo(w, info) {
 				phase = "ready"
 			}
 		}
@@ -160,13 +179,31 @@ func (c *Controller) Decide(ctx context.Context, in broker.TransferIntent) (brok
 	}
 	client, err := c.Worker(in.Principal)
 	if err != nil {
+		if canceled := ctx.Err(); canceled != nil {
+			return broker.Decision{}, canceled
+		}
 		return broker.Decision{}, broker.ErrDenied
 	}
 	info, err := client.Info(ctx)
-	if err != nil || !info.Ready || info.ID != in.Principal {
+	if canceled := ctx.Err(); canceled != nil {
+		return broker.Decision{}, canceled
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return broker.Decision{}, err
+	}
+	if err != nil {
 		return broker.Decision{}, broker.ErrDenied
 	}
-	return resolve(c.config.Rules, in)
+	for _, w := range c.config.Workers {
+		if w.ID == in.Principal && assignedInfo(w, info) {
+			return resolve(c.config.Rules, in)
+		}
+	}
+	return broker.Decision{}, broker.ErrDenied
+}
+
+func assignedInfo(w cpconfig.WorkerEndpoint, info broker.InstanceInfo) bool {
+	return info.Contract == broker.Contract && info.Ready && info.ID == w.ID && info.DataEndpoint == w.DataEndpoint
 }
 func (c *Controller) Close(ctx context.Context) error {
 	if ctx == nil {

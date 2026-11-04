@@ -7,9 +7,11 @@ import (
 	"github.com/wignerStan/infra/go/process/supervisor"
 	cpconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/control"
 	"github.com/wignerStan/remote-storage-gateway/go/contracts/control/broker"
+	"github.com/wignerStan/remote-storage-gateway/go/controlplane"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -32,13 +34,22 @@ type controlPlane struct {
 
 func newControlPlane(spec ControlPlaneSpec) (*controlPlane, error) {
 	u, e := url.Parse(spec.ReadyURL)
-	if e != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "/ping" || u.Opaque != "" {
+	if e != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "/ping" || u.RawPath != "" || u.Opaque != "" {
 		return nil, broker.ErrInvalid
 	}
 	host, port, e := net.SplitHostPort(u.Host)
 	number, nerr := strconv.Atoi(port)
-	if e != nil || nerr != nil || number < 1 || number > 65535 || host != "127.0.0.1" || spec.ID == "" || len(spec.ID) > 128 || !filepath.IsAbs(spec.DataDirectory) || !filepath.IsAbs(spec.ConfigFile) || strings.ContainsAny(spec.ID, "/\x00\r\n") {
+	if e != nil || nerr != nil || number < 1 || number > 65535 || port != strconv.Itoa(number) || host != "127.0.0.1" || spec.ID == "" || len(spec.ID) > 128 || !filepath.IsAbs(spec.DataDirectory) || !filepath.IsAbs(spec.ConfigFile) || strings.ContainsAny(spec.ID, "/\x00\r\n") {
 		return nil, broker.ErrInvalid
+	}
+	// Admission is passive: it validates the exact same assignments and transfer
+	// policy as the child controller, without opening a provider or a listener.
+	controller, e := controlplane.New(spec.Control)
+	if e != nil {
+		return nil, e
+	}
+	if e = controller.Close(context.Background()); e != nil {
+		return nil, e
 	}
 	payload, e := json.Marshal(spec.Control)
 	if e != nil || len(payload) > 1<<20 {
@@ -54,6 +65,9 @@ func (p *controlPlane) processSpec() (supervisor.Spec, error) {
 	command = command.WithStdin(bytes.NewReader(p.payload))
 	for key, value := range proxyEnvironment() {
 		command = command.WithExtraEnv(key, value)
+	}
+	if value, present := os.LookupEnv("OPENLIST_CONTROL_TARGETS_FILE"); present {
+		command = command.WithExtraEnv("OPENLIST_CONTROL_TARGETS_FILE", value)
 	}
 	for key, value := range map[string]string{"OPENLIST_GATEWAY_CONTROL_FILE": "-", "GATEWAY_SAME_HOST": "1", "OPENLIST_ADDR": "127.0.0.1", "OPENLIST_HTTP_PORT": p.port, "OPENLIST_HTTPS_PORT": "-1", "OPENLIST_FORCE_HTTPS": "false", "OPENLIST_ENABLE_H3": "false"} {
 		command = command.WithExtraEnv(key, value)

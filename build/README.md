@@ -1,212 +1,167 @@
-# Reproducible product derivation
+# Native product derivation
 
-This monorepo owns the Gateway Worker application, Control Plane, independent
-concrete client/transfer entries and OpenList patch stack.
-Generic Data Plane contracts and runtime remain in the independent
-`network-data-plane-worker` Go module, selected by `DATA_PLANE_ROOT`. OpenList and its frontend are upstream products materialized at ignored
-`build/openlist` and `build/openlist-ui`. The closed Git v5 records bind immutable
-upstream URL/commit, the package patch order and final tree. Each semantic patch
-owns exactly one source target. `patches/openlist/apply_order.txt` is the only
-order authority and `run.py` verifies the package through the installed Git skill.
-The Go producer owns acquisition and build receipts. Reference clones reuse
-existing object stores with dissociation; a detected shallow reference uses an
-explicit local clone. It never sets Git `safe.directory` or edits reference input
-checkouts. Whole upstream products are not tracked as `third_party` libraries.
+The Gateway build owns product assembly: the manager ELF, its independent CP and
+Worker child modes, source-built UI, concrete client plugins and the REAPI /
+ByteStream transfer plugin. Generic Worker contracts and runtime remain in the
+independent Data Plane repository. The optional raw-cache VFS executable is compiled by
+the independent rclone repository's native recipe. Immutable source views use
+the BuildBarn product's typed process binding and its explicitly selected native
+executable; that executable remains built by its own source owner.
 
-Infra owns the versioned rclone SDK and its patch inventory. Independent rclone
-owns its CLI/materializer artifact. The product does not pin a rclone Git hash or
-maintain a second patch stack. The former whole OpenList client fork is not a
-build dependency. Historical extraction commits remain in `source-history.json`;
-current package patches consolidate those changes once per target.
+## Source authority
 
-## Preserved implementation and extraction
+OpenList and its frontend retain their immutable upstream commits in the closed
+Git v5 `upstream_product_build` records. The OpenList semantic patch inventory
+under `patches/openlist` remains the only product patch order authority. Every
+patch hash and the resulting tree are verified before a source receipt is
+published. Existing object references are optional acquisition inputs; they do
+not authorize mutable source selection. A verified reference is cloned with
+dissociation, and no source checkout or module cache is rewritten.
 
-The control-family OpenList patches preserve the accepted control-plane source
-tree at `cdddb733`, including the existing object-ID and Drive fixes and typed
-management entries. The client-family patches move the selected client adapters and tests
-from `f5d3a4ce` into that same derived upstream Go module. Its plugin main uses
-the shared first-party `nativeclient/provider` bridge. It does not carry another
-copy of the C ABI implementation.
+Infra `go/go.mod` selects the exact official rclone SDK version. The Go module
+checksum and its `go.mod` checksum must both match Infra `go/go.sum`. Infra's
+`go/patches/rclone/series.json` supplies the ordered common patches; the canonical
+module cache is copied into an external derivation before any patch is applied.
+The independent rclone build applies those common patches followed by its own
+managed CLI/backend patch. A missing upstream module, patch mismatch or changed
+derivation is an error, never a request to synthesize a dependency or change its
+version. Huma remains the official versioned Go dependency selected by Infra.
+The retired `third_party/huma` relationship is not consumed.
 
-The client package patches extract the existing `drivers/s3.initSession` static-credential
-initializer into public `pkg/storage/s3session`. Both the legacy driver and the
-native client call that kernel. The streaming S3 port adapter is parent-owned
-code; it is not presented as extraction of the complete upstream S3 driver.
-WebDAV reuses the upstream `pkg/gowebdav` client with request-local context and
-response cleanup patches. Other OpenList drivers remain source dependencies of
-the legacy control plane, not advertised native client implementations.
+Generated workspaces discover selected first-party module identities from their
+actual `go.mod` files, then bind version-qualified local replacements only for
+modules in the required graph. They include the current focused Infra adapter
+modules. No package version is inferred from a neighboring checkout, changed by
+a recipe or replaced with a compatibility stub.
 
-The fourth patch puts schema derivation and descriptor publication in
-`pluginentry`. The implementation continues to own its exported configuration
-models, while `clientplugin` receives immutable descriptor values and performs
-provider operations. Its descriptor getter returns independent copies; it
-does not import the schema application-support tool. Invalid native publication
-leaves the shared bridge unregistered so the loader can reject the artifact
-without aborting the host during `dlopen`.
-
-Go's internal-package boundary remains valid because CP and selected OpenList
-client code are built from the same derived `github.com/OpenListTeam/OpenList/v4`
-module. Worker contracts remain first-party and authoritative. The Worker host
-dynamically loads the independently built `.so`; it does not import the
-OpenList factory. Entry types and named operations still contribute to the
-existing schema effect tool. Moving the sources does not introduce a second
-descriptor, secret-field schema or HTTP framework contract.
-
-The fifth patch assembles the Gateway process manager, local typed management
-entries and child-aware readiness inside OpenList. The native provider
-`nativeclient/provider` adapter now delegates generic C/eventfd/cgo mechanics to
-Infra `plugins/native/provider`.
-
-The sixth patch isolates managed Control Plane execution before persisted setting
-hooks, storage initialization and task restoration. It publishes only identity,
-DB metadata and typed control routes; legacy mode remains a separate profile.
-
-The seventh patch follows Infra’s published `plugins/native` import in the
-extracted native test without rewriting the earlier patches.
-
-The eighth follows the purpose-specific schema owners: `config/schema` derives
-configuration, `network/http/openapi` admits typed HTTP declarations, and its
-`gin` facet mounts them. Entry keeps its route and rejection policy ownership.
-The serving package acquires no Huma dependency.
-
-The workspace explicitly admits Infra’s tracked Huma implementation through its
-existing source-relationship record and declared Go-module replacement. Module
-identity must match; adjacent or undeclared source is rejected. Its actual source
-bytes and ownership record contribute to the native build fingerprint.
-
-## Build stages
-
-Initialize the exact submodules, then select the reviewed Infra checkout and an
-external output directory. The `-release` source-tool option additionally
-requires clean exact product, Infra and external Data Plane commits. An unfinished dev checkout is
-recorded as dirty and cannot satisfy that release gate.
+## Local build
 
 ```sh
-git submodule update --init --recursive
-make MISE=mise INFRA_ROOT=/path/to/reviewed/infra \
-  BUILD_DIR=/tmp/trade-remote-gateway-build source test-build
-make MISE=mise INFRA_ROOT=/path/to/reviewed/infra \
-  BUILD_DIR=/tmp/trade-remote-gateway-build plugin worker materializer rclone admin
-make MISE=mise INFRA_ROOT=/path/to/reviewed/infra \
-  BUILD_DIR=/tmp/trade-remote-gateway-build control-plane test-derived
+make all \
+  GO=/opt/go1.27.3/bin/go NODE=/opt/node24.11.0/bin/node \
+  PNPM=/opt/pnpm11.28.9/bin/pnpm JOBS=2 \
+  NATIVE_SDK_ROOT=/build/native-sdk PKG_CONFIG=/usr/bin/pkg-config \
+  INFRA_ROOT=/sources/infra \
+  DATA_PLANE_ROOT=/sources/network-data-plane-worker \
+  RCLONE_ROOT=/sources/rclone \
+  BUILDBARN_ROOT=/sources/buildbarn-storage \
+  BUILD_DIR=/build/storage-gateway
 ```
 
-OpenList source selection is closed to the two product-owned Git records.
-Rclone is selected exclusively from the package version required by
-`<INFRA_ROOT>/go/go.mod`. The version-free
-`<INFRA_ROOT>/patches/rclone/series.json` records only the module name and
-ordered patch checksums. Legacy rclone Git relationships, competing product
-patches, patch path escapes and checksum mismatches fail admission.
+`build/toolchain.json` pins Go, Node and pnpm. The recipe validates the actual
+executables; `MISE=/path/to/mise` is an optional tool selector. Bootstrap needs
+Git, Bash, coreutils and jq. CGO builds need a Linux C compiler and canonical
+Infra `c/interop/plugins/include` headers. Build output may use any absolute
+caller-owned directory outside the selected repositories and shared module
+cache. Source, patch or recipe changes require a fresh derivation directory when
+an admitted source snapshot has changed.
 
-`go mod download -json module@version` resolves that package outside either
-owner's repository. The tool verifies the canonical module directory using
-Go's `dirhash.HashDir` against the stock module checksums in Infra `go.sum`.
-It copies verified files into external `source/rclone-module` before applying
-patches. The global module cache remains untouched. The module-source receipt
-records the selected version, integrity sums and measured derived content hash;
-there is no expected Git commit or result-tree gate. Changed snapshots fail
-integrity checks rather than being silently reset. Historical Git-derived
-snapshots and receipts are not reused as module-version authority.
+The shared-memory C SDK must be a real install of the selected canonical Infra
+producer. Build it separately before the product, or select an existing verified
+installation:
 
-The native fingerprint binds Infra's own commit for library provenance plus its
-actual Go module inputs, cloud/VFS storage sources, patch inventory and patch
-bytes, together with product sources and recipe. Checksums protect integrity;
-they do not select a competing package version.
+```sh
+make -C /sources/infra/c/shared-memory \
+  BUILD=/build/native-sdk-objects PREFIX=/build/native-sdk \
+  SOURCE_COMMIT="$(git -C /sources/infra rev-parse HEAD)" install
+```
 
-The bootstrap script binds only enough existing first-party modules to run the
-Go build tool. The tool then discovers actual module declarations using
-`go mod edit -json`, resolves the required reviewed Infra modules and derived
-third-party modules, and writes an isolated `go.work`. It never binds the old
-standalone CP or client-fork workspaces or edits a global module cache.
+`NATIVE_SDK_ROOT` selects that installation and `PKG_CONFIG` selects the actual
+pkg-config executable. The recipe verifies the SDK producer receipt, canonical
+source identity, ABI profile, header and archive hashes, and the exact `.pc` file
+selected by pkg-config. Expanded Cflags/Libs must remain inside the verified SDK.
+The source manifest captures these SDK files and the actual C compiler and
+pkg-config executables. The product build digest also binds their hashes and the
+selected CGO flags. Caller `PKG_CONFIG_PATH` remains an explicit input. The
+current native recipe accepts only its canonical plugin include and ordinary
+optimization, debug, PIC and pthread flags in `CGO_CFLAGS`, `CGO_CPPFLAGS`,
+`CGO_CXXFLAGS` and `CGO_LDFLAGS`. It rejects extra include/library paths,
+archives, response files and compiler plugins because their bytes are absent
+from the declared input manifest. Compiler header/library search variables are
+removed from the actual subprocess environment, including caller overrides;
+setting them to empty is insufficient and breaks GCC's frontend discovery.
+Additional native inputs need an explicit source
+capture contract before the recipe can support them.
 
-For Infra validation with `GOWORK=off`, use an external `-modfile` derived from
-the same reviewed module graph with only the admitted rclone source replacement.
-Do not commit an absolute replacement. Go ignores replacement directives from
-dependency modules, so this workflow does not claim that a plain downstream
-module download automatically includes Infra's upstream patches. See the
-[Go module replacement rules](https://go.dev/ref/mod#go-mod-file-replace). The owning
-source assembly and the selected module version are distinct inputs.
+The pipeline performs these operations in order:
 
-`build/toolchain.json` pins development tools managed by mise. Install those
-versions before building. Standard `aspect_rules_js` translates the pinned
-`pnpm-lock.yaml` into declared dependency inputs. Vite runs on Buildbarn with the
-declared Node/pnpm tools, without an install or network fetch in that action.
-Its deterministic dist archive feeds the remote Go compilation of the existing
-`go:embed all:dist`. Output collection restores that archive into the disposable
-OpenList `public/dist`. A content receipt binds the assets to
-the UI commit, lockfile and toolchain, and CP compilation rejects changed
-assets. No downloaded frontend release archive is a source-build result.
+1. `make source` verifies and derives the pinned OpenList/UI products and common
+   rclone module, then writes the required development workspace.
+2. The UI recipe executes the pinned pnpm `install --frozen-lockfile`, then the
+   upstream `pnpm run build`. It checks that the lockfile and admitted source are
+   unchanged, rejects nonregular dist files, and installs the measured dist tree
+   into the derived OpenList `public/dist` used by `go:embed`.
+3. Infra `code/build/source` captures the exact source, compiler and Go dependency
+   closure. Dependency acquisition is allowed during this admission step using
+   the caller's configured package sources. Versions and source module files
+   remain read-only.
+4. Native Go builds run sequentially with `-mod=readonly -trimpath`, bounded
+   compiler parallelism and dependency resolution disabled. Each resulting ELF
+   must carry the selected compiler and owning module identity. The recorded
+   closure is verified again before the complete artifact directory is
+   published.
 
-Materialized sources, receipts and selected release outputs stay under the chosen
-`/tmp/trade-*` or `/var/tmp/trade-*` directory. Shared tool/module caches keep
-their existing common locations. Bazel uses the configured common user root;
-Buildbarn AC/CAS caches both compilation and image actions. Compiler scratch
-exists only inside its remote action and is removed on exit. A successful source receipt is
-published only after tree verification. Reusing the directory rechecks admitted
-source and rejects unrecorded code. A failed changed-input replay needs a fresh
-output directory rather than an automatic destructive reset.
+`JOBS` defaults to 2 and `GOMEMLIMIT` to 768 MiB per Go process. The UI Node heap is
+bounded to 1536 MiB. Existing Go module/build caches and pnpm content stores are
+reused. `GOMODCACHE`, `GOCACHE`, `GOPROXY` and `GOSUMDB` may be set explicitly.
+The native entry points do not execute Bazel, Buildbarn or GitHub Actions.
 
-The built programs are:
-
-| Output | Role |
+| Output | Owner and role |
 | --- | --- |
-| `bin/openlist-control-plane` | CP with the built UI embedded |
-| `bin/client-openlist.so` | Selected OpenList-derived native client |
-| `bin/client-rclone.so` | Rclone remote client |
-| `bin/storage-worker` | Independent Worker process |
-| `bin/rclone` | Externally derived native rclone materializer |
+| `bin/gateway` | One product ELF; manager self-execs separate CP and Worker PIDs |
+| `bin/openlist-control-plane` | Standalone CP with the built UI embedded |
+| `bin/storage-worker` | Standalone Worker process |
+| `bin/client-openlist.so` | OpenList-derived concrete native client |
+| `bin/client-rclone.so` | Current Infra-backed rclone native client |
 | `bin/transfer-reapi.so` | Dynamic REAPI / ByteStream codec |
 | `bin/gateway-admin` | Administrative bootstrap tool |
+| `bin/rclone` | Optional independently compiled native VFS executable |
 
-## Native OCI assembly
+Set `WITH_RCLONE=1` on `make all` to request the optional executable. Gateway
+invokes the rclone source owner's native recipe, validates its source identity,
+and retains its owner receipt. `make rclone` builds that independent executable
+alone under `BUILD_DIR/materializer`; it does not move VFS ownership into the
+Gateway ELF. The default Gateway build omits the optional rclone artifact.
 
-Root `BUILD.bazel` uses native `rules_img` 0.3.23. The official Debian
-trixie-slim index is pinned to
-`sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4`.
-The gateway image contains its program, both independent client `.so` files and
-the transfer plugin and public CA bundle. The CP-manager image additionally
-contains separate Worker/VFS child binaries and plugin artifacts. The independent
-rclone repository owns the VFS image and its remote CLI compilation. Gateway
-consumes that declared output once; it does not compile a second CLI. There is
-no external frontend layer or `OPENLIST_DIST_DIR` override.
+`BUILDBARN_ROOT` is required even when `WITH_RCLONE=0`: the Manager links the
+BuildBarn process module alongside the independent rclone Box. Both selected
+module source trees join dependency capture and the Gateway build fingerprint.
+This does not bundle or rebuild the BuildBarn CLI; select its owner-built
+executable explicitly in the `buildbarn-source` materializer configuration.
+See [the typed source configuration](../docs/gateway-runtime.md).
 
-`make prepare` generates source manifests referenced by `GATEWAY_BUILD_INPUTS`
-and `RCLONE_BUILD_INPUTS`. They map owned source paths to verified content hashes
-and modes without copying toolchains or module caches. The native compiler
-actions consume those inputs offline. Image layers consume their declared
-outputs directly; no local prebuilt-binary admission step is required. Operator
-configuration, credentials, databases and keys are never image inputs.
+`receipts/ui.json` binds frontend commit, frozen lock, toolchain and generated
+assets. Per-artifact receipts and `receipts/native-release.json` bind source
+identity, actual output hash and `execution: local-go`; UI records
+`execution: local-node-pnpm`. Source receipts record measured provenance without
+claiming a package release or a Buildbarn execution. A release requested with
+`-release` additionally requires clean selected source repositories.
 
-```sh
-make images INFRA_ROOT=/path/to/reviewed/infra \
-  DATA_PLANE_ROOT=/path/to/reviewed/data-plane-worker \
-  RCLONE_ROOT=/develop/network/rclone BUILD_DIR=/tmp/trade-remote-gateway-build
-```
+## Validation and packaging inputs
 
-Remote image actions have local fallback disabled. They use neither BuildKit,
-Podman nor Buildah. A successful native OCI build and deployed runtime parity
-are separate checks; a generated recipe alone establishes neither.
+`make test-build` exercises source admission, ordered patch integrity, workspaces,
+artifact receipts, output isolation and UI archive admission without a product
+build. `make test-derived` runs the derived OpenList tests. `make test` and
+`make test-core` use the freshly built native artifacts. Tests that require the
+optional independent VFS must select `WITH_RCLONE=1`.
 
-## Updating upstream
+`make image-inputs` checks a clean release, the current source/link manifest,
+complete release receipt, individual owner receipts and binary hashes. It stages
+and revalidates the complete composition before replacing the prior input tree.
+It emits the local executable,
+plugins and public CA bundle into the existing bundle / CP / Worker input
+compositions. The bundle includes rclone only when selected. OCI packaging and
+production deployment are separate operations; producing inputs is not evidence
+that an image or deployment has run. Historical Bazel files and remote-action
+fixtures are retained as historical inputs and are not selected by native Make
+targets.
 
-Update the exact official gitlink on a product topic, recreate the ordered
-patch stack in a fresh disposable source tree, review conflicts as source
-changes, and update the patch hashes and resulting tree in the relationship
-record. Preserve the recorded old/new source tips. Run the source admission
-tests, selected-provider streaming/native tests, typed management/auth tests,
-source frontend build, embedded CP build and native OCI assembly. Publication
-belongs to the product's reviewed PR, not an upstream fork release workflow.
+## Updates
 
-Rclone updates follow the package lane: change the required module version in
-Infra `go/go.mod`, let Go maintain stock checksum integrity, review/rebase the
-ordered patches and update only their inventory checksums. Re-materialize in a
-fresh external module snapshot and measure its resulting bytes. Do not add a
-Git pin, hard-coded expected tree, modified global module cache or committed
-absolute replacement.
-
-The VFS executable is independently derived by `/develop/network/rclone`; select
-that versioned Go module through `RCLONE_ROOT`. Its own recipe verifies the same
-Infra-owned SDK patch inventory, then applies the managed native command/backend
-patches in its separate build workspace. Gateway assembles its resulting binary
-for the optional managed child; it does not own another VFS implementation or
-VFS image. Public materializer configuration is imported from that module.
+An upstream OpenList/UI update changes its immutable relationship, reviews and
+rebases the semantic patch set in a fresh disposable tree, and records the
+resulting admitted tree. An official rclone SDK update changes the owning Go
+manifest/checksums and rebases the ordered patch inventory. Rebuild and verify
+source UI, ELFs, native plugins and optional VFS together whenever a cross-owner
+contract changes. Published versions and PR promotion remain owned by their
+repositories, not by the build recipe.

@@ -4,13 +4,14 @@
 # PVC requires stopping its previous writer and migrating legacy endpoint traffic.
 # BUNDLE_IMAGE contains gateway, optional independent rclone and both dynamic plugin axes.
 # The secret supplies targets.json, bundle.json, CP configuration and referenced credentials.
-# bundle.json runtime_directory=/run/gateway/control; Worker local_data_socket
-# is /run/gateway/control/data.sock. VFS payload uses this private data UDS; its
-# private cached DAV listener binds loopback. Metadata uses separate ttrpc sockets.
+# bundle.json runtime_directory=/run/gateway/control. Worker storage_ipc_socket
+# carries finite metadata; storage_offer_socket bootstraps authenticated shared
+# memory over Unix seqpacket. VFS payload uses admitted shared-memory leases.
+# The optional cached DAV frontend binds loopback; no raw HTTP data UDS exists.
 # CP config must keep force:false so the explicit private bind overrides apply.
 # Management binds loopback and public TLS belongs to the Worker.
 # CONTROL_PLANE_HOST equals the configured Worker control_plane.host. Its /ping
-# succeeds only after manager activation and all children are ready.
+# checks the public Worker-to-CP management route, not optional VFS activation.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -35,7 +36,20 @@ spec:
       initContainers:
         - name: private-control-files
           image: docker.io/library/debian@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
-          command: [/bin/sh, -ec, "cp /input/* /private/; chmod 0600 /private/*; chown 1001:1001 /private/*"]
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              umask 077
+              # Reclaim only this init-owned emptyDir before retrying copies.
+              chown 0:0 /private
+              chmod 00700 /private
+              rm -f /private/*
+              cp /input/* /private/
+              chmod 0600 /private/*
+              # Hand off files before the directory loses root traversal.
+              chown 1001:1001 /private/*
+              chown 1001:1001 /private
           securityContext:
             runAsUser: 0
             readOnlyRootFilesystem: true

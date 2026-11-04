@@ -34,13 +34,16 @@ func TestFactoryInjectedDescriptorAndStrictSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Descriptor.PluginID != PluginID || len(record.Descriptor.Implementations) != 4 {
+	if record.Descriptor.PluginID != PluginID || len(record.Descriptor.Implementations) != 7 {
 		t.Fatal("missing declared backend inventory")
 	}
 	if f.requests.Load() != 0 {
 		t.Fatal("passive descriptor constructed remote backend")
 	}
 	expected := map[string]map[string]bool{"s3": {"access_key_id": true, "secret_access_key": true, "session_token": false}, "webdav": {"password": false}, "webdav-streaming": {"password": false}, "drive": {"token": true, "client_secret": false}}
+	for _, backend := range []string{"s3", "webdav", "drive"} {
+		expected["archive-"+backend] = expected[backend]
+	}
 	for _, impl := range record.Descriptor.Implementations {
 		fields := admission.SecretFields(impl)
 		if len(fields) != len(expected[impl.ID]) {
@@ -105,6 +108,7 @@ func TestActualRcloneNativePluginLifecycle(t *testing.T) {
 	if f.requests.Load() != 0 || record.Descriptor.PluginID != PluginID {
 		t.Fatal("native passive discovery contacted backend or changed identity")
 	}
+	t.Run("source-view", func(t *testing.T) { testSourceArchive(t, factory) })
 	for _, test := range []struct {
 		implementation, public string
 		missing                bool

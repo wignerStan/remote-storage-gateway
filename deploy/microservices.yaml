@@ -16,7 +16,25 @@ spec:
       initContainers:
         - name: private-role-files
           image: docker.io/library/debian@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
-          command: [/bin/sh, -ec, "mkdir /private/config /private/workload; cp /config/* /private/config/; cp /workload/* /private/workload/; chmod 0700 /private/config /private/workload; chmod 0600 /private/config/* /private/workload/*; chown -R 1001:1001 /private/config /private/workload"]
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              umask 077
+              mkdir -p /private/config /private/workload
+              # emptyDir survives init retries. CHOWN alone can reclaim these
+              # init-owned directories; it cannot bypass their 0700 access.
+              chown 0:0 /private/config /private/workload
+              chmod 00700 /private/config /private/workload
+              # Unlink old copies before writing: they may already be 1001:1001
+              # with mode 0600, and removed Secret keys must not survive a retry.
+              rm -f /private/config/* /private/workload/*
+              cp /config/* /private/config/
+              cp /workload/* /private/workload/
+              chmod 0600 /private/config/* /private/workload/*
+              # Hand off files before directories, while traversal is permitted.
+              chown 1001:1001 /private/config/* /private/workload/*
+              chown 1001:1001 /private/config /private/workload
           securityContext: {runAsUser: 0, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL], add: [CHOWN]}}
           volumeMounts:
             - {name: input-configuration, mountPath: /config, readOnly: true}
@@ -64,7 +82,25 @@ spec:
       initContainers:
         - name: private-role-files
           image: docker.io/library/debian@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
-          command: [/bin/sh, -ec, "mkdir /private/config /private/workload; cp /config/* /private/config/; cp /workload/* /private/workload/; chmod 0700 /private/config /private/workload; chmod 0600 /private/config/* /private/workload/*; chown -R 1001:1001 /private/config /private/workload"]
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              umask 077
+              mkdir -p /private/config /private/workload
+              # emptyDir survives init retries. CHOWN alone can reclaim these
+              # init-owned directories; it cannot bypass their 0700 access.
+              chown 0:0 /private/config /private/workload
+              chmod 00700 /private/config /private/workload
+              # Unlink old copies before writing: they may already be 1001:1001
+              # with mode 0600, and removed Secret keys must not survive a retry.
+              rm -f /private/config/* /private/workload/*
+              cp /config/* /private/config/
+              cp /workload/* /private/workload/
+              chmod 0600 /private/config/* /private/workload/*
+              # Hand off files before directories, while traversal is permitted.
+              chown 1001:1001 /private/config/* /private/workload/*
+              chown 1001:1001 /private/config /private/workload
           securityContext: {runAsUser: 0, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL], add: [CHOWN]}}
           volumeMounts:
             - {name: input-configuration, mountPath: /config, readOnly: true}

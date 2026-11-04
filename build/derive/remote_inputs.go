@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode"
 
-	buildinputs "github.com/wignerStan/infra/go/code/buildsource"
+	buildinputs "github.com/wignerStan/infra/go/code/build/source"
 	processexec "github.com/wignerStan/infra/go/process/exec"
 )
 
@@ -73,95 +73,56 @@ func (b *builder) remoteInputs() error {
 	if _, err = b.verifyModuleSnapshot(version, series); err != nil {
 		return err
 	}
-	// The standalone source owner computes its own fingerprint. Never substitute
-	// an old binary receipt after source or build recipe changes.
-	native, err := b.nativeFingerprint()
+	program, err := b.selectedGo()
+	if err != nil {
+		return err
+	}
+	goRoot, err := b.goCommand(b.root, nil, "env", "GOROOT")
+	if err != nil {
+		return err
+	}
+	link, err := b.linkInputs()
 	if err != nil {
 		return err
 	}
 	inputDir := filepath.Join(b.output, "build-inputs")
-	if err := os.MkdirAll(inputDir, 0755); err != nil {
-		return err
-	}
 	roots := []buildinputs.Root{
 		{Source: filepath.Join(b.root, "go"), Stage: "workspace/gateway/go"},
 		{Source: filepath.Join(b.infra, "go"), Stage: "workspace/infra/go"},
 		{Source: filepath.Join(b.infra, "c"), Stage: "workspace/infra/c"},
-		{Source: filepath.Join(b.infra, "rust/crates/interop"), Stage: "workspace/infra/rust/crates/interop"},
-		{Source: filepath.Join(b.infra, "third_party/huma"), Stage: "workspace/infra/third_party/huma", Exclude: []string{".git"}},
 		{Source: filepath.Join(b.dataPlane, "go"), Stage: "workspace/worker/go"},
 		{Source: filepath.Join(b.materializer, "go"), Stage: "workspace/rclone/go"},
-		{Source: b.sourcePath("openlist"), Stage: "workspace/openlist", Exclude: []string{".git", "public/dist", "node_modules"}},
+		{Source: filepath.Join(b.buildbarn, "go"), Stage: "workspace/buildbarn/go"},
+		{Source: b.sourcePath("openlist"), Stage: "workspace/openlist", Exclude: []string{".git", "node_modules"}},
 		{Source: b.sourcePath("openlist-ui"), Stage: "workspace/openlist-ui", Exclude: []string{".git", "dist", "node_modules"}},
 		{Source: b.rcloneModulePath(), Stage: "workspace/rclone-common"},
-		{Source: filepath.Join(b.output, "materializer/source/rclone"), Stage: "workspace/rclone-native"},
+		{Source: goRoot, Stage: "tools/go"},
+		{Source: link.SDK, Stage: "tools/infra-native-sdk"},
 	}
-	var goRoot string
-	for _, tool := range []struct{ name, version string }{{"go", b.tools.Go}, {"node", b.tools.Node}, {"pnpm", b.tools.PNPM}} {
-		raw, err := remoteMetadataCommand(b.root, b.mise, nil, "where", tool.name+"@"+tool.version)
+	profiles := []buildinputs.Profile{{Workspace: filepath.Join(b.output, "go.work"), Stage: "go.work", Targets: []buildinputs.Target{
+		{Directory: filepath.Join(b.root, "go"), Package: "./cmd/storage-worker", Tags: []string{"dataplane_l7", "infra_grpc"}, CGOEnabled: true},
+		{Directory: filepath.Join(b.root, "go"), Package: "./cmd/plugin-rclone", CGOEnabled: true},
+		{Directory: filepath.Join(b.root, "go"), Package: "./cmd/plugin-reapi", CGOEnabled: true},
+		{Directory: filepath.Join(b.root, "go"), Package: "./cmd/gateway-admin", CGOEnabled: true},
+		{Directory: b.sourcePath("openlist"), Package: ".", Tags: []string{"infra_grpc"}},
+		{Directory: b.sourcePath("openlist"), Package: "./cmd/gateway-bundle", Tags: []string{"dataplane_l7", "infra_grpc"}, CGOEnabled: true},
+		{Directory: b.sourcePath("openlist"), Package: "./cmd/openlist-client-plugin", CGOEnabled: true},
+	}}}
+	files, err := buildinputs.Prepare(context.Background(), buildinputs.Config{Roots: roots, GeneratedDirectory: inputDir, GoBinary: program, GoEnv: b.nativeEnvironment(), AllowModuleDownloads: true, Profiles: profiles})
+	if err != nil {
+		return err
+	}
+	for name, path := range link.Tools {
+		digest, err := hashFile(path)
 		if err != nil {
 			return err
 		}
-		path := strings.TrimSpace(string(raw))
-		root := buildinputs.Root{Source: path, Stage: "tools/" + tool.name}
-		if tool.name == "pnpm" {
-			// Remote UI invokes the pinned JS distribution with the pinned Node
-			// executable, rather than uploading three standalone Node ELF aliases.
-			root.Exclude = []string{"pnpm", "pnpx", "pnx", "pn"}
-		}
-		roots = append(roots, root)
-		if tool.name == "go" {
-			goRoot = path
-		}
+		files = append(files, buildinputs.File{Path: "tools/native/" + name, Source: path, SHA256: digest, Mode: "0755"})
 	}
-	goProgram := filepath.Join(goRoot, "bin/go")
-	files, err := buildinputs.Prepare(context.Background(), buildinputs.Config{
-		Roots: roots, GeneratedDirectory: inputDir, GoBinary: goProgram, GoEnv: map[string]string{"GOOS": "linux", "GOARCH": "amd64"}, AllowModuleDownloads: true,
-		Profiles: []buildinputs.Profile{
-			{Workspace: filepath.Join(b.output, "go.work"), Stage: "go.work", Targets: []buildinputs.Target{
-				{Directory: filepath.Join(b.root, "go"), Package: "./cmd/storage-worker", Tags: []string{"dataplane_l7", "infra_grpc"}, CGOEnabled: true},
-				{Directory: filepath.Join(b.root, "go"), Package: "./cmd/plugin-rclone", CGOEnabled: true},
-				{Directory: filepath.Join(b.root, "go"), Package: "./cmd/plugin-reapi", CGOEnabled: true},
-				{Directory: filepath.Join(b.root, "go"), Package: "./cmd/gateway-admin", CGOEnabled: true},
-				{Directory: b.sourcePath("openlist"), Package: ".", Tags: []string{"infra_grpc"}, CGOEnabled: false},
-				{Directory: b.sourcePath("openlist"), Package: "./cmd/gateway-bundle", Tags: []string{"dataplane_l7", "infra_grpc"}, CGOEnabled: true},
-				{Directory: b.sourcePath("openlist"), Package: "./cmd/openlist-client-plugin", CGOEnabled: true},
-			}},
-			{Workspace: filepath.Join(b.output, "materializer/go.work"), Stage: "go-native.work", Targets: []buildinputs.Target{
-				{Directory: filepath.Join(b.output, "materializer/source/rclone"), Package: ".", CGOEnabled: true},
-				{Directory: filepath.Join(b.materializer, "go"), Package: "./build/derive", CGOEnabled: true},
-			}},
-		},
-	})
+	config, err := b.buildConfig()
 	if err != nil {
 		return err
 	}
-	digest, err := b.provenanceDigest()
-	if err != nil {
-		return err
-	}
-	commitRaw, err := remoteMetadataCommand(b.root, "git", map[string]string{"GIT_OPTIONAL_LOCKS": "0"}, "rev-parse", "HEAD")
-	if err != nil {
-		return err
-	}
-	uiVersion, err := readUIVersion(filepath.Join(b.sourcePath("openlist-ui"), "package.json"))
-	if err != nil {
-		return err
-	}
-	config := map[string]string{"gateway_digest": "sha256:" + digest, "rclone_digest": native, "product_commit": strings.TrimSpace(string(commitRaw)), "ui_version": uiVersion, "rclone_version": version}
-	buildEnv, err := remoteBuildEnv(config)
-	if err != nil {
-		return err
-	}
-	file := filepath.Join(inputDir, "build.env")
-	if err = os.WriteFile(file, buildEnv, 0644); err != nil {
-		return err
-	}
-	digest, err = hashFile(file)
-	if err != nil {
-		return err
-	}
-	files = append(files, buildinputs.File{Path: "build.env", Source: file, SHA256: digest, Mode: "0644"})
 	caHash, err := hashFile(b.ca)
 	if err != nil {
 		return err
@@ -191,14 +152,14 @@ func readUIVersion(path string) (string, error) {
 }
 
 func (b *builder) nativeTool(args ...string) (string, error) {
-	raw, err := remoteMetadataCommand(b.root, b.mise, nil, "where", "go@"+b.tools.Go)
+	program, err := b.selectedGo()
 	if err != nil {
 		return "", err
 	}
-	program := filepath.Join(strings.TrimSpace(string(raw)), "bin/go")
-	command := []string{"run", "./build/derive", "-root", b.materializer, "-out", filepath.Join(b.output, "materializer"), "-infra-root", b.infra, "-data-plane-root", b.dataPlane, "-mise", b.mise}
-	raw, err = remoteMetadataCommand(filepath.Join(b.materializer, "go"), program, map[string]string{"GOWORK": filepath.Join(b.output, "materializer/go.work"), "GOPROXY": "off", "GOSUMDB": "off"}, append(command, args...)...)
+	command := []string{"run", "./build/derive", "-root", b.materializer, "-out", filepath.Join(b.output, "materializer"), "-infra-root", b.infra, "-data-plane-root", b.dataPlane, "-go", program, "-jobs", fmt.Sprint(b.parallelism()), "-native-sdk-root", b.nativeSDKRoot, "-pkg-config", b.pkgConfig}
+	env := b.nativeEnvironment()
+	env["GOWORK"] = filepath.Join(b.output, "bootstrap/go.work")
+	raw, err := remoteMetadataCommand(filepath.Join(b.materializer, "go"), program, env, append(command, args...)...)
 	return strings.TrimSpace(string(raw)), err
 }
-
 func (b *builder) nativeFingerprint() (string, error) { return b.nativeTool("fingerprint") }
