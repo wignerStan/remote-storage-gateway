@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	configsource "github.com/wignerStan/infra/go/config/source"
-	rclonebox "github.com/wignerStan/rclone/go/box"
 	"os"
 
 	"github.com/wignerStan/infra/go/process/supervisor"
@@ -17,7 +16,6 @@ import (
 	"time"
 
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
-	dp "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"github.com/wignerStan/remote-storage-gateway/go/contracts/control/broker"
 	workerconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/worker"
 	control "github.com/wignerStan/remote-storage-gateway/go/control/ttrpc"
@@ -27,11 +25,6 @@ import (
 type WorkerSpec struct {
 	Executable string                     `json:"executable"`
 	Config     workerconfig.ProcessConfig `json:"config"`
-}
-type MaterializerSpec struct {
-	ActivateClient *dp.Selection           `json:"activate_client,omitempty"`
-	Executable     string                  `json:"executable"`
-	Config         rclonebox.ProcessConfig `json:"config"`
 }
 type Config struct {
 	ControlPlanes    []ControlPlaneSpec `json:"control_planes"`
@@ -141,22 +134,30 @@ func New(c Config) (*Manager, error) {
 		m.boxes[id] = box
 	}
 	for _, s := range c.Materializers {
-		id := s.Config.InstanceID
-		if id == "" || m.boxes[id] != nil || m.materializers[id] != nil || !filepath.IsAbs(s.Executable) || !filepath.IsAbs(s.Config.ControlSocket) || filepath.Clean(s.Config.ControlSocket) != s.Config.ControlSocket || len(s.Config.ControlSocket) > 107 || paths[s.Config.ControlSocket] || c.RuntimeDirectory != "" && filepath.Dir(s.Config.ControlSocket) != c.RuntimeDirectory {
+		if err := validateMaterializerProfile(s); err != nil {
+			return nil, err
+		}
+		id, socket, remote := s.assignment()
+		if id == "" || m.boxes[id] != nil || m.materializers[id] != nil || !filepath.IsAbs(s.Executable) || !filepath.IsAbs(socket) || filepath.Clean(socket) != socket || len(socket) > 107 || paths[socket] || c.RuntimeDirectory != "" && filepath.Dir(socket) != c.RuntimeDirectory {
 			return nil, broker.ErrInvalid
 		}
-		paths[s.Config.ControlSocket] = true
+		paths[socket] = true
 		found := false
 		for _, w := range c.Workers {
-			if w.Config.InstanceID != s.Config.Remote.ExpectedWorkerID {
+			if w.Config.InstanceID != remote.ExpectedWorkerID {
 				continue
 			}
-			remote := s.Config.Remote
 			if w.Config.StorageIPCSocket == "" || w.Config.StorageOfferSocket == "" || remote.Socket != "" && remote.Socket != w.Config.StorageIPCSocket || remote.OfferSocket != "" && remote.OfferSocket != w.Config.StorageOfferSocket {
 				return nil, broker.ErrInvalid
 			}
+			if err := validateSourceAssignment(s, w.Config.StorageIPCSocket, w.Config.StorageOfferSocket); err != nil {
+				return nil, err
+			}
 			for _, mount := range w.Config.Mounts {
 				if mount.Name == remote.Namespace && mount.RemoteClient != "" {
+					if s.profile() == MaterializerBuildBarnSource && !mount.ReadOnly {
+						return nil, broker.ErrInvalid
+					}
 					found = true
 				}
 			}
@@ -167,13 +168,13 @@ func New(c Config) (*Manager, error) {
 		if s.ActivateClient != nil {
 			assigned := false
 			for _, w := range c.Workers {
-				if w.Config.InstanceID == s.Config.Remote.ExpectedWorkerID {
+				if w.Config.InstanceID == remote.ExpectedWorkerID {
 					for _, mount := range w.Config.Mounts {
 						if mount.RemoteClient == s.ActivateClient.Name {
 							return nil, broker.ErrInvalid
 						}
 						if mount.Client == s.ActivateClient.Name {
-							if mount.Name != s.Config.Remote.Namespace || !mount.ReadOnly || mount.RemoteClient == "" || mount.RemoteClient == mount.Client {
+							if mount.Name != remote.Namespace || !mount.ReadOnly || mount.RemoteClient == "" || mount.RemoteClient == mount.Client {
 								return nil, broker.ErrInvalid
 							}
 							assigned = true
@@ -185,7 +186,7 @@ func New(c Config) (*Manager, error) {
 				return nil, broker.ErrInvalid
 			}
 		}
-		m.materializers[id] = &materializer{}
+		m.materializers[id] = &materializer{profile: s.profile()}
 	}
 	for _, spec := range c.ControlPlanes {
 		if m.planes[spec.ID] != nil {
@@ -262,12 +263,13 @@ func (m *Manager) Start(ctx context.Context) (err error) {
 	}
 	for _, s := range m.config.Materializers {
 		err = m.startMaterializer(startup, s)
-		tracked := m.trackSockets([]string{s.Config.ControlSocket})
+		id, socket, _ := s.assignment()
+		tracked := m.trackSockets([]string{socket})
 		if err == nil {
 			err = tracked
 		}
 		if err != nil {
-			return fmt.Errorf("rclone %s: %w", s.Config.InstanceID, err)
+			return fmt.Errorf("materializer %s: %w", id, err)
 		}
 	}
 	m.mu.Lock()
@@ -347,7 +349,11 @@ func (m *Manager) Instances() []Instance {
 		appendRole("control-plane", spec.ID)
 	}
 	for id, v := range m.materializers {
-		state := Instance{Kind: "rclone", ID: id, Phase: "new"}
+		kind := "rclone"
+		if v.profile == MaterializerBuildBarnSource {
+			kind = MaterializerBuildBarnSource
+		}
+		state := Instance{Kind: kind, ID: id, Phase: "new"}
 		if v.box != nil {
 			child := v.box.State()
 			state.PID = child.PID

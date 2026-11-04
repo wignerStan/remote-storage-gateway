@@ -9,6 +9,7 @@ require (
 	github.com/danielgtaylor/huma/v2 v2.40.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/rclone/rclone v1.75.2
+	github.com/wignerStan/buildbarn-storage/go v0.1.0
 	github.com/wignerStan/infra/go v0.0.0
 	github.com/wignerStan/infra/go/network/rpc/protocols/actions v0.0.0
 	github.com/wignerStan/infra/go/plugins/native v0.0.0
