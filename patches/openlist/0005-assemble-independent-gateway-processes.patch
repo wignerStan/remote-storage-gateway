@@ -1,0 +1,115 @@
+diff --git a/go.mod b/go.mod
+index 9494eb62..a39619bc 100644
+--- a/go.mod
++++ b/go.mod
+@@ -5,6 +5,7 @@ go 1.27.3
+ toolchain go1.27.3
+ 
+ require (
++	github.com/wignerStan/remote-storage-gateway/go v0.1.0
+ 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.1
+ 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.8.1
+ 	github.com/KarpelesLab/reflink v1.0.2
+diff --git a/internal/bootstrap/run.go b/internal/bootstrap/run.go
+index 558e297c..892cc832 100644
+--- a/internal/bootstrap/run.go
++++ b/internal/bootstrap/run.go
+@@ -26,6 +26,7 @@ import (
+ 	"github.com/pkg/errors"
+ 	"github.com/quic-go/quic-go/http3"
+ 	log "github.com/sirupsen/logrus"
++	gatewaymanager "github.com/wignerStan/remote-storage-gateway/go/controlplane"
+ 	"golang.org/x/net/http2"
+ 	"golang.org/x/net/http2/h2c"
+ )
+@@ -110,6 +111,11 @@ func Start() {
+ 	}
+ 	r.Use(gin.RecoveryWithWriter(log.StandardLogger().Out))
+ 
++	manager, managerErr := gatewaymanager.Load(conf.Conf.GatewayProcessesFile)
++	if managerErr != nil {
++		panic("invalid gateway process configuration")
++	}
++	server.GatewayManager = manager
+ 	server.Init(r)
+ 	var httpHandler http.Handler = r
+ 	if conf.Conf.Scheme.EnableH2c {
+@@ -273,10 +279,21 @@ func Start() {
+ 			}()
+ 		}
+ 	}
++	startup, finishStartup := context.WithTimeout(context.Background(), 2*time.Minute)
++	managerErr = manager.Start(startup)
++	finishStartup()
++	if managerErr != nil {
++		_ = manager.Close(context.Background())
++		panic("gateway child startup failed")
++	}
+ 	running = true
+ }
+ 
+ func Shutdown(timeout time.Duration) {
++	// Front-door children drain while the management upstream is still alive.
++	if server.GatewayManager != nil {
++		_ = server.GatewayManager.Close(context.Background())
++	}
+ 	utils.Log.Println("Shutdown server...")
+ 	fs.ArchiveContentUploadTaskManager.RemoveAll()
+ 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+diff --git a/internal/conf/config.go b/internal/conf/config.go
+index 879613d9..81889760 100644
+--- a/internal/conf/config.go
++++ b/internal/conf/config.go
+@@ -112,6 +112,7 @@ type MCP struct {
+ }
+ 
+ type Config struct {
++	GatewayProcessesFile  string      `json:"gateway_processes_file" env:"GATEWAY_PROCESSES_FILE"`
+ 	ControlTargetsFile    string      `json:"control_targets_file" env:"CONTROL_TARGETS_FILE"`
+ 	Force                 bool        `json:"force" env:"FORCE"`
+ 	SiteURL               string      `json:"site_url" env:"SITE_URL"`
+diff --git a/server/gateway_manager.go b/server/gateway_manager.go
+new file mode 100644
+index 00000000..fe371853
+--- /dev/null
++++ b/server/gateway_manager.go
+@@ -0,0 +1,7 @@
++package server
++
++import "github.com/wignerStan/remote-storage-gateway/go/controlplane"
++
++// GatewayManager is assembled once before route publication. Its child controls
++// are metadata-only; public TLS and reverse proxying run in Data Plane children.
++var GatewayManager *controlplane.Manager
+diff --git a/server/router.go b/server/router.go
+index 81e346f4..46b6046c 100644
+--- a/server/router.go
++++ b/server/router.go
+@@ -17,6 +17,7 @@ import (
+ 	"github.com/gin-contrib/cors"
+ 	"github.com/gin-gonic/gin"
+ 	schemaapi "github.com/wignerStan/infra/go/code/schema/api"
++	gatewayentry "github.com/wignerStan/remote-storage-gateway/go/controlplane/httpapi"
+ )
+ 
+ func Init(e *gin.Engine) {
+@@ -32,6 +33,10 @@ func Init(e *gin.Engine) {
+ 		e.Use(middlewares.ForceHttps)
+ 	}
+ 	g.Any("/ping", func(c *gin.Context) {
++		if GatewayManager != nil && !GatewayManager.Ready() {
++			c.Status(503)
++			return
++		}
+ 		c.String(200, "pong")
+ 	})
+ 	g.GET("/favicon.ico", handles.Favicon)
+@@ -173,7 +178,7 @@ func admin(e *gin.Engine, g *gin.RouterGroup) {
+ 	management, managementErr := controlplane.Load(conf.Conf.ControlTargetsFile)
+ 	controlGroup := g.Group("/control")
+ 	entry := httpapi.NewEntry(management, managementErr)
+-	table, err := schemaapi.Compose(httpapi.APIConfig(), entry.RegisterRoutes)
++	table, err := schemaapi.Compose(httpapi.APIConfig(), entry.RegisterRoutes, gatewayentry.NewEntry(GatewayManager).RegisterRoutes)
+ 	if err != nil {
+ 		panic(err)
+ 	}
