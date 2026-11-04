@@ -154,9 +154,6 @@ func (b *builder) nativeEnvironment() map[string]string {
 		"GOMAXPROCS": fmt.Sprint(b.parallelism()), "GOMEMLIMIT": "768MiB",
 		// Derived source identity is recorded by the verified manifest and owner receipt.
 		"GOFLAGS": "-buildvcs=false",
-		// Ambient compiler search paths are outside this source/SDK recipe.
-		"CPATH": "", "C_INCLUDE_PATH": "", "CPLUS_INCLUDE_PATH": "", "OBJC_INCLUDE_PATH": "",
-		"LIBRARY_PATH": "", "COMPILER_PATH": "", "GCC_EXEC_PREFIX": "",
 	}
 	for _, key := range []string{"GOCACHE", "GOMODCACHE", "GOPROXY", "GOSUMDB", "CC", "CXX", "GOMEMLIMIT", "PKG_CONFIG", "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_LDFLAGS"} {
 		if value := os.Getenv(key); value != "" {

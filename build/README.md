@@ -74,8 +74,10 @@ current native recipe accepts only its canonical plugin include and ordinary
 optimization, debug, PIC and pthread flags in `CGO_CFLAGS`, `CGO_CPPFLAGS`,
 `CGO_CXXFLAGS` and `CGO_LDFLAGS`. It rejects extra include/library paths,
 archives, response files and compiler plugins because their bytes are absent
-from the declared input manifest. Ambient compiler header/library search paths
-are cleared for this recipe. Additional native inputs need an explicit source
+from the declared input manifest. Compiler header/library search variables are
+removed from the actual subprocess environment, including caller overrides;
+setting them to empty is insufficient and breaks GCC's frontend discovery.
+Additional native inputs need an explicit source
 capture contract before the recipe can support them.
 
 The pipeline performs these operations in order:

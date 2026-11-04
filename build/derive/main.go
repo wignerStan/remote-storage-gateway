@@ -418,6 +418,12 @@ func buildEnvironment(overrides map[string]string) processexec.EnvPolicy {
 	for key, value := range overrides {
 		values[key] = value
 	}
+	// Search paths outside the captured native recipe must be absent, even
+	// when supplied as overrides. Empty GCC_EXEC_PREFIX changes cc1 lookup;
+	// an empty search-path component can also admit the working directory.
+	for _, key := range []string{"CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX"} {
+		delete(values, key)
+	}
 	return processexec.EnvClean(values)
 }
 

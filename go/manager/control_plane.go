@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -64,6 +65,9 @@ func (p *controlPlane) processSpec() (supervisor.Spec, error) {
 	command = command.WithStdin(bytes.NewReader(p.payload))
 	for key, value := range proxyEnvironment() {
 		command = command.WithExtraEnv(key, value)
+	}
+	if value, present := os.LookupEnv("OPENLIST_CONTROL_TARGETS_FILE"); present {
+		command = command.WithExtraEnv("OPENLIST_CONTROL_TARGETS_FILE", value)
 	}
 	for key, value := range map[string]string{"OPENLIST_GATEWAY_CONTROL_FILE": "-", "GATEWAY_SAME_HOST": "1", "OPENLIST_ADDR": "127.0.0.1", "OPENLIST_HTTP_PORT": p.port, "OPENLIST_HTTPS_PORT": "-1", "OPENLIST_FORCE_HTTPS": "false", "OPENLIST_ENABLE_H3": "false"} {
 		command = command.WithExtraEnv(key, value)

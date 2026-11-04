@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -44,10 +47,71 @@ func TestNativeRecipeClearsAmbientSearchPaths(t *testing.T) {
 	for _, key := range keys {
 		t.Setenv(key, "/uncaptured/input")
 	}
-	environment := (&builder{}).nativeEnvironment()
-	for _, key := range keys {
-		if value, present := environment[key]; !present || value != "" {
-			t.Fatalf("ambient %s was not explicitly removed from the native recipe", key)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &builder{}
+	for _, explicit := range []bool{false, true} {
+		name := "ambient"
+		if explicit {
+			name = "explicit-override"
 		}
+		t.Run(name, func(t *testing.T) {
+			environment := b.nativeEnvironment()
+			if explicit {
+				for _, key := range keys {
+					environment[key] = "/uncaptured/override"
+				}
+			}
+			environment["GATEWAY_NATIVE_ENVIRONMENT_PROBE"] = "1"
+			output, err := b.execute(t.TempDir(), executable, environment, "-test.run=^TestNativeRecipeEnvironmentProbe$")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var present map[string]string
+			if err = json.Unmarshal([]byte(output), &present); err != nil {
+				t.Fatal(err)
+			}
+			if len(present) != 0 {
+				t.Fatalf("compiler search variables survived in the actual child: %#v", present)
+			}
+		})
+	}
+}
+
+func TestNativeRecipeEnvironmentProbe(t *testing.T) {
+	if os.Getenv("GATEWAY_NATIVE_ENVIRONMENT_PROBE") != "1" {
+		return
+	}
+	present := make(map[string]string)
+	for _, key := range []string{"CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX"} {
+		if value, ok := os.LookupEnv(key); ok {
+			present[key] = value
+		}
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(present); err != nil {
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
+func TestNativeRecipeRunsCompilerWithoutAmbientSearchPaths(t *testing.T) {
+	compiler, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("native C compiler is not installed")
+	}
+	for _, key := range []string{"CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX"} {
+		t.Setenv(key, "/uncaptured/input")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "probe.c")
+	if err = os.WriteFile(source, []byte("int gateway_native_probe(void) { return 0; }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// An empty GCC_EXEC_PREFIX is not an unset variable: GCC then loses its
+	// normal cc1 lookup. Exercise the real compiler through our process policy.
+	if _, err = (&builder{}).execute(dir, compiler, (&builder{}).nativeEnvironment(), "-fsyntax-only", source); err != nil {
+		t.Fatal(err)
 	}
 }
