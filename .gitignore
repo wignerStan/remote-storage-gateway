@@ -1,0 +1,3 @@
+/target/
+/plugins/*.so
+/.cargo/config.toml

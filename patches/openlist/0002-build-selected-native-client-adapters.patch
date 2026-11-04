@@ -1,0 +1,1288 @@
+diff --git a/clientplugin/client_test.go b/clientplugin/client_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..aedf00259a3ff303c131b46a7734304c8540e667
+--- /dev/null
++++ b/clientplugin/client_test.go
+@@ -0,0 +1,187 @@
++package clientplugin
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
++	"golang.org/x/net/webdav"
++)
++
++var digest = "sha256:" + strings.Repeat("1", 64)
++
++type emptySecrets struct{}
++
++func (emptySecrets) Resolve(context.Context, string) (port.Secret, error) {
++	return nil, port.ErrNotFound
++}
++func TestPassiveDescriptorAndTypedValidation(t *testing.T) {
++	f := NewFactory(digest)
++	a, e := admission.Encode(f.Descriptor())
++	if e != nil {
++		t.Fatal(e)
++	}
++	b, _ := admission.Encode(f.Descriptor())
++	if a.Digest != b.Digest {
++		t.Fatal("descriptor digest changed")
++	}
++	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		t.Error("prepare/descriptor must not initialize a provider")
++		w.WriteHeader(500)
++	}))
++	defer s.Close()
++	public, _ := json.Marshal(davConfig{Address: s.URL})
++	candidate, e := f.Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: public, Secrets: emptySecrets{}})
++	if e != nil {
++		t.Fatal(e)
++	}
++	if _, e = candidate.Publish(); e == nil {
++		t.Fatal("published without validation")
++	}
++	if e = candidate.Abort(context.Background()); e != nil {
++		t.Fatal(e)
++	}
++	for _, bad := range []string{`{"address":"` + s.URL + `","password":"must-not-be-public"}`, `{"address":"` + s.URL + `","unknown":true}`, `{"address":"` + s.URL + `","address":"` + s.URL + `"}`} {
++		if _, e = f.Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: []byte(bad)}); e == nil {
++			t.Fatal("accepted invalid public fields")
++		}
++	}
++}
++
++type notifyBody struct {
++	io.ReadCloser
++	once *sync.Once
++	seen chan struct{}
++}
++
++func (n notifyBody) Read(b []byte) (int, error) {
++	k, e := n.ReadCloser.Read(b)
++	if k > 0 {
++		n.once.Do(func() { close(n.seen) })
++	}
++	return k, e
++}
++
++type repeatReader byte
++
++func (r repeatReader) Read(b []byte) (int, error) {
++	for i := range b {
++		b[i] = byte(r)
++	}
++	return len(b), nil
++}
++func TestWebDAVStreamRangeUnknownSizeAndCancellation(t *testing.T) {
++	root := t.TempDir()
++	seen := make(chan struct{})
++	var once sync.Once
++	handler := &webdav.Handler{FileSystem: webdav.Dir(root), LockSystem: webdav.NewMemLS()}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method == http.MethodPut {
++			r.Body = notifyBody{r.Body, &once, seen}
++		}
++		handler.ServeHTTP(w, r)
++	}))
++	defer server.Close()
++	public, _ := json.Marshal(davConfig{Address: server.URL})
++	ca, e := NewFactory(digest).Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: public, Secrets: emptySecrets{}})
++	if e != nil {
++		t.Fatal(e)
++	}
++	if e = ca.Validate(context.Background()); e != nil {
++		t.Fatal(e)
++	}
++	c, e := ca.Publish()
++	if e != nil {
++		t.Fatal(e)
++	}
++	defer c.Close(context.Background())
++	const size = 12 << 20
++	reader, writer := io.Pipe()
++	continueBody := make(chan struct{})
++	produced := make(chan error, 1)
++	go func() {
++		_, e := io.CopyN(writer, repeatReader('x'), 64<<10)
++		if e == nil {
++			<-continueBody
++			_, e = io.CopyN(writer, repeatReader('x'), size-(64<<10))
++		}
++		writer.CloseWithError(e)
++		produced <- e
++	}()
++	uploaded := make(chan error, 1)
++	go func() {
++		_, e := c.Put(context.Background(), port.PutRequest{Path: "/large.bin", Body: reader, Size: -1, ContentType: "application/octet-stream"})
++		uploaded <- e
++	}()
++	select {
++	case <-seen:
++	case <-time.After(5 * time.Second):
++		close(continueBody)
++		reader.Close()
++		t.Fatal("server received no data before body completion")
++	}
++	close(continueBody)
++	if e = <-produced; e != nil {
++		t.Fatal(e)
++	}
++	if e = <-uploaded; e != nil {
++		t.Fatal(e)
++	}
++	info, e := c.Stat(context.Background(), port.ObjectRef{Path: "/large.bin"})
++	if e != nil || info.Size != size {
++		t.Fatalf("stat %+v %v", info, e)
++	}
++	plan, e := c.Open(context.Background(), port.OpenRequest{Path: "/large.bin", Offset: 100, Length: 17})
++	if e != nil {
++		t.Fatal(e)
++	}
++	data, e := io.ReadAll(plan.Body)
++	plan.Body.Close()
++	if e != nil || string(data) != strings.Repeat("x", 17) {
++		t.Fatalf("range %q %v", data, e)
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	plan, e = c.Open(ctx, port.OpenRequest{Path: "/large.bin", Length: -1})
++	if e != nil {
++		t.Fatal(e)
++	}
++	cancel()
++	_, e = io.Copy(io.Discard, plan.Body)
++	plan.Body.Close()
++	if !errors.Is(e, context.Canceled) {
++		t.Fatalf("read not canceled: %v", e)
++	}
++	for _, p := range []string{"../escape", "/a/../escape", "a\\escape", "/"} {
++		if e = c.Delete(context.Background(), port.ObjectRef{Path: p}); e == nil {
++			t.Fatalf("allowed invalid delete %q", p)
++		}
++	}
++	if e = c.Delete(context.Background(), port.ObjectRef{Path: "/large.bin"}); e != nil {
++		t.Fatal(e)
++	}
++	if _, e = os.Stat(filepath.Join(root, "large.bin")); !os.IsNotExist(e) {
++		t.Fatal("delete did not reach backend")
++	}
++}
++func TestKnownSizeReaderRejectsMismatch(t *testing.T) {
++	for _, n := range []int64{2, 4} {
++		if _, e := io.ReadAll(checkedBody(strings.NewReader("abc"), n)); e == nil {
++			t.Fatalf("accepted wrong size%d", n)
++		}
++	}
++	b, e := io.ReadAll(checkedBody(strings.NewReader("abc"), 3))
++	if e != nil || string(b) != "abc" {
++		t.Fatal(e)
++	}
++}
+diff --git a/clientplugin/configuration.go b/clientplugin/configuration.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b8ec4beccab5197b325dcb1811623943f4648962
+--- /dev/null
++++ b/clientplugin/configuration.go
+@@ -0,0 +1,71 @@
++package clientplugin
++
++import (
++	"encoding/json"
++
++	"github.com/wignerStan/infra/go/code/schema"
++)
++
++// S3PublicConfig is the non-secret provider configuration accepted by Prepare.
++// Public field definitions are reused by the full published schema model.
++type S3PublicConfig struct {
++	Endpoint       string `json:"endpoint" minLength:"1"`
++	Bucket         string `json:"bucket" minLength:"1"`
++	Region         string `json:"region" minLength:"1"`
++	Root           string `json:"root_folder_path,omitempty"`
++	ForcePathStyle bool   `json:"force_path_style,omitempty"`
++}
++
++// S3Configuration describes this concrete plugin's complete configuration.
++// Secret values travel through Worker secret references, never public JSON.
++type S3Configuration struct {
++	S3PublicConfig
++	AccessKeyID     string `json:"access_key_id" writeOnly:"true" minLength:"1"`
++	SecretAccessKey string `json:"secret_access_key" writeOnly:"true" minLength:"1"`
++	SessionToken    string `json:"session_token,omitempty" writeOnly:"true"`
++}
++
++// WebDAVPublicConfig is the non-secret WebDAV provider configuration.
++type WebDAVPublicConfig struct {
++	Address  string `json:"address" minLength:"1"`
++	Root     string `json:"root_folder_path,omitempty"`
++	Username string `json:"username,omitempty"`
++}
++
++// WebDAVConfiguration publishes only the fields implemented by this provider.
++type WebDAVConfiguration struct {
++	WebDAVPublicConfig
++	Password string `json:"password,omitempty" writeOnly:"true"`
++}
++
++type ProviderConfigurationSchemas struct {
++	S3     schema.Document
++	WebDAV schema.Document
++}
++
++// ConfigurationSchemas describes only this component's own public config
++// types. It is passive and returns library-native structured schemas; output
++// encoding and descriptor publication happen separately in Descriptor.
++func ConfigurationSchemas() (ProviderConfigurationSchemas, error) {
++	s3, e := schema.Derive[S3Configuration](schema.Identity{ID: "client.openlist/configuration/s3", Version: "1", Owner: PluginID})
++	if e != nil {
++		return ProviderConfigurationSchemas{}, e
++	}
++	dav, e := schema.Derive[WebDAVConfiguration](schema.Identity{ID: "client.openlist/configuration/webdav", Version: "1", Owner: PluginID})
++	if e != nil {
++		return ProviderConfigurationSchemas{}, e
++	}
++	return ProviderConfigurationSchemas{S3: s3, WebDAV: dav}, nil
++}
++
++// Serialization is deliberately separate from owned structured generation.
++func encodeConfigurationSchema(document schema.Document) json.RawMessage {
++	encoded, e := json.Marshal(document.Schema)
++	if e != nil {
++		panic("generated provider schema cannot encode")
++	}
++	return encoded
++}
++
++type s3Config = S3PublicConfig
++type davConfig = WebDAVPublicConfig
+diff --git a/clientplugin/configuration_test.go b/clientplugin/configuration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..87db6af3b6da1c48e461ff13d685b47371da4c4b
+--- /dev/null
++++ b/clientplugin/configuration_test.go
+@@ -0,0 +1,77 @@
++package clientplugin
++
++import (
++	"bytes"
++	"encoding/json"
++	"testing"
++
++	"github.com/wignerStan/infra/go/code/schema"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
++)
++
++func TestOwnedConfigurationSchemasGenerateStandardSecretSemantics(t *testing.T) {
++	first, e := ConfigurationSchemas()
++	if e != nil {
++		t.Fatal(e)
++	}
++	second, e := ConfigurationSchemas()
++	if e != nil {
++		t.Fatal(e)
++	}
++	a, _ := json.Marshal(first)
++	b, _ := json.Marshal(second)
++	if !bytes.Equal(a, b) || first.S3.ID == first.WebDAV.ID || first.S3.Owner != PluginID {
++		t.Fatal("owned schema identity/generation is unstable")
++	}
++	for _, doc := range []schema.Document{first.S3, first.WebDAV} {
++		if doc.Kind != "json-schema" || doc.Version != "1" || doc.Schema == nil {
++			t.Fatal("structured schema identity missing")
++		}
++		switch doc.Schema.(type) {
++		case string, []byte, json.RawMessage:
++			t.Fatal("owned generation returned formatted bytes instead of structured schema")
++		}
++	}
++	published := NewFactory("sha256:" + string(bytes.Repeat([]byte("1"), 64))).Descriptor()
++	if published.Schema != "network-data-plane-worker/plugin-descriptor/v2" {
++		t.Fatal("breaking schema shape was published under old descriptor version")
++	}
++	var s3, dav descriptor.Implementation
++	for _, impl := range published.Implementations {
++		switch impl.ID {
++		case "s3":
++			s3 = impl
++		case "webdav":
++			dav = impl
++		}
++	}
++	fields := admission.SecretFields(s3)
++	required := map[string]bool{}
++	for _, field := range fields {
++		required[field.Name] = field.Required
++	}
++	if len(fields) != 3 || !required["access_key_id"] || !required["secret_access_key"] || required["session_token"] {
++		t.Fatal("S3 required/optional credential semantics changed")
++	}
++	davSecrets := admission.SecretFields(dav)
++	if len(davSecrets) != 1 || davSecrets[0].Name != "password" || davSecrets[0].Required {
++		t.Fatal("optional WebDAV credential semantics changed")
++	}
++	valid := json.RawMessage(`{"endpoint":"https://example.test","bucket":"selected","region":"us-east-1"}`)
++	refs := map[string]string{"access_key_id": "access-ref", "secret_access_key": "key-ref"}
++	if admission.ValidateConfig(s3, valid, refs) != nil {
++		t.Fatal("valid public/reference separation rejected")
++	}
++	for _, input := range []json.RawMessage{json.RawMessage(`{"endpoint":"https://example.test","bucket":"selected","region":"us-east-1","secret_access_key":"inline"}`), json.RawMessage(`{"endpoint":"https://example.test","bucket":"selected","region":"us-east-1","undeclared":true}`), json.RawMessage(`{"endpoint":"https://example.test","bucket":"selected"}`)} {
++		if admission.ValidateConfig(s3, input, refs) == nil {
++			t.Fatal("public secret/unknown/missing required input admitted")
++		}
++	}
++	if admission.ValidateConfig(s3, valid, nil) == nil {
++		t.Fatal("required secret references were lost")
++	}
++	if admission.ValidateConfig(dav, json.RawMessage(`{"address":"https://example.test"}`), nil) != nil {
++		t.Fatal("optional WebDAV fields became required")
++	}
++}
+diff --git a/clientplugin/factory.go b/clientplugin/factory.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e16fc473accf5e73efafdfae6e1505b6e21dc203
+--- /dev/null
++++ b/clientplugin/factory.go
+@@ -0,0 +1,198 @@
++// Package clientplugin publishes OpenList-derived providers against the Worker contract.
++package clientplugin
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"net/url"
++	"path"
++	"strings"
++	"sync"
++
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
++)
++
++const PluginID = "client.openlist"
++const Version = "0.1.0-alpha.2"
++
++type Factory struct{ build string }
++
++func NewFactory(buildDigest string) *Factory { return &Factory{build: buildDigest} }
++func (f *Factory) Descriptor() descriptor.Descriptor {
++	schemas, e := ConfigurationSchemas()
++	if e != nil {
++		return descriptor.Descriptor{}
++	}
++	return descriptor.Descriptor{Schema: descriptor.Schema, PluginID: PluginID, PluginVersion: Version, Contract: port.Contract, Runtime: "go", BuildDigest: f.build, Implementations: []descriptor.Implementation{
++		{ID: "s3", DisplayName: "OpenList S3", ConfigSchema: encodeConfigurationSchema(schemas.S3), Capabilities: []string{"stat", "list", "open", "put", "delete", "range", "unknown-size-put", "list-pagination"}},
++		{ID: "webdav", DisplayName: "OpenList WebDAV", ConfigSchema: encodeConfigurationSchema(schemas.WebDAV), Capabilities: []string{"stat", "list", "open", "put", "delete", "range", "unknown-size-put"}},
++	}}
++}
++
++func endpoint(raw string) error {
++	u, e := url.Parse(raw)
++	if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
++		return port.ErrInvalid
++	}
++	return nil
++}
++func secret(ctx context.Context, r port.SecretResolver, name string, required bool) (string, error) {
++	if r == nil {
++		if required {
++			return "", port.ErrInvalid
++		}
++		return "", nil
++	}
++	s, e := r.Resolve(ctx, name)
++	if e != nil {
++		if required || !errors.Is(e, port.ErrNotFound) {
++			return "", port.ErrInvalid
++		}
++		return "", nil
++	}
++	if s == nil {
++		return "", port.ErrInvalid
++	}
++	defer s.Close()
++	b := s.Bytes()
++	if len(b) > 65536 || required && len(b) == 0 {
++		return "", port.ErrInvalid
++	}
++	return string(b), nil
++}
++func (f *Factory) Prepare(ctx context.Context, c port.PluginConfig) (port.Candidate, error) {
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	if err := admission.Validate(f.Descriptor()); err != nil {
++		return nil, port.ErrInvalid
++	}
++	var cli port.Client
++	var err error
++	switch c.ImplementationID {
++	case "s3":
++		var cfg s3Config
++		if admission.StrictJSON(c.Public, &cfg) != nil || endpoint(cfg.Endpoint) != nil || cfg.Bucket == "" || cfg.Region == "" {
++			return nil, port.ErrInvalid
++		}
++		if _, err = clean(cfg.Root); err != nil {
++			return nil, err
++		}
++		var access, key, token string
++		access, err = secret(ctx, c.Secrets, "access_key_id", true)
++		if err != nil {
++			return nil, err
++		}
++		key, err = secret(ctx, c.Secrets, "secret_access_key", true)
++		if err != nil {
++			return nil, err
++		}
++		token, err = secret(ctx, c.Secrets, "session_token", false)
++		if err != nil {
++			return nil, err
++		}
++		cli, err = newS3(cfg, access, key, token)
++	case "webdav":
++		var cfg davConfig
++		if admission.StrictJSON(c.Public, &cfg) != nil || endpoint(cfg.Address) != nil {
++			return nil, port.ErrInvalid
++		}
++		if _, err = clean(cfg.Root); err != nil {
++			return nil, err
++		}
++		var password string
++		password, err = secret(ctx, c.Secrets, "password", false)
++		if err != nil {
++			return nil, err
++		}
++		cli = newWebDAV(cfg, password)
++	default:
++		return nil, port.ErrUnsupported
++	}
++	if err != nil {
++		return nil, err
++	}
++	return &candidate{client: cli}, nil
++}
++
++type candidate struct {
++	mu                            sync.Mutex
++	client                        port.Client
++	validated, published, aborted bool
++}
++
++func (c *candidate) Validate(ctx context.Context) error {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.aborted || c.published {
++		return port.ErrInvalid
++	}
++	var e error
++	if v, ok := c.client.(interface{ validate(context.Context) error }); ok {
++		e = v.validate(ctx)
++	} else {
++		_, e = c.client.Stat(ctx, port.ObjectRef{Path: "/"})
++	}
++	if e == nil {
++		c.validated = true
++	}
++	return e
++}
++func (c *candidate) Publish() (port.Client, error) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if !c.validated || c.published || c.aborted {
++		return nil, port.ErrInvalid
++	}
++	c.published = true
++	return c.client, nil
++}
++func (c *candidate) Abort(ctx context.Context) error {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.aborted {
++		return nil
++	}
++	if c.published {
++		return port.ErrInvalid
++	}
++	c.aborted = true
++	return c.client.Close(ctx)
++}
++func clean(p string) (string, error) {
++	if strings.ContainsAny(p, "\\\x00") {
++		return "", port.ErrInvalid
++	}
++	for _, x := range strings.Split(p, "/") {
++		if x == ".." || x == "." {
++			return "", port.ErrInvalid
++		}
++	}
++	return strings.Trim(path.Clean("/"+p), "/"), nil
++}
++func objectPath(p string) string { return "/" + strings.TrimPrefix(p, "/") }
++func checkedRange(q port.OpenRequest, size int64) (int64, error) {
++	if q.Offset < 0 || q.Length < -1 || q.Offset > size || q.Length > 0 && q.Offset > int64(^uint64(0)>>1)-q.Length {
++		return 0, port.ErrInvalid
++	}
++	n := size - q.Offset
++	if q.Length >= 0 && q.Length < n {
++		n = q.Length
++	}
++	return n, nil
++}
++func providerError(err error) error {
++	if err == nil {
++		return nil
++	}
++	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
++		return err
++	}
++	return port.ErrProvider
++}
++func closeTransport(t *http.Transport) { t.CloseIdleConnections() }
++
++var _ port.Factory = (*Factory)(nil)
+diff --git a/clientplugin/native_test.go b/clientplugin/native_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8e461eb12704aeac79a2491f6999e8bb6b225e10
+--- /dev/null
++++ b/clientplugin/native_test.go
+@@ -0,0 +1,132 @@
++package clientplugin_test
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"runtime"
++	"strings"
++	"testing"
++	"time"
++
++	infraexec "github.com/wignerStan/infra/go/process/exec"
++	native "github.com/wignerStan/infra/go/runtime/nativeplugin"
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
++	"github.com/wignerStan/network-data-plane-worker/go/nativeclient"
++	"golang.org/x/net/webdav"
++)
++
++func TestSeparateSharedLibraryClientLifecycle(t *testing.T) {
++	_, source, _, _ := runtime.Caller(0)
++	root := filepath.Dir(filepath.Dir(source))
++	so := filepath.Join(t.TempDir(), "openlist-client.so")
++	digest := "sha256:" + strings.Repeat("1", 64)
++	spec := infraexec.NewSpec(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-buildmode=c-shared", "-buildvcs=false", "-ldflags", "-X main.buildDigest="+digest, "-o", so, "./cmd/openlist-client-plugin").WithTimeout(3 * time.Minute).WithEnv(infraexec.EnvInheritAllButRedacted())
++	spec.Dir = root
++	out, e := infraexec.RunContext(context.Background(), spec)
++	if e != nil {
++		t.Fatalf("build separate plugin: %v %s%s", e, out.StdoutString(), out.StderrString())
++	}
++	raw, e := native.Load(so, native.Expected{Package: "client.openlist", Variant: nativeclient.Variant, Kind: native.Tool, Language: native.Go, UnloadPolicy: native.Retain}, native.Limits{MaxInput: 1 << 20, MaxReply: 1 << 20, MaxInflight: 16, Timeout: 10 * time.Second})
++	if e != nil {
++		t.Fatal(e)
++	}
++	b, e := raw.Call(context.Background(), nativeclient.Describe, []byte(`{}`))
++	if e != nil {
++		t.Fatal(e)
++	}
++	r, e := admission.Decode(b)
++	if e != nil {
++		t.Fatal(e)
++	}
++	if e = raw.Close(context.Background()); e != nil {
++		t.Fatal(e)
++	}
++	data, e := os.ReadFile(so)
++	if e != nil {
++		t.Fatal(e)
++	}
++	hash := sha256.Sum256(data)
++	factory, e := nativeclient.NewFactory(context.Background(), nativeclient.Artifact{Path: so, SHA256: hex.EncodeToString(hash[:]), DescriptorDigest: r.Digest, PluginID: "client.openlist", Language: "go"})
++	if e != nil {
++		t.Fatal(e)
++	}
++	dir := t.TempDir()
++	dav := &webdav.Handler{FileSystem: webdav.Dir(dir), LockSystem: webdav.NewMemLS()}
++	if e = os.WriteFile(filepath.Join(dir, "blocked"), []byte("pending read"), 0600); e != nil {
++		t.Fatal(e)
++	}
++	upstreamCancelled := make(chan struct{})
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method == http.MethodGet && r.URL.Path == "/blocked" {
++			w.Header().Set("Content-Length", "12")
++			w.Header().Set("Content-Range", "bytes 0-11/12")
++			w.WriteHeader(http.StatusPartialContent)
++			w.(http.Flusher).Flush()
++			<-r.Context().Done()
++			close(upstreamCancelled)
++			return
++		}
++		dav.ServeHTTP(w, r)
++	}))
++	defer server.Close()
++	config, _ := json.Marshal(map[string]string{"address": server.URL})
++	candidate, e := factory.Prepare(context.Background(), port.PluginConfig{ImplementationID: "webdav", Public: config})
++	if e != nil {
++		t.Fatal(e)
++	}
++	if e = candidate.Validate(context.Background()); e != nil {
++		t.Fatal(e)
++	}
++	client, e := candidate.Publish()
++	if e != nil {
++		t.Fatal(e)
++	}
++	if _, e = client.Put(context.Background(), port.PutRequest{Path: "/native.txt", Body: strings.NewReader("native shared library"), Size: -1}); e != nil {
++		t.Fatal(e)
++	}
++	plan, e := client.Open(context.Background(), port.OpenRequest{Path: "/native.txt", Offset: 7, Length: 6})
++	if e != nil {
++		t.Fatal(e)
++	}
++	body, e := io.ReadAll(plan.Body)
++	plan.Body.Close()
++	if e != nil || string(body) != "shared" {
++		t.Fatalf("native range=%q error=%v", body, e)
++	}
++	blocked, e := client.Open(context.Background(), port.OpenRequest{Path: "/blocked", Length: -1})
++	if e != nil {
++		t.Fatal(e)
++	}
++	readDone := make(chan error, 1)
++	go func() { var b [1]byte; _, err := blocked.Body.Read(b[:]); readDone <- err }()
++	if e = blocked.Body.Close(); e != nil {
++		t.Fatal(e)
++	}
++	select {
++	case err := <-readDone:
++		if err == nil {
++			t.Fatal("cancelled read succeeded")
++		}
++	case <-time.After(5 * time.Second):
++		t.Fatal("native pending read did not join")
++	}
++	select {
++	case <-upstreamCancelled:
++	case <-time.After(5 * time.Second):
++		t.Fatal("native reader close did not cancel provider HTTP request")
++	}
++	if e = client.Close(context.Background()); e != nil {
++		t.Fatal(e)
++	}
++	if _, e = client.Stat(context.Background(), port.ObjectRef{Path: "/native.txt"}); e == nil {
++		t.Fatal("closed native client accepted request")
++	}
++}
+diff --git a/clientplugin/s3.go b/clientplugin/s3.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b59f54f51a522d5138b56716e2c3eb40f985f2f4
+--- /dev/null
++++ b/clientplugin/s3.go
+@@ -0,0 +1,195 @@
++package clientplugin
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"net/http"
++	"path"
++	"strings"
++	"time"
++
++	"github.com/aws/aws-sdk-go/aws"
++	"github.com/aws/aws-sdk-go/aws/awserr"
++	"github.com/aws/aws-sdk-go/aws/credentials"
++	"github.com/aws/aws-sdk-go/aws/session"
++	"github.com/aws/aws-sdk-go/service/s3"
++	"github.com/aws/aws-sdk-go/service/s3/s3manager"
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++)
++
++type s3Client struct {
++	api          *s3.S3
++	session      *session.Session
++	bucket, root string
++	transport    *http.Transport
++}
++
++func newS3(c s3Config, access, key, token string) (*s3Client, error) {
++	t := http.DefaultTransport.(*http.Transport).Clone()
++	cfg := aws.NewConfig().WithRegion(c.Region).WithEndpoint(c.Endpoint).WithS3ForcePathStyle(c.ForcePathStyle).WithCredentials(credentials.NewStaticCredentials(access, key, token)).WithHTTPClient(&http.Client{Transport: t}).WithMaxRetries(0)
++	s, e := session.NewSession(cfg)
++	if e != nil {
++		return nil, port.ErrInvalid
++	}
++	root, _ := clean(c.Root)
++	return &s3Client{s3.New(s), s, c.Bucket, root, t}, nil
++}
++func (d *s3Client) key(p string) (string, error) {
++	p, e := clean(p)
++	if e != nil {
++		return "", e
++	}
++	k := path.Join(d.root, p)
++	if k == "." {
++		k = ""
++	}
++	return k, nil
++}
++func (d *s3Client) validate(ctx context.Context) error {
++	_, e := d.api.HeadBucketWithContext(ctx, &s3.HeadBucketInput{Bucket: &d.bucket})
++	return s3Error(ctx, e)
++}
++func (d *s3Client) public(k string) string {
++	if d.root != "" {
++		k = strings.TrimPrefix(k, d.root+"/")
++	}
++	return objectPath(k)
++}
++func s3Error(ctx context.Context, e error) error {
++	if e == nil {
++		return nil
++	}
++	if ctx.Err() != nil {
++		return ctx.Err()
++	}
++	if a, ok := e.(awserr.RequestFailure); ok && a.StatusCode() == http.StatusNotFound {
++		return port.ErrNotFound
++	}
++	return providerError(e)
++}
++func (d *s3Client) Stat(ctx context.Context, q port.ObjectRef) (port.ObjectInfo, error) {
++	k, e := d.key(q.Path)
++	if e != nil {
++		return port.ObjectInfo{}, e
++	}
++	if k == "" || k == d.root && strings.Trim(q.Path, "/") == "" {
++		return port.ObjectInfo{Path: "/", IsDir: true}, nil
++	}
++	o, e := d.api.HeadObjectWithContext(ctx, &s3.HeadObjectInput{Bucket: &d.bucket, Key: &k})
++	if e != nil {
++		if s3Error(ctx, e) == port.ErrNotFound {
++			prefix := strings.TrimSuffix(k, "/") + "/"
++			listed, err := d.api.ListObjectsV2WithContext(ctx, &s3.ListObjectsV2Input{Bucket: &d.bucket, Prefix: &prefix, MaxKeys: aws.Int64(1)})
++			if err == nil && len(listed.Contents) > 0 {
++				return port.ObjectInfo{Path: objectPath(q.Path), IsDir: true}, nil
++			}
++			if err != nil {
++				return port.ObjectInfo{}, s3Error(ctx, err)
++			}
++		}
++		return port.ObjectInfo{}, s3Error(ctx, e)
++	}
++	return port.ObjectInfo{Path: objectPath(q.Path), Size: aws.Int64Value(o.ContentLength), ModTime: aws.TimeValue(o.LastModified), ETag: aws.StringValue(o.ETag), ContentType: aws.StringValue(o.ContentType)}, nil
++}
++func (d *s3Client) List(ctx context.Context, q port.ListRequest) (port.ListResult, error) {
++	if q.Limit < 0 || q.Limit > 1000 {
++		return port.ListResult{}, port.ErrInvalid
++	}
++	k, e := d.key(q.Path)
++	if e != nil {
++		return port.ListResult{}, e
++	}
++	if k != "" {
++		k += "/"
++	}
++	n := q.Limit
++	if n == 0 {
++		n = 1000
++	}
++	in := &s3.ListObjectsV2Input{Bucket: &d.bucket, Prefix: &k, Delimiter: aws.String("/"), MaxKeys: aws.Int64(int64(n))}
++	if q.Cursor != "" {
++		in.ContinuationToken = &q.Cursor
++	}
++	v, e := d.api.ListObjectsV2WithContext(ctx, in)
++	if e != nil {
++		return port.ListResult{}, s3Error(ctx, e)
++	}
++	out := port.ListResult{Objects: []port.ObjectInfo{}, NextCursor: aws.StringValue(v.NextContinuationToken)}
++	for _, x := range v.CommonPrefixes {
++		out.Objects = append(out.Objects, port.ObjectInfo{Path: d.public(strings.TrimSuffix(aws.StringValue(x.Prefix), "/")), IsDir: true})
++	}
++	for _, x := range v.Contents {
++		key := aws.StringValue(x.Key)
++		if key == k {
++			continue
++		}
++		out.Objects = append(out.Objects, port.ObjectInfo{Path: d.public(key), Size: aws.Int64Value(x.Size), ModTime: aws.TimeValue(x.LastModified), ETag: aws.StringValue(x.ETag)})
++	}
++	return out, nil
++}
++func (d *s3Client) Open(ctx context.Context, q port.OpenRequest) (port.ReadPlan, error) {
++	info, e := d.Stat(ctx, port.ObjectRef{Path: q.Path})
++	if e != nil {
++		return port.ReadPlan{}, e
++	}
++	n, e := checkedRange(q, info.Size)
++	if e != nil || info.IsDir {
++		return port.ReadPlan{}, port.ErrInvalid
++	}
++	if n == 0 {
++		return port.ReadPlan{Info: info, Body: io.NopCloser(strings.NewReader(""))}, nil
++	}
++	k, _ := d.key(q.Path)
++	in := &s3.GetObjectInput{Bucket: &d.bucket, Key: &k, Range: aws.String(fmt.Sprintf("bytes=%d-%d", q.Offset, q.Offset+n-1))}
++	o, e := d.api.GetObjectWithContext(ctx, in)
++	if e != nil {
++		return port.ReadPlan{}, s3Error(ctx, e)
++	}
++	if aws.Int64Value(o.ContentLength) != n || ((q.Offset != 0 || n != info.Size) && aws.StringValue(o.ContentRange) != fmt.Sprintf("bytes %d-%d/%d", q.Offset, q.Offset+n-1, info.Size)) {
++		if o.Body != nil {
++			o.Body.Close()
++		}
++		return port.ReadPlan{}, port.ErrProvider
++	}
++	return port.ReadPlan{Info: info, Body: o.Body}, nil
++}
++func (d *s3Client) Put(ctx context.Context, q port.PutRequest) (port.PutResult, error) {
++	if q.Body == nil || q.Size < -1 || len(q.Metadata) > 0 {
++		return port.PutResult{}, port.ErrInvalid
++	}
++	k, e := d.key(q.Path)
++	if e != nil || strings.Trim(q.Path, "/") == "" {
++		return port.PutResult{}, port.ErrInvalid
++	}
++	meta := map[string]*string{}
++	for key, value := range q.Metadata {
++		v := value
++		meta[key] = &v
++	}
++	body := &uploadReader{reader: checkedBody(q.Body, q.Size)}
++	u := s3manager.NewUploader(d.session, func(u *s3manager.Uploader) { u.Concurrency = 1; u.PartSize = 5 << 20 })
++	_, e = u.UploadWithContext(ctx, &s3manager.UploadInput{Bucket: &d.bucket, Key: &k, Body: body, ContentType: aws.String(q.ContentType), Metadata: meta})
++	if e != nil {
++		return port.PutResult{}, s3Error(ctx, e)
++	}
++	return port.PutResult{Info: port.ObjectInfo{Path: objectPath(q.Path), Size: body.bytes.Load(), ModTime: time.Now().UTC(), ContentType: q.ContentType}}, nil
++}
++func (d *s3Client) Delete(ctx context.Context, q port.ObjectRef) error {
++	k, e := d.key(q.Path)
++	if e != nil || strings.Trim(q.Path, "/") == "" {
++		return port.ErrInvalid
++	}
++	info, err := d.Stat(ctx, q)
++	if err != nil {
++		return err
++	}
++	if info.IsDir {
++		return port.ErrUnsupported
++	}
++	_, e = d.api.DeleteObjectWithContext(ctx, &s3.DeleteObjectInput{Bucket: &d.bucket, Key: &k})
++	return s3Error(ctx, e)
++}
++func (d *s3Client) Close(context.Context) error { closeTransport(d.transport); return nil }
++
++var _ port.Client = (*s3Client)(nil)
+diff --git a/clientplugin/s3_test.go b/clientplugin/s3_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d1b61fbe67f92772c748b150b1c1cf9472ea5130
+--- /dev/null
++++ b/clientplugin/s3_test.go
+@@ -0,0 +1,74 @@
++package clientplugin
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++)
++
++func TestS3PrefixRangeAndImplicitDirectory(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") {
++			t.Error("request was not signed")
++		}
++		switch {
++		case r.Method == "HEAD" && r.URL.Path == "/bucket":
++			w.WriteHeader(200)
++		case r.Method == "HEAD" && r.URL.Path == "/bucket/prefix/item":
++			w.Header().Set("Content-Length", "6")
++			w.Header().Set("Etag", `"test"`)
++			w.WriteHeader(200)
++		case r.Method == "GET" && r.URL.Path == "/bucket/prefix/item":
++			if r.Header.Get("Range") != "bytes=1-3" {
++				t.Errorf("range=%s", r.Header.Get("Range"))
++			}
++			w.Header().Set("Content-Range", "bytes 1-3/6")
++			w.Header().Set("Content-Length", "3")
++			w.WriteHeader(206)
++			io.WriteString(w, "bcd")
++		case r.Method == "HEAD" && r.URL.Path == "/bucket/prefix/dir":
++			w.WriteHeader(404)
++		case r.Method == "GET" && r.URL.Path == "/bucket":
++			if r.URL.Query().Get("prefix") != "prefix/dir/" {
++				t.Error("prefix escaped scope")
++			}
++			io.WriteString(w, `<ListBucketResult><Contents><Key>prefix/dir/child</Key><Size>1</Size></Contents></ListBucketResult>`)
++		default:
++			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
++			w.WriteHeader(500)
++		}
++	}))
++	defer server.Close()
++	c, e := newS3(s3Config{Endpoint: server.URL, Bucket: "bucket", Region: "us-east-1", Root: "prefix", ForcePathStyle: true}, "test-access", "test-secret", "")
++	if e != nil {
++		t.Fatal(e)
++	}
++	defer c.Close(context.Background())
++	if e = c.validate(context.Background()); e != nil {
++		t.Fatal(e)
++	}
++	plan, e := c.Open(context.Background(), port.OpenRequest{Path: "/item", Offset: 1, Length: 3})
++	if e != nil {
++		t.Fatal(e)
++	}
++	b, e := io.ReadAll(plan.Body)
++	plan.Body.Close()
++	if e != nil || string(b) != "bcd" {
++		t.Fatal(string(b), e)
++	}
++	info, e := c.Stat(context.Background(), port.ObjectRef{Path: "/dir"})
++	if e != nil || !info.IsDir {
++		t.Fatalf("directory %+v %v", info, e)
++	}
++	if k, _ := c.key("/.kopiaignore"); k != "prefix/.kopiaignore" {
++		t.Fatal("hidden object name changed", k)
++	}
++	if e = c.Delete(context.Background(), port.ObjectRef{Path: "/dir"}); e != port.ErrUnsupported {
++		t.Fatal("directory delete silently succeeded", e)
++	}
++}
+diff --git a/clientplugin/stream.go b/clientplugin/stream.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae6b918f98276620eab50129b240f1d814c6a36c
+--- /dev/null
++++ b/clientplugin/stream.go
+@@ -0,0 +1,66 @@
++package clientplugin
++
++import (
++	"errors"
++	"io"
++	"sync/atomic"
++
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++)
++
++// A mismatch terminates the upload reader before a multipart completion request.
++// No request body is cached or replayed to repair a mismatch.
++type sizedReader struct {
++	body      io.Reader
++	remaining int64
++	ended     bool
++}
++
++func checkedBody(body io.Reader, size int64) io.Reader {
++	if size < 0 {
++		return body
++	}
++	return &sizedReader{body: body, remaining: size}
++}
++func (r *sizedReader) Read(p []byte) (int, error) {
++	if len(p) == 0 {
++		return 0, nil
++	}
++	if r.ended {
++		return 0, io.EOF
++	}
++	if r.remaining == 0 {
++		var b [1]byte
++		n, e := r.body.Read(b[:])
++		if n > 0 {
++			return 0, port.ErrInvalid
++		}
++		if e == io.EOF {
++			r.ended = true
++		}
++		return 0, e
++	}
++	if int64(len(p)) > r.remaining {
++		p = p[:r.remaining]
++	}
++	n, e := r.body.Read(p)
++	r.remaining -= int64(n)
++	if errors.Is(e, io.EOF) {
++		if r.remaining != 0 {
++			return n, io.ErrUnexpectedEOF
++		}
++		r.ended = true
++	}
++	return n, e
++}
++
++type uploadReader struct {
++	reader io.Reader
++	bytes  atomic.Int64
++}
++
++func (r *uploadReader) Read(p []byte) (int, error) {
++	n, e := r.reader.Read(p)
++	r.bytes.Add(int64(n))
++	return n, e
++}
+diff --git a/clientplugin/webdav.go b/clientplugin/webdav.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..50aee135b1bbbac3728f8c8dcdf6022537d78f36
+--- /dev/null
++++ b/clientplugin/webdav.go
+@@ -0,0 +1,121 @@
++package clientplugin
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"path"
++	"strings"
++	"time"
++
++	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
++	dav "github.com/OpenListTeam/OpenList/v4/pkg/gowebdav"
++)
++
++type davClient struct {
++	client    *dav.Client
++	root      string
++	transport *http.Transport
++}
++
++func newWebDAV(c davConfig, password string) *davClient {
++	t := http.DefaultTransport.(*http.Transport).Clone()
++	d := dav.NewClient(c.Address, c.Username, password)
++	d.SetTransport(metadataTransport{base: t})
++	d.SetInterceptor(func(_ string, r *http.Request) {
++		if c.Username != "" {
++			r.SetBasicAuth(c.Username, password)
++		}
++	})
++	root, _ := clean(c.Root)
++	return &davClient{d, root, t}
++}
++func (d *davClient) key(p string) (string, error) {
++	p, e := clean(p)
++	if e != nil {
++		return "", e
++	}
++	return path.Join("/", d.root, p), nil
++}
++func (d *davClient) Stat(ctx context.Context, q port.ObjectRef) (port.ObjectInfo, error) {
++	k, e := d.key(q.Path)
++	if e != nil {
++		return port.ObjectInfo{}, e
++	}
++	f, e := d.client.WithContext(ctx).Stat(k)
++	if dav.IsErrNotFound(e) {
++		return port.ObjectInfo{}, port.ErrNotFound
++	}
++	if e != nil {
++		return port.ObjectInfo{}, providerError(e)
++	}
++	return port.ObjectInfo{Path: objectPath(q.Path), Size: f.Size(), IsDir: f.IsDir(), ModTime: f.ModTime()}, nil
++}
++func (d *davClient) List(ctx context.Context, q port.ListRequest) (port.ListResult, error) {
++	if q.Cursor != "" || q.Limit < 0 {
++		return port.ListResult{}, port.ErrUnsupported
++	}
++	k, e := d.key(q.Path)
++	if e != nil {
++		return port.ListResult{}, e
++	}
++	files, e := d.client.WithContext(ctx).ReadDir(k)
++	if e != nil {
++		return port.ListResult{}, providerError(e)
++	}
++	if q.Limit > 0 && len(files) > q.Limit {
++		return port.ListResult{}, port.ErrUnsupported
++	}
++	out := port.ListResult{Objects: make([]port.ObjectInfo, 0, len(files))}
++	for _, f := range files {
++		out.Objects = append(out.Objects, port.ObjectInfo{Path: objectPath(path.Join(q.Path, f.Name())), Size: f.Size(), IsDir: f.IsDir(), ModTime: f.ModTime()})
++	}
++	return out, nil
++}
++func (d *davClient) Open(ctx context.Context, q port.OpenRequest) (port.ReadPlan, error) {
++	info, e := d.Stat(ctx, port.ObjectRef{Path: q.Path})
++	if e != nil {
++		return port.ReadPlan{}, e
++	}
++	if info.IsDir {
++		return port.ReadPlan{}, port.ErrInvalid
++	}
++	n, e := checkedRange(q, info.Size)
++	if e != nil {
++		return port.ReadPlan{}, e
++	}
++	if n == 0 {
++		return port.ReadPlan{Info: info, Body: io.NopCloser(strings.NewReader(""))}, nil
++	}
++	k, _ := d.key(q.Path)
++	body, e := d.client.WithContext(ctx).ReadStreamRange(k, q.Offset, n)
++	if e != nil {
++		return port.ReadPlan{}, providerError(e)
++	}
++	return port.ReadPlan{Info: info, Body: body}, nil
++}
++func (d *davClient) Put(ctx context.Context, q port.PutRequest) (port.PutResult, error) {
++	if q.Body == nil || q.Size < -1 || len(q.Metadata) > 0 {
++		return port.PutResult{}, port.ErrInvalid
++	}
++	k, e := d.key(q.Path)
++	if e != nil || strings.Trim(q.Path, "/") == "" {
++		return port.PutResult{}, port.ErrInvalid
++	}
++	body := &uploadReader{reader: checkedBody(q.Body, q.Size)}
++	e = d.client.WithContext(ctx).WriteStream(k, body, 0644, func(r *http.Request) { r.ContentLength = q.Size; r.Header.Set("Content-Type", q.ContentType) })
++	if e != nil {
++		return port.PutResult{}, providerError(e)
++	}
++	return port.PutResult{Info: port.ObjectInfo{Path: objectPath(q.Path), Size: body.bytes.Load(), ModTime: time.Now().UTC(), ContentType: q.ContentType}}, nil
++}
++func (d *davClient) Delete(ctx context.Context, q port.ObjectRef) error {
++	k, e := d.key(q.Path)
++	if e != nil || strings.Trim(q.Path, "/") == "" {
++		return port.ErrInvalid
++	}
++	return providerError(d.client.WithContext(ctx).Remove(k))
++}
++func (d *davClient) Close(context.Context) error { closeTransport(d.transport); return nil }
++
++var _ port.Client = (*davClient)(nil)
+diff --git a/clientplugin/webdav_metadata.go b/clientplugin/webdav_metadata.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..41c49e31fb575033097c5627638b467b602c0b84
+--- /dev/null
++++ b/clientplugin/webdav_metadata.go
+@@ -0,0 +1,24 @@
++package clientplugin
++
++import (
++	"io"
++	"net/http"
++)
++
++// PROPFIND is metadata. Bound the legacy XML parser without limiting streamed GETs.
++type metadataTransport struct{ base http.RoundTripper }
++
++func (t metadataTransport) RoundTrip(r *http.Request) (*http.Response, error) {
++	resp, e := t.base.RoundTrip(r)
++	if e == nil && r.Method == "PROPFIND" {
++		resp.Body = &metadataBody{ReadCloser: resp.Body, reader: io.LimitReader(resp.Body, 4<<20)}
++	}
++	return resp, e
++}
++
++type metadataBody struct {
++	io.ReadCloser
++	reader io.Reader
++}
++
++func (b *metadataBody) Read(p []byte) (int, error) { return b.reader.Read(p) }
+diff --git a/cmd/openlist-client-plugin/main.go b/cmd/openlist-client-plugin/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cfa7bd57b43c0bf82226dcd2030c425be81c95b7
+--- /dev/null
++++ b/cmd/openlist-client-plugin/main.go
+@@ -0,0 +1,11 @@
++package main
++
++import (
++	"github.com/OpenListTeam/OpenList/v4/clientplugin"
++	"github.com/wignerStan/network-data-plane-worker/go/nativeclient/provider"
++)
++
++var buildDigest string
++
++func init() { provider.RegisterFactory(clientplugin.NewFactory(buildDigest)) }
++func main() {}
+diff --git a/pkg/gowebdav/client.go b/pkg/gowebdav/client.go
+index 4341f9033b54762aa836ae7c154feb7f0372e8fd..48b62f9aa74a73e0dbf2a632f5122ef24fe280fa 100644
+--- a/pkg/gowebdav/client.go
++++ b/pkg/gowebdav/client.go
+@@ -2,6 +2,7 @@ package gowebdav
+ 
+ import (
+ 	"bytes"
++	"context"
+ 	"encoding/xml"
+ 	"fmt"
+ 	"io"
+@@ -23,6 +24,7 @@ type Client struct {
+ 	interceptor func(method string, rq *http.Request)
+ 	c           *http.Client
+ 
++	ctx       context.Context
+ 	authMutex sync.Mutex
+ 	auth      Authenticator
+ }
+@@ -62,7 +64,7 @@ func (n *NoAuth) Authorize(req *http.Request, method string, path string) {
+ 
+ // NewClient creates a new instance of client
+ func NewClient(uri, user, pw string) *Client {
+-	return &Client{FixSlash(uri), make(http.Header), nil, &http.Client{}, sync.Mutex{}, &NoAuth{user, pw}}
++	return &Client{root: FixSlash(uri), headers: make(http.Header), c: &http.Client{}, ctx: context.Background(), auth: &NoAuth{user, pw}}
+ }
+ 
+ // SetHeader lets us set arbitrary headers for a given client
+@@ -484,3 +486,12 @@ func (c *Client) WriteStream(path string, stream io.Reader, _ os.FileMode, callb
+ 		return newPathError("WriteStream", path, s)
+ 	}
+ }
++
++// WithContext creates request-local authentication and cancellation state.
++// It shares the thread-safe HTTP transport, not a mutable context on a live client.
++func (c *Client) WithContext(ctx context.Context) *Client {
++	c.authMutex.Lock()
++	user, pass := c.auth.User(), c.auth.Pass()
++	c.authMutex.Unlock()
++	return &Client{root: c.root, headers: c.headers.Clone(), interceptor: c.interceptor, c: c.c, ctx: ctx, auth: &NoAuth{user, pass}}
++}
+diff --git a/pkg/gowebdav/requests.go b/pkg/gowebdav/requests.go
+index d6237767d38160f8bab3dbcb6963473e17316817..1566ecd2e4ae6c1c4abbf3d05667aa8c563be6f2 100644
+--- a/pkg/gowebdav/requests.go
++++ b/pkg/gowebdav/requests.go
+@@ -32,9 +32,9 @@ func (c *Client) req(method, path string, body io.Reader, intercept func(*http.R
+ 			retryBuf = buff
+ 			body = io.TeeReader(body, buff)
+ 		}
+-		r, err = http.NewRequest(method, PathEscape(Join(c.root, path)), body)
++		r, err = http.NewRequestWithContext(c.ctx, method, PathEscape(Join(c.root, path)), body)
+ 	} else {
+-		r, err = http.NewRequest(method, PathEscape(Join(c.root, path)), nil)
++		r, err = http.NewRequestWithContext(c.ctx, method, PathEscape(Join(c.root, path)), nil)
+ 	}
+ 
+ 	if err != nil {
+@@ -86,6 +86,7 @@ func (c *Client) req(method, path string, body io.Reader, intercept func(*http.R
+ 		// retryBuf will be nil if body was nil initially so no check
+ 		// for body == nil is required here.
+ 		if canRetry {
++			rs.Body.Close()
+ 			return c.req(method, path, retryBuf, intercept)
+ 		}
+ 	} else if rs.StatusCode == 401 {
