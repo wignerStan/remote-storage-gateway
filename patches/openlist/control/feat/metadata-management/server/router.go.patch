@@ -1,9 +1,13 @@
 diff --git a/server/router.go b/server/router.go
-index fe210e6eb56567ce01bcfc0a23cd567df4744a2d..39cf49abf41dd565c82d5bd60519467fd9010fc0 100644
+index fe210e6eb56567ce01bcfc0a23cd567df4744a2d..ec08f648fa402419c6c4b8737e416e80748a66ba 100644
 --- a/server/router.go
 +++ b/server/router.go
-@@ -3,6 +3,8 @@ package server
+@@ -1,8 +1,12 @@
+ package server
+ 
  import (
++	"strings"
++
  	"github.com/OpenListTeam/OpenList/v4/cmd/flags"
  	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 +	"github.com/OpenListTeam/OpenList/v4/internal/controlplane"
@@ -11,7 +15,7 @@ index fe210e6eb56567ce01bcfc0a23cd567df4744a2d..39cf49abf41dd565c82d5bd60519467f
  	"github.com/OpenListTeam/OpenList/v4/internal/message"
  	multipartPkg "github.com/OpenListTeam/OpenList/v4/internal/multipart"
  	"github.com/OpenListTeam/OpenList/v4/internal/sign"
-@@ -14,9 +16,16 @@ import (
+@@ -14,9 +18,16 @@ import (
  	"github.com/OpenListTeam/OpenList/v4/server/static"
  	"github.com/gin-contrib/cors"
  	"github.com/gin-gonic/gin"
@@ -28,7 +32,7 @@ index fe210e6eb56567ce01bcfc0a23cd567df4744a2d..39cf49abf41dd565c82d5bd60519467f
  	e.ContextWithFallback = true
  	if !utils.SliceContains([]string{"", "/"}, conf.URL.Path) {
  		e.GET("/", func(c *gin.Context) {
-@@ -29,6 +38,10 @@ func Init(e *gin.Engine) {
+@@ -29,6 +40,10 @@ func Init(e *gin.Engine) {
  		e.Use(middlewares.ForceHttps)
  	}
  	g.Any("/ping", func(c *gin.Context) {
@@ -39,7 +43,7 @@ index fe210e6eb56567ce01bcfc0a23cd567df4744a2d..39cf49abf41dd565c82d5bd60519467f
  		c.String(200, "pong")
  	})
  	g.GET("/favicon.ico", handles.Favicon)
-@@ -157,7 +170,7 @@ func Init(e *gin.Engine) {
+@@ -157,7 +172,7 @@ func Init(e *gin.Engine) {
  	fsAndShare(api.Group("/fs", middlewares.Auth(true)))
  	_task(auth.Group("/task", middlewares.AuthNotGuest))
  	_sharing(auth.Group("/share", middlewares.AuthNotGuest))
@@ -48,23 +52,23 @@ index fe210e6eb56567ce01bcfc0a23cd567df4744a2d..39cf49abf41dd565c82d5bd60519467f
  	if flags.Debug || flags.Dev {
  		debug(g.Group("/debug"))
  	}
-@@ -166,7 +179,9 @@ func Init(e *gin.Engine) {
+@@ -166,7 +181,9 @@ func Init(e *gin.Engine) {
  	})
  }
  
 -func admin(g *gin.RouterGroup) {
 +func admin(e *gin.Engine, g *gin.RouterGroup) {
-+	registerControlRoutes(e, g)
++	registerControlRoutes(g)
 +
  	meta := g.Group("/meta")
  	meta.GET("/list", handles.ListMetas)
  	meta.GET("/get", handles.GetMeta)
-@@ -365,3 +380,17 @@ func InitS3(e *gin.Engine) {
+@@ -365,3 +382,23 @@ func InitS3(e *gin.Engine) {
  	Cors(e)
  	S3Server(e.Group("/"))
  }
 +
-+func registerControlRoutes(e *gin.Engine, g *gin.RouterGroup) {
++func registerControlRoutes(g *gin.RouterGroup) {
 +	management, managementErr := controlplane.Load(conf.Conf.ControlTargetsFile)
 +	controlGroup := g.Group("/control")
 +	entry := httpapi.NewEntry(management, managementErr)
@@ -72,8 +76,14 @@ index fe210e6eb56567ce01bcfc0a23cd567df4744a2d..39cf49abf41dd565c82d5bd60519467f
 +	if err != nil {
 +		panic(err)
 +	}
-+	if err = openapigin.Mount(e, controlGroup, table, openapigin.Options{OpenAPIPath: "/openapi", SchemasPath: "/schemas", Errors: httpapi.ErrorPolicy()}); err != nil {
++	engine, err := openapigin.New(table, openapigin.Options{Prefix: controlGroup.BasePath(), OpenAPIPath: "/openapi", SchemasPath: "/schemas", Errors: httpapi.ErrorPolicy()})
++	if err != nil {
 +		panic(err)
 +	}
-+
++	// Publish the complete validated engine through the existing administrator
++	// group so both operations and generated metadata inherit its authorization.
++	handler := gin.WrapH(engine)
++	for _, route := range engine.Routes() {
++		controlGroup.Handle(route.Method, strings.TrimPrefix(route.Path, controlGroup.BasePath()), handler)
++	}
 +}

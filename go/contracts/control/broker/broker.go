@@ -27,6 +27,10 @@ var (
 	ErrInvalid     = errors.New("invalid control metadata")
 	ErrUnavailable = errors.New("worker control unavailable")
 	ErrDenied      = errors.New("transfer decision denied")
+	// ErrRejected means a desired replacement could not be published. It covers
+	// generation-CAS, admission and prepare failures without exposing provider
+	// details or changing the caller's expected version for an implicit retry.
+	ErrRejected = errors.New("desired worker state rejected")
 )
 
 type InstanceInfo struct {

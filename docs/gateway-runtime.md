@@ -6,11 +6,11 @@ standalone Worker excludes CP dependencies; the combined ELF links both roles
 while keeping their execution in separate processes. CP code is not on the
 payload path.
 
-Build with the workspace described in the repository README:
-
-```sh
-make INFRA_ROOT=/path/to/reviewed/infra BUILD_DIR=/tmp/trade-remote-gateway-build plugin worker materializer rclone transfer
-```
+Build with the local Go/Node/pnpm entry described in the repository README and
+[build instructions](../build/README.md). Select current independent Infra,
+Worker and rclone checkouts explicitly. Derived upstream sources, temporary
+local module replacements and build receipts stay in the selected build output;
+the canonical module cache is not patched.
 
 The ELF SHA256 approves executable bytes; the descriptor SHA256 approves exact
 descriptor bytes. The descriptor's build digest identifies source/build inputs,
@@ -116,13 +116,15 @@ and private secret-file references are accepted. The initial APIs are:
 | `POST /targets/{rclone}/jobs/{id}/stop` | Explicit job control with process identity check |
 | `GET /targets/{origin}/probe` | S3 HeadBucket or WebDAV root metadata |
 
-Concrete origin SDKs initially cover S3 and WebDAV. Target registration is
+Concrete origin metadata probes cover S3 and WebDAV. Target registration is
 operator controlled and does not define plugin configuration forms or schemas.
 No arbitrary RC method, remote URL or object-body forwarding API is registered.
 The management SDK and secret-file resolver are pure Go and do not import the
-native loader. Existing OpenList legacy WebDAV/S3 addresses remain available
-for clients whose storage plugins have not yet migrated; this is the staged
-management integration, not completion of every legacy provider migration.
+native loader. In managed mode, OpenList retains identity, SQLite storage
+records, task history and administration, but disables legacy provider
+initialization, payload tasks and file-serving routes. An existing unmanaged
+OpenList deployment has a separate migration/retirement boundary; its legacy
+HTTP/S3 listeners are not part of the managed Gateway profile.
 
 `make admin` builds the standalone-Worker operator. Its Secret allowlist and
 supplied systemd unit target that standalone profile; they must not be pointed at
@@ -146,19 +148,23 @@ instance resources, while loaded code remains mapped. Infra bounds native owner
 slots at64; exhausted capacity fails closed and requires a drained process
 replacement. This is not unlimited in-process Go code unloading.
 
-The native OCI recipes use rules_img and Buildbarn, with local fallback disabled.
-Reviewed binary/DSO/frontend/CA inputs stay outside the source tree. All three images
-include their programs and trust bundle, run as1001:1001 and export complete OCI
-archives. See the monorepo candidate receipt under `docs/validation/` and `build/README.md`.
-The supplied deployments use verified image digests, private Secret volumes and
-the existing database PVC; executable/frontend host mounts are unnecessary.
+Local native builds produce the Gateway ELF, independent Worker/CP entry points,
+dynamic client/transfer plugins, embedded UI and optionally the independent
+rclone executable. Their receipts identify actual source and tool inputs. The
+retained Bazel/BuildBarn OCI recipes and historical candidate receipts describe
+an earlier build path; the native entry does not invoke them or GitHub Actions.
+Deployment templates require explicitly selected image artifacts, private Secret
+volumes and a database PVC. Building does not select or replace a live deployment.
 
 ## Source-built UI and optional local materialization
 
-Infra `storage/cloud` owns the backend and remote operations; `storage/vfs`
-owns optional cache handles and retirement. The product adapts their results to
-the Worker port. Infra's `go.mod` selects the rclone package version, and its
-ordered patch inventory supplies the VFS source profile during assembly.
+Infra `storage/blob/rclone` owns generic bounded filesystem/object access and
+archive access. Gateway selects S3/WebDAV/Drive backends and declared secret
+references, then maps entries, cursors, errors and lifecycle to the Worker port.
+The independent rclone product owns VFS, cache handles and process retirement.
+Infra's `go.mod` selects the upstream rclone module version; its ordered
+`go/patches/rclone` inventory supplies the archive/VFS source profile during
+assembly. Retired `storage/cloud` and `storage/vfs` packages are not restored.
 
 The control-plane binary embeds the pinned frontend built from source. Its
 deployment must omit `OPENLIST_DIST_DIR`, and an existing persisted config's
@@ -177,13 +183,21 @@ VFS lives in the independent `github.com/wignerStan/rclone/go` module. Gateway
 imports its passive Box configuration; the external source build produces the
 native `rclone serve managed-vfs` command. There is no Gateway VFS runtime.
 
-The Control Plane loads `OPENLIST_GATEWAY_PROCESSES_FILE`. `workers` select Worker
-executables and configurations; optional `materializers` select external rclone
-executables and `box.ProcessConfig`. A materializer's `remote` names only the
-Worker IPC/offer sockets, raw namespace and expected Worker ID/incarnation. CP
-pins actual endpoints from the ready Worker's Info, then starts the external
-Box. Origin URLs and provider credentials have no representation in that backend
-assignment. `runtime_directory` can create a private child of a runtime volume.
+The Manager loads `gateway manager --config /path/to/bundle.json`.
+`control_planes` select CP configuration and private data directories; `workers`
+select Worker executables/configurations; optional `materializers` select
+external rclone executables and `box.ProcessConfig`. The CP loads only
+`OPENLIST_GATEWAY_CONTROL_FILE`, which supplies assigned Worker endpoints and
+finite transfer policy. It never launches, signals or reaps another role.
+
+A materializer's `remote` names only the Worker IPC/offer sockets, raw namespace
+and expected Worker ID/incarnation. After CP and Worker readiness, the Manager
+pins actual endpoints from the Worker's Info, starts the external Box and
+checks its reported assignment before the optional single generation-CAS
+activation. Origin URLs and provider credentials have no representation in that
+backend assignment. `runtime_directory` can create a private child of a runtime
+volume. `gateway manager --config /path/to/bundle.json --check-config` passively
+checks the assembly without starting children or initializing providers.
 
 The backend uses bounded ttrpc metadata plus an authenticated Unix seqpacket
 shared-memory bootstrap. Worker owns allocation, exact generation leases and
@@ -196,11 +210,24 @@ For cache controls and immutable ZIP placement, see [Small files](small-files.md
 and the external rclone application's configuration. The cache remains
 regenerable and distinct from backup, retention and hot/cold placement. A
 `materializers[].activate_client` selection must bind a read-only mount with a
-distinct `remote_client`; it is published only after external Box readiness.
+distinct `remote_client` and the same mount name as `remote.namespace`; it is
+published only after external Box readiness. Ordinary mounts can share the
+Worker without a `remote_client`. Only explicitly assigned raw clients enter
+the storage IPC namespace map; it never falls back to a public cached client.
+
+A materializer session pins its raw client's exact generation. Replacing that
+raw generation makes the old session stale, including cache-hit checks. The
+current runtime requires a new materializer/session to consume the replacement;
+it does not migrate an existing cache session automatically. Activating the
+separate cached client changes only that client's generation and preserves the
+raw session used by the materializer.
 
 `/api/admin/control/instances` and its manifest/descriptor/observed/client routes
-manage local children over ttrpc. Legacy configured remote management targets
-remain separate from these local instances. Entries generate schema through the
+coordinate assigned Workers over local ttrpc or remote mTLS/gRPC. They expose no
+process lifecycle operations. Legacy configured metadata targets remain separate
+from these assignments. Exact descriptor bytes and expected versions cross the
+control boundary unchanged. A rejected replacement returns HTTP 409 and does
+not retry with a refreshed generation. Entries generate schema through the
 existing schema effect tool; no server or provider owns another copy of it.
 
 For encoded transfer, `encoded.artifact` selects the independently installed

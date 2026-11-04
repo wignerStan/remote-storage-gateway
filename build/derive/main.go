@@ -54,7 +54,11 @@ type toolchain struct {
 	PNPM string `json:"pnpm"`
 }
 type builder struct {
+	nativeSDKRoot, pkgConfig                           string
 	root, output, infra, dataPlane, materializer, mise string
+	goBinary, nodeBinary, pnpmBinary                   string
+	jobs                                               int
+	withRclone                                         bool
 	referenceRoot                                      string
 	ca                                                 string
 	release                                            bool
@@ -65,9 +69,10 @@ type builder struct {
 const rcloneModule = "github.com/rclone/rclone"
 
 type modulePatchSeries struct {
-	Schema  string  `json:"schema"`
-	Module  string  `json:"module"`
-	Patches []patch `json:"patches"`
+	Schema       string  `json:"schema"`
+	Module       string  `json:"module"`
+	Patches      []patch `json:"patches"`
+	BazelPatches []patch `json:"bazel_patches,omitempty"`
 }
 type moduleDownload struct {
 	Path, Version, Dir, Sum, GoModSum string
@@ -122,16 +127,19 @@ func (b *builder) rcloneSeries() (modulePatchSeries, error) {
 	} else if !errors.Is(e, fs.ErrNotExist) {
 		return series, e
 	}
-	if e := readJSON(filepath.Join(b.infra, "patches/rclone/series.json"), &series); e != nil {
+	if e := readJSON(filepath.Join(b.infra, "go/patches/rclone/series.json"), &series); e != nil {
 		return series, e
 	}
 	if series.Schema != "go-module-patch-series/v1" || series.Module != rcloneModule || len(series.Patches) == 0 {
 		return series, errors.New("invalid Infra rclone patch inventory")
 	}
 	for i, p := range series.Patches {
-		if p.Order != i+1 || !safeRelative(p.Path) || !strings.HasPrefix(p.Path, "patches/rclone/") || len(p.SHA256) != 64 {
+		if p.Order != i+1 || !safeRelative(p.Path) || strings.Contains(p.Path, "\\") || !strings.HasSuffix(p.Path, ".patch") || len(p.SHA256) != 64 {
 			return series, errors.New("invalid ordered rclone patch")
 		}
+		// Infra paths are relative to the inventory directory. Only the native
+		// semantic series applies here; Bazel annotations never patch Go source.
+		series.Patches[i].Path = filepath.Join("go/patches/rclone", p.Path)
 	}
 	return series, nil
 }
@@ -167,7 +175,7 @@ func (b *builder) fetchModule(version string) (moduleDownload, error) {
 	}
 	// Explicit module@version works outside a main module. Downloads cannot
 	// update the selected Infra or product go.mod/go.sum files.
-	raw, e := b.command(b.output, b.mise, "exec", "go@"+b.tools.Go, "--", "go", "mod", "download", "-json", rcloneModule+"@"+version)
+	raw, e := b.goCommand(b.output, nil, "mod", "download", "-json", rcloneModule+"@"+version)
 	if e != nil {
 		return moduleDownload{}, e
 	}
@@ -213,7 +221,7 @@ func (b *builder) verifyModuleSnapshot(version string, series modulePatchSeries)
 	if e != nil {
 		return receipt, e
 	}
-	inventory, e := hashFile(filepath.Join(b.infra, "patches/rclone/series.json"))
+	inventory, e := hashFile(filepath.Join(b.infra, "go/patches/rclone/series.json"))
 	if e != nil {
 		return receipt, e
 	}
@@ -292,7 +300,7 @@ func (b *builder) materializeRcloneModule() error {
 		if e != nil {
 			return e
 		}
-		inventory, e := hashFile(filepath.Join(b.infra, "patches/rclone/series.json"))
+		inventory, e := hashFile(filepath.Join(b.infra, "go/patches/rclone/series.json"))
 		if e != nil {
 			return e
 		}
@@ -317,11 +325,18 @@ func main() {
 	b := builder{}
 	flag.StringVar(&b.referenceRoot, "source-references", "", "optional existing upstream Git object references; no source copies")
 	flag.StringVar(&b.root, "root", "..", "canonical monorepo root")
-	flag.StringVar(&b.output, "out", "/tmp/trade-remote-gateway-build", "external build directory")
+	flag.StringVar(&b.output, "out", filepath.Join(os.TempDir(), "storage-gateway-native-build"), "external build directory")
 	flag.StringVar(&b.infra, "infra-root", "/develop/infra", "explicit Infra source checkout (reviewed and clean for release)")
 	flag.StringVar(&b.dataPlane, "data-plane-root", "/develop/network/data-plane-worker", "explicit independently owned Data Plane module checkout")
 	flag.StringVar(&b.materializer, "rclone-root", "/develop/network/rclone", "independently derived rclone application and process module")
-	flag.StringVar(&b.mise, "mise", "mise", "mise executable")
+	flag.StringVar(&b.mise, "mise", "", "optional Mise executable for pinned toolchains")
+	flag.StringVar(&b.goBinary, "go", "go", "native Go executable")
+	flag.StringVar(&b.nativeSDKRoot, "native-sdk-root", "", "optional verified canonical shared-memory SDK prefix; defaults to pkg-config discovery")
+	flag.StringVar(&b.pkgConfig, "pkg-config", os.Getenv("PKG_CONFIG"), "pkg-config executable (default pkg-config)")
+	flag.StringVar(&b.nodeBinary, "node", "node", "native Node executable")
+	flag.StringVar(&b.pnpmBinary, "pnpm", "pnpm", "native pnpm executable")
+	flag.IntVar(&b.jobs, "jobs", 2, "maximum compiler parallelism")
+	flag.BoolVar(&b.withRclone, "with-rclone", false, "also compile the independent rclone executable")
 	flag.StringVar(&b.ca, "ca-bundle", "/etc/ssl/certs/ca-certificates.crt", "public runtime CA bundle")
 	flag.BoolVar(&b.release, "release", false, "require clean exact product and Infra source commits")
 	flag.Parse()
@@ -673,8 +688,14 @@ func (b *builder) run(stage string) error {
 			return e
 		}
 	}
-	if !strings.HasPrefix(b.output, "/tmp/trade-") && !strings.HasPrefix(b.output, "/var/tmp/trade-") {
-		return errors.New("build output must be /tmp/trade-* or /var/tmp/trade-*")
+	if e = validateOutput(b.output, b.root, b.infra, b.dataPlane, b.materializer); e != nil {
+		return e
+	}
+	if b.jobs < 1 || b.jobs > 16 {
+		return errors.New("jobs must be between 1 and 16")
+	}
+	if e = os.MkdirAll(b.output, 0755); e != nil {
+		return e
 	}
 	if e = readJSON(filepath.Join(b.root, "build/toolchain.json"), &b.tools); e != nil {
 		return e
@@ -720,6 +741,8 @@ func (b *builder) run(stage string) error {
 			return e
 		}
 		return b.workspace()
+	case "prepare":
+		return b.prepareNative()
 	case "remote-inputs":
 		return b.remoteInputs()
 	case "verify-inputs":
@@ -728,13 +751,13 @@ func (b *builder) run(stage string) error {
 	case "module-source":
 		return b.materializeRcloneModule()
 	case "ui":
-		return b.remoteBuild("//:ui_dist")
-	case "cp", "plugin", "remote":
-		return b.collectRemote()
+		return b.buildUI()
+	case "cp", "plugin", "build":
+		return b.buildNative()
 	case "images":
-		return b.remoteImages()
+		return errors.New("image assembly is separate from native compilation; use inputs and the documented OCI recipe")
 	case "collect":
-		return b.collectRemote()
+		return b.buildNative()
 	case "test":
 		return b.compile(stage)
 	case "inputs":
@@ -759,53 +782,10 @@ type moduleJSON struct {
 	}
 }
 
-// sdkHuma admits the SDK owner's tracked module. A neighboring checkout or a
-// dependency's ignored replace directive cannot silently select schema code.
-func sdkHuma(root string) (string, error) {
-	var record relationship
-	if err := readJSON(filepath.Join(root, ".git-source-relationships/huma.json"), &record); err != nil {
-		return "", err
-	}
-	if record.Schema != "git-source-relationship/v1" || record.Kind != "third_party_implementation" || record.Integration != "tracked" || record.Path != "third_party/huma" || record.Owner == "" {
-		return "", errors.New("SDK Huma requires its tracked source relationship")
-	}
-	directory := filepath.Join(root, record.Path)
-	actual, err := filepath.EvalSymlinks(directory)
-	if err != nil || actual != filepath.Clean(directory) {
-		return "", errors.New("SDK Huma source must be the declared owned directory")
-	}
-	parse := func(path string) (*modfile.File, error) {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		return modfile.Parse(path, data, nil)
-	}
-	owner, err := parse(filepath.Join(root, "go/go.mod"))
-	if err != nil {
-		return "", err
-	}
-	const module = "github.com/danielgtaylor/huma/v2"
-	declared := false
-	for _, replacement := range owner.Replace {
-		if replacement.Old.Path == module && replacement.New.Version == "" && filepath.Clean(filepath.Join(root, "go", replacement.New.Path)) == directory {
-			declared = true
-		}
-	}
-	if !declared {
-		return "", errors.New("SDK Huma source is not declared by the owner go.mod")
-	}
-	selected, err := parse(filepath.Join(directory, "go.mod"))
-	if err != nil {
-		return "", err
-	}
-	if selected.Module == nil || selected.Module.Mod.Path != module {
-		return "", errors.New("SDK Huma module identity mismatch")
-	}
-	return directory, nil
-}
-
 func (b *builder) workspace() error {
+	if _, err := officialHuma(b.infra); err != nil {
+		return err
+	}
 	// Discover module identities from go.mod through Go itself. Only required
 	// first-party modules join the workspace, never adjacent legacy forks.
 	available := map[string]string{}
@@ -819,7 +799,7 @@ func (b *builder) workspace() error {
 		if d.Name() != "go.mod" {
 			return nil
 		}
-		raw, e := b.command(filepath.Dir(path), b.mise, "exec", "go@"+b.tools.Go, "--", "go", "mod", "edit", "-json")
+		raw, e := b.goCommand(filepath.Dir(path), nil, "mod", "edit", "-json")
 		if e != nil {
 			return e
 		}
@@ -833,11 +813,6 @@ func (b *builder) workspace() error {
 	if err != nil {
 		return err
 	}
-	huma, e := sdkHuma(b.infra)
-	if e != nil {
-		return e
-	}
-	available["github.com/danielgtaylor/huma/v2"] = huma
 	// A derived module is an admitted source, not a global module-cache edit.
 	admitted, e := b.sources()
 	if e != nil {
@@ -850,7 +825,7 @@ func (b *builder) workspace() error {
 		} else if e != nil {
 			return e
 		}
-		raw, e := b.command(dir, b.mise, "exec", "go@"+b.tools.Go, "--", "go", "mod", "edit", "-json")
+		raw, e := b.goCommand(dir, nil, "mod", "edit", "-json")
 		if e != nil {
 			return e
 		}
@@ -873,7 +848,7 @@ func (b *builder) workspace() error {
 	}
 	available[rcloneModule] = b.rcloneModulePath()
 	workerDir := filepath.Join(b.root, "go")
-	raw, e := b.command(workerDir, b.mise, "exec", "go@"+b.tools.Go, "--", "go", "mod", "edit", "-json")
+	raw, e := b.goCommand(workerDir, nil, "mod", "edit", "-json")
 	if e != nil {
 		return e
 	}
@@ -907,7 +882,7 @@ func (b *builder) workspace() error {
 		}
 		used[dir] = true
 		dirs = append(dirs, dir)
-		raw, e := b.command(dir, b.mise, "exec", "go@"+b.tools.Go, "--", "go", "mod", "edit", "-json")
+		raw, e := b.goCommand(dir, nil, "mod", "edit", "-json")
 		if e != nil {
 			return e
 		}
@@ -930,13 +905,13 @@ func (b *builder) workspace() error {
 	if e = os.WriteFile(work, []byte("go "+b.tools.Go+"\n"), 0644); e != nil {
 		return e
 	}
-	args := []string{"exec", "go@" + b.tools.Go, "--", "go", "work", "edit"}
+	args := []string{"work", "edit"}
 	for _, dir := range dirs {
 		args = append(args, "-use="+dir)
 	}
 	args = append(args, replacements...)
 	args = append(args, work)
-	if _, e := b.command(b.output, b.mise, args...); e != nil {
+	if _, e := b.goCommand(b.output, nil, args...); e != nil {
 		return e
 	}
 	return writeJSON(filepath.Join(b.output, "receipts/workspace.json"), map[string]any{"modules": dirs, "infra_root": b.infra, "gateway_module": filepath.Join(b.root, "go"), "data_plane_module": coreDir, "rclone_module": materializerDir})
@@ -1061,7 +1036,7 @@ func treeDigest(root string, exclude ...string) (string, error) {
 }
 func (b *builder) compile(stage string) error {
 	if stage != "test" {
-		return errors.New("product compilation requires Buildbarn")
+		return fmt.Errorf("unknown native compile stage %q", stage)
 	}
 	r, err := b.load("openlist")
 	if err != nil {
@@ -1073,16 +1048,11 @@ func (b *builder) compile(stage string) error {
 	if err = b.verifyDerived(r); err != nil {
 		return err
 	}
-	args := []string{"exec", "go@" + b.tools.Go, "--", "go", "test", "-race", "./clientplugin", "./pluginentry", "./pkg/gowebdav", "./pkg/storage/s3session", "./internal/controlplane/...", "./server"}
-	env := map[string]string{"GOWORK": filepath.Join(b.output, "go.work"), "CGO_ENABLED": "1", "CGO_CFLAGS": "-I" + filepath.Join(b.infra, "c/interop/plugins/include")}
-	spec := processexec.NewSpec(b.mise, args...).WithTimeout(30 * time.Minute).WithEnv(buildEnvironment(env))
-	spec.Dir, spec.MaxStdout, spec.MaxStderr = b.sourcePath("openlist"), 8<<20, 8<<20
-	result, err := processexec.RunContext(context.Background(), spec)
-	if err != nil {
-		return fmt.Errorf("derived tests failed: %w\n%s%s", err, result.Stdout, result.Stderr)
+	text, err := b.goCommand(b.sourcePath("openlist"), b.nativeEnvironment(), "test", "-p="+fmt.Sprint(b.parallelism()), "-race", "./clientplugin", "./pluginentry", "./pkg/gowebdav", "./pkg/storage/s3session", "./internal/controlplane/...", "./server")
+	if text != "" {
+		fmt.Println(text)
 	}
-	fmt.Print(string(result.Stdout))
-	return nil
+	return err
 }
 
 func (b *builder) provenanceDigest() (string, error) {
@@ -1100,7 +1070,7 @@ func (b *builder) provenanceDigest() (string, error) {
 		}
 		fmt.Fprintf(h, "%s %s\n", name, digest)
 	}
-	for _, name := range []string{"Makefile", "BUILD.bazel", "MODULE.bazel", ".bazelrc"} {
+	for _, name := range []string{"Makefile"} {
 		recipe, e := hashFile(filepath.Join(b.root, name))
 		if e != nil {
 			return "", e
@@ -1112,19 +1082,11 @@ func (b *builder) provenanceDigest() (string, error) {
 		return "", e
 	}
 	fmt.Fprintf(h, "infra %s\n", infra)
-	huma, e := sdkHuma(b.infra)
+	huma, e := officialHuma(b.infra)
 	if e != nil {
 		return "", e
 	}
-	humaHash, e := treeDigest(huma)
-	if e != nil {
-		return "", e
-	}
-	relationshipHash, e := hashFile(filepath.Join(b.infra, ".git-source-relationships/huma.json"))
-	if e != nil {
-		return "", e
-	}
-	fmt.Fprintf(h, "infra/huma %s %s\n", humaHash, relationshipHash)
+	fmt.Fprintf(h, "official-huma %s\n", huma)
 	// Infra owns the filesystem adapter and its patched upstream. Bind actual
 	// selected inputs as well as its commit so dirty development snapshots and
 	// backend-only patch updates cannot advertise an unchanged build identity.
@@ -1137,7 +1099,7 @@ func (b *builder) provenanceDigest() (string, error) {
 		return "", e
 	}
 	fmt.Fprintf(h, "infra/module %s@%s\n", rcloneModule, version)
-	for _, name := range []string{"patches/rclone/series.json", "go/go.mod", "go/go.sum"} {
+	for _, name := range []string{"go/patches/rclone/series.json", "go/go.mod", "go/go.sum"} {
 		digest, e := hashFile(filepath.Join(b.infra, name))
 		if e != nil {
 			return "", e
@@ -1149,6 +1111,11 @@ func (b *builder) provenanceDigest() (string, error) {
 		return "", e
 	}
 	fmt.Fprintf(h, "infra/go %s\n", storage)
+	native, e := treeDigest(filepath.Join(b.infra, "c/interop/plugins"))
+	if e != nil {
+		return "", e
+	}
+	fmt.Fprintf(h, "infra/c/interop/plugins %s\n", native)
 	for _, patch := range rclone.Patches {
 		digest, e := hashFile(filepath.Join(b.infra, patch.Path))
 		if e != nil {
@@ -1195,35 +1162,8 @@ func copyInput(src, dst string) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	return os.Rename(dst+".tmp", dst)
-}
-
-func (b *builder) imageInputs() error {
-	compositions := map[string][]string{"gateway": {"storage-worker", "client-openlist.so", "client-rclone.so", "transfer-reapi.so", "ca-certificates.crt"}, "control-plane": {"openlist-control-plane", "ca-certificates.crt"}, "bundle": {"gateway", "rclone", "client-openlist.so", "client-rclone.so", "transfer-reapi.so", "ca-certificates.crt"}}
-	for _, composition := range []string{"gateway", "control-plane", "bundle"} {
-		dir := filepath.Join(b.output, "image-inputs", composition)
-		if e := os.MkdirAll(dir, 0755); e != nil {
-			return e
-		}
-		manifest := map[string]string{}
-		for _, name := range compositions[composition] {
-			src := filepath.Join(b.output, "bin", name)
-			if name == "ca-certificates.crt" {
-				src = b.ca
-			}
-			dst := filepath.Join(dir, name)
-			if e := copyInput(src, dst); e != nil {
-				return e
-			}
-			hash, e := hashFile(dst)
-			if e != nil {
-				return e
-			}
-			manifest[name] = hash
-		}
-		if e := writeJSON(filepath.Join(dir, "inputs.json"), manifest); e != nil {
-			return e
-		}
+	if e = os.Chmod(dst+".tmp", info.Mode().Perm()); e != nil {
+		return e
 	}
-	return nil
+	return os.Rename(dst+".tmp", dst)
 }

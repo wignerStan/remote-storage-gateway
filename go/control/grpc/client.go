@@ -34,7 +34,7 @@ func encode(v any) (*pb.Metadata, error) {
 }
 func decode(b *pb.Metadata, e error, out any) error {
 	if e != nil {
-		return e
+		return controlError(e)
 	}
 	if b == nil || len(b.Json) == 0 || len(b.Json) > descriptor.MaxBytes || admission.StrictJSON(b.Json, out) != nil {
 		return broker.ErrInvalid
@@ -88,7 +88,7 @@ func (c *WorkerClient) Descriptor(ctx context.Context, digest string) (descripto
 	}
 	b, e := c.client.Descriptor(ctx, &pb.DescriptorRequest{Digest: digest})
 	if e != nil {
-		return descriptor.Record{}, e
+		return descriptor.Record{}, controlError(e)
 	}
 	if b == nil || len(b.Json) > descriptor.MaxBytes {
 		return descriptor.Record{}, broker.ErrInvalid

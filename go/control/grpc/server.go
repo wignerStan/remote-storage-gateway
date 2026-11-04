@@ -26,7 +26,7 @@ type workerEntry struct {
 
 func mapped(v any, e error) (*pb.Metadata, error) {
 	if e != nil {
-		return nil, status.Error(codes.FailedPrecondition, "control operation rejected")
+		return nil, wireError(e)
 	}
 	out, e := encode(v)
 	if e != nil {
@@ -51,8 +51,11 @@ func (e *workerEntry) Descriptor(ctx context.Context, in *pb.DescriptorRequest) 
 		return nil, status.Error(codes.InvalidArgument, "invalid descriptor digest")
 	}
 	v, err := e.control.Descriptor(ctx, in.Digest)
-	if err != nil || v.Digest != in.Digest || len(v.Bytes) > descriptor.MaxBytes {
-		return nil, status.Error(codes.NotFound, "descriptor unavailable")
+	if err != nil {
+		return nil, wireError(err)
+	}
+	if v.Digest != in.Digest || len(v.Bytes) > descriptor.MaxBytes {
+		return nil, status.Error(codes.Internal, "invalid control result")
 	}
 	return &pb.Metadata{Json: v.Bytes}, nil
 }
@@ -82,7 +85,7 @@ func (e *decisionEntry) Decide(ctx context.Context, in *pb.Metadata) (*pb.Metada
 	intent.Principal = principal(ctx)
 	v, err := e.broker.Decide(ctx, intent)
 	if err != nil {
-		return nil, status.Error(codes.PermissionDenied, "decision denied")
+		return nil, wireError(err)
 	}
 	return mapped(v, nil)
 }

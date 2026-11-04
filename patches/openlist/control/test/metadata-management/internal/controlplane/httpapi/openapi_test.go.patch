@@ -1,16 +1,15 @@
 diff --git a/internal/controlplane/httpapi/openapi_test.go b/internal/controlplane/httpapi/openapi_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..014cca03121a1ca1e0adccd5962ad8a26ea21c8c
+index 0000000000000000000000000000000000000000..9d7ef2c2e571d4e7dc2d0f540c887158d1e9d644
 --- /dev/null
 +++ b/internal/controlplane/httpapi/openapi_test.go
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,113 @@
 +package httpapi_test
 +
 +import (
 +	"bytes"
 +	"encoding/json"
 +	"github.com/OpenListTeam/OpenList/v4/internal/controlplane/httpapi"
-+	"github.com/gin-gonic/gin"
 +	schemaapi "github.com/wignerStan/infra/go/network/http/openapi"
 +	openapigin "github.com/wignerStan/infra/go/network/http/openapi/gin"
 +	"io"
@@ -27,8 +26,7 @@ index 0000000000000000000000000000000000000000..014cca03121a1ca1e0adccd5962ad8a2
 +	if e != nil {
 +		t.Fatal(e)
 +	}
-+	engine := gin.New()
-+	fixtureAPI(engine, registry)
++	engine := fixtureAPI(registry)
 +	response := request(t, engine, "GET", "/openapi.json", "")
 +	if response.Code != 200 {
 +		t.Fatal("OpenAPI unavailable", response.Code)
@@ -61,8 +59,7 @@ index 0000000000000000000000000000000000000000..014cca03121a1ca1e0adccd5962ad8a2
 +	if response.Code != 200 || !bytes.Equal(bytes.TrimSpace(response.Body.Bytes()), document) {
 +		t.Fatal("served OpenAPI differs from registered typed contract", response.Code)
 +	}
-+	engine2 := gin.New()
-+	fixtureAPI(engine2, registry)
++	engine2 := fixtureAPI(registry)
 +	second := bytes.TrimSpace(request(t, engine2, "GET", "/openapi.json", "").Body.Bytes())
 +	if !bytes.Equal(document, second) {
 +		t.Fatal("identical typed registration generated nondeterministic OpenAPI")
@@ -102,13 +99,13 @@ index 0000000000000000000000000000000000000000..014cca03121a1ca1e0adccd5962ad8a2
 +}
 +
 +func TestNamedManagementEntryUnavailablePreservesSanitizedEnvelope(t *testing.T) {
-+	engine := gin.New()
 +	entry := httpapi.NewEntry(nil, io.EOF)
 +	table, err := schemaapi.Compose(httpapi.APIConfig(), entry.RegisterRoutes)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if err = openapigin.Mount(engine, engine.Group("/api/admin/control"), table, openapigin.Options{OpenAPIPath: "/openapi", SchemasPath: "/schemas", Errors: httpapi.ErrorPolicy()}); err != nil {
++	engine, err := openapigin.New(table, openapigin.Options{Prefix: "/api/admin/control", OpenAPIPath: "/openapi", SchemasPath: "/schemas", Errors: httpapi.ErrorPolicy()})
++	if err != nil {
 +		t.Fatal(err)
 +	}
 +

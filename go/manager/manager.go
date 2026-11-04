@@ -96,6 +96,10 @@ func New(c Config) (*Manager, error) {
 		cancel()
 		return nil, broker.ErrInvalid
 	}
+	if err := validateAssignments(c); err != nil {
+		cancel()
+		return nil, err
+	}
 	m.config = c
 	admitted := false
 	defer func() {
@@ -114,7 +118,7 @@ func New(c Config) (*Manager, error) {
 			if path == "" {
 				continue
 			}
-			if paths[path] || !filepath.IsAbs(path) || len(path) > 107 || c.RuntimeDirectory != "" && filepath.Dir(path) != c.RuntimeDirectory {
+			if paths[path] || !filepath.IsAbs(path) || filepath.Clean(path) != path || len(path) > 107 || c.RuntimeDirectory != "" && filepath.Dir(path) != c.RuntimeDirectory {
 				return nil, broker.ErrInvalid
 			}
 			paths[path] = true
@@ -138,7 +142,7 @@ func New(c Config) (*Manager, error) {
 	}
 	for _, s := range c.Materializers {
 		id := s.Config.InstanceID
-		if id == "" || m.boxes[id] != nil || m.materializers[id] != nil || !filepath.IsAbs(s.Executable) || !filepath.IsAbs(s.Config.ControlSocket) || len(s.Config.ControlSocket) > 107 || paths[s.Config.ControlSocket] || c.RuntimeDirectory != "" && filepath.Dir(s.Config.ControlSocket) != c.RuntimeDirectory {
+		if id == "" || m.boxes[id] != nil || m.materializers[id] != nil || !filepath.IsAbs(s.Executable) || !filepath.IsAbs(s.Config.ControlSocket) || filepath.Clean(s.Config.ControlSocket) != s.Config.ControlSocket || len(s.Config.ControlSocket) > 107 || paths[s.Config.ControlSocket] || c.RuntimeDirectory != "" && filepath.Dir(s.Config.ControlSocket) != c.RuntimeDirectory {
 			return nil, broker.ErrInvalid
 		}
 		paths[s.Config.ControlSocket] = true
@@ -169,7 +173,7 @@ func New(c Config) (*Manager, error) {
 							return nil, broker.ErrInvalid
 						}
 						if mount.Client == s.ActivateClient.Name {
-							if !mount.ReadOnly || mount.RemoteClient == "" || mount.RemoteClient == mount.Client {
+							if mount.Name != s.Config.Remote.Namespace || !mount.ReadOnly || mount.RemoteClient == "" || mount.RemoteClient == mount.Client {
 								return nil, broker.ErrInvalid
 							}
 							assigned = true

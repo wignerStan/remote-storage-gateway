@@ -5,20 +5,37 @@ package runtime
 import (
 	"context"
 	"errors"
-	"net"
-	"os"
 	"path/filepath"
 
 	transport "github.com/wignerStan/network-data-plane-worker/go/clienttransport/ttrpc"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/encoded"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/storageipc"
 	"github.com/wignerStan/remote-storage-gateway/go/contracts/control/broker"
+	workerconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/worker"
 	control "github.com/wignerStan/remote-storage-gateway/go/control/ttrpc"
 )
 
 type storageBridge struct {
-	server *transport.Server
-	broker decisionClient
+	server          *transport.Server
+	broker          decisionClient
+	metadata, offer *control.PrivateUnixListener
+}
+
+// Only an explicit raw assignment is exposed to materializers. Ordinary public
+// mounts remain usable without gaining a storage IPC namespace or selecting
+// their potentially cached public client as a fallback.
+func storageNamespaces(mounts []workerconfig.Mount) (map[string]string, error) {
+	names := map[string]string{}
+	for _, mount := range mounts {
+		if mount.RemoteClient == "" {
+			continue
+		}
+		if mount.Name == "" || names[mount.Name] != "" {
+			return nil, broker.ErrInvalid
+		}
+		names[mount.Name] = mount.RemoteClient
+	}
+	return names, nil
 }
 
 // prepareStorageIPC admits only operator-assigned raw mount clients. The control
@@ -41,12 +58,9 @@ func (r *Runtime) prepareStorageIPC(ctx context.Context) (_ *storageBridge, err 
 			return nil, e
 		}
 	}
-	names := map[string]string{}
-	for _, mount := range r.config.Mounts {
-		if mount.Name == "" || mount.RemoteClient == "" || names[mount.Name] != "" {
-			return nil, broker.ErrInvalid
-		}
-		names[mount.Name] = mount.RemoteClient
+	names, err := storageNamespaces(r.config.Mounts)
+	if err != nil {
+		return nil, err
 	}
 	bridge := &storageBridge{}
 	defer func() {
@@ -72,28 +86,15 @@ func (r *Runtime) prepareStorageIPC(ctx context.Context) (_ *storageBridge, err 
 	if err != nil {
 		return nil, err
 	}
-	meta, err := net.ListenUnix("unix", &net.UnixAddr{Name: p, Net: "unix"})
+	bridge.metadata, err = control.ListenPrivateUnix("unix", p)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if err != nil {
-			meta.Close()
-		}
-	}()
-	offer, err := net.ListenUnix("unixpacket", &net.UnixAddr{Name: q, Net: "unixpacket"})
+	bridge.offer, err = control.ListenPrivateUnix("unixpacket", q)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if err != nil {
-			offer.Close()
-		}
-	}()
-	if os.Chmod(p, 0600) != nil || os.Chmod(q, 0600) != nil {
-		return nil, broker.ErrUnavailable
-	}
-	if err = bridge.server.Start(meta, offer); err != nil {
+	if err = bridge.server.Start(bridge.metadata.UnixListener, bridge.offer.UnixListener); err != nil {
 		return nil, err
 	}
 	return bridge, nil
@@ -105,6 +106,13 @@ func (b *storageBridge) close(ctx context.Context) error {
 	var errs []error
 	if b.server != nil {
 		errs = append(errs, b.server.Close(ctx))
+	}
+	// Worker retains the native listener API. Its shutdown closes the transport;
+	// these owners then retire only the inodes created by this bridge.
+	for _, listener := range []*control.PrivateUnixListener{b.metadata, b.offer} {
+		if listener != nil {
+			errs = append(errs, listener.Close())
+		}
 	}
 	if b.broker != nil {
 		errs = append(errs, b.broker.Close(context.Background()))

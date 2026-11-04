@@ -32,7 +32,8 @@ import (
 	"testing"
 	"time"
 
-	carrier "github.com/wignerStan/infra/go/network/rpc/ttrpc"
+	rpcttrpc "github.com/wignerStan/infra/go/network/rpc/client/ttrpc"
+	actionsv1 "github.com/wignerStan/infra/go/network/rpc/protocols/actions"
 	processexec "github.com/wignerStan/infra/go/process/exec"
 	supervision "github.com/wignerStan/infra/go/process/supervisor"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
@@ -317,12 +318,12 @@ func TestManagedWorkerAndIndependentMaterializer(t *testing.T) {
 	if e != nil || grant.ApprovedUpstreamID != "buildbarn" {
 		t.Fatal("actual CP broker grant", e)
 	}
-	wire, e := carrier.Dial(ctx, brokerSocket, carrier.Protocol{Service: broker.DecisionRPCService}, carrier.Limits{MaxPayload: 1 << 20, MaxInflight: 16, Timeout: time.Second})
+	wire, e := rpcttrpc.Dial(ctx, brokerSocket, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
-	defer wire.Close(context.Background())
-	if _, e = wire.Call(ctx, "broker.decide", []byte(`{"method":"/build.Execution/Execute","authority":"worker.invalid","payload":"object-bytes"}`)); e == nil {
+	defer wire.Close()
+	if e = wire.Call(ctx, "infra.actions.v1.Actions", "Call", &actionsv1.CallRequest{Binding: broker.DecisionRPCService + "/broker.decide", Input: []byte(`{"method":"/build.Execution/Execute","authority":"worker.invalid","payload":"object-bytes"}`)}, new(actionsv1.CallReply)); e == nil {
 		t.Fatal("CP accepted file payload field")
 	}
 	if originReads.Load() != beforeDecision {

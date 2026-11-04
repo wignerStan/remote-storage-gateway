@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	buildinputs "github.com/wignerStan/infra/go/code/buildsource"
+	buildinputs "github.com/wignerStan/infra/go/code/build/source"
 )
 
 func TestRemoteManifestHasItsOwnBoundedReader(t *testing.T) {
@@ -165,5 +166,60 @@ func TestRemoteUIArchiveAdmission(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNativeReleaseRejectsStaleLinkManifestAndIncompleteArtifacts(t *testing.T) {
+	config := map[string]string{"gateway_digest": "source-ui-sdk-cc", "product_commit": "commit", "ui_dist_digest": "ui", "native_sdk_receipt_sha256": "sdk-one"}
+	modules := map[string]string{"gateway": "github.com/OpenListTeam/OpenList/v4", "openlist-control-plane": "github.com/OpenListTeam/OpenList/v4", "client-openlist.so": "github.com/OpenListTeam/OpenList/v4", "storage-worker": "github.com/wignerStan/remote-storage-gateway/go", "client-rclone.so": "github.com/wignerStan/remote-storage-gateway/go", "transfer-reapi.so": "github.com/wignerStan/remote-storage-gateway/go", "gateway-admin": "github.com/wignerStan/remote-storage-gateway/go"}
+	release := nativeReleaseReceipt{Schema: "storage-gateway/native-release/v1", InputManifestSHA256: "manifest-one", Config: config, Execution: "local-go", Artifacts: map[string]nativeArtifactReceipt{}}
+	for name, module := range modules {
+		release.Artifacts[name] = nativeArtifactReceipt{Schema: "storage-gateway/native-build/v1", InputManifestSHA256: "manifest-one", Artifact: name, SHA256: strings.Repeat("a", 64), ProductCommit: "commit", BuildDigest: config["gateway_digest"], UIDistDigest: "ui", GoVersion: "1.27.3", Module: module, Execution: "local-go", Command: []string{"go", "build"}}
+	}
+	if err := validateNativeRelease(release, config, "manifest-one", false); err != nil {
+		t.Fatal(err)
+	}
+	changed := map[string]string{}
+	for k, v := range config {
+		changed[k] = v
+	}
+	changed["native_sdk_receipt_sha256"] = "sdk-two"
+	if validateNativeRelease(release, changed, "manifest-one", false) == nil {
+		t.Fatal("release admitted after SDK changed")
+	}
+	if validateNativeRelease(release, config, "manifest-two", false) == nil {
+		t.Fatal("release admitted with different source closure")
+	}
+	delete(release.Artifacts, "transfer-reapi.so")
+	if validateNativeRelease(release, config, "manifest-one", false) == nil {
+		t.Fatal("incomplete native release admitted")
+	}
+}
+func TestImageCompositionRejectsChangedArtifact(t *testing.T) {
+	b := &builder{output: t.TempDir()}
+	b.ca = filepath.Join(b.output, "ca")
+	if err := os.MkdirAll(filepath.Join(b.output, "bin"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(b.output, "bin/storage-worker"), []byte("replaced binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.copyImageCompositions(filepath.Join(b.output, "composition"), map[string]string{"storage-worker": strings.Repeat("a", 64)}); err == nil {
+		t.Fatal("changed artifact copied into image inputs")
+	}
+}
+func TestSDKFlagsRejectExternalLinkInputs(t *testing.T) {
+	prefix := t.TempDir()
+	for _, name := range []string{"include", "lib"} {
+		if err := os.MkdirAll(filepath.Join(prefix, name), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	flags := "-L" + filepath.Join(prefix, "lib") + " -linfra_shm_snapshot"
+	if err := validateSDKFlags(prefix, "-I"+filepath.Join(prefix, "include"), flags); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSDKFlags(prefix, "-I"+filepath.Join(prefix, "include"), flags+" /external/libforeign.a"); err == nil {
+		t.Fatal("unverified archive admitted")
 	}
 }
