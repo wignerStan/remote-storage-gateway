@@ -1,6 +1,6 @@
 {
-  "schema_version": "git-branch-policy/v3",
-  "types": [
+  "schema_version": "git-branch-policy/v2",
+  "reserved_type_prefixes": [
     "build",
     "chore",
     "ci",
@@ -32,7 +32,5 @@
     "testing",
     "develop",
     "main"
-  ],
-  "repository_owner": "repo",
-  "owners": {}
+  ]
 }
