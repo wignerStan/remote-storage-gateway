@@ -1,0 +1,12 @@
+diff --git a/server/handles/archive.go b/server/handles/archive.go
+index 364e93edc548a534008a5810673502b95f8b694f..b36a3db1f96145ef67f45c8698e54f63bf3b4bf2 100644
+--- a/server/handles/archive.go
++++ b/server/handles/archive.go
+@@ -45,6 +45,7 @@ type ArchiveContentResp struct {
+ 
+ func toObjsRespWithoutSignAndThumb(obj model.Obj) ObjResp {
+ 	return ObjResp{
++		ID:          obj.GetID(),
+ 		Name:        obj.GetName(),
+ 		Size:        obj.GetSize(),
+ 		IsDir:       obj.IsDir(),

@@ -8,8 +8,6 @@ import (
 	"io"
 	"net"
 	"net/url"
-	"os"
-	"path/filepath"
 
 	"github.com/wignerStan/infra/go/network/proxy/l7"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
@@ -17,6 +15,7 @@ import (
 	dp "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"github.com/wignerStan/remote-storage-gateway/go/contracts/control/broker"
 	workerconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/worker"
+	controlgrpc "github.com/wignerStan/remote-storage-gateway/go/control/grpc"
 	control "github.com/wignerStan/remote-storage-gateway/go/control/ttrpc"
 )
 
@@ -44,6 +43,9 @@ func New(ctx context.Context, c workerconfig.ProcessConfig) (*Runtime, error) {
 			return nil, broker.ErrInvalid
 		}
 	}
+	if c.BrokerSocket != "" && c.RemoteBroker != nil {
+		return nil, broker.ErrInvalid
+	}
 	r, e := assemble(ctx, c.RuntimeConfig)
 	if e != nil {
 		return nil, e
@@ -70,20 +72,12 @@ func (r *Runtime) Start(ctx context.Context) error {
 	var listener net.Listener
 	var entry *control.Server
 	if r.process.ControlSocket != "" {
-		p := r.process.ControlSocket
-		parent, e := os.Stat(filepath.Dir(p))
-		if e != nil || !filepath.IsAbs(p) || len(p) > 107 || r.process.InstanceID == "" || !parent.IsDir() || parent.Mode().Perm()&0077 != 0 {
+		if r.process.InstanceID == "" {
 			return broker.ErrInvalid
 		}
-		if _, e = os.Lstat(p); !os.IsNotExist(e) {
-			return broker.ErrInvalid
-		}
-		listener, e = net.Listen("unix", p)
+		var e error
+		listener, e = control.ListenPrivateUnix("unix", r.process.ControlSocket)
 		if e != nil {
-			return e
-		}
-		if e = os.Chmod(p, 0600); e != nil {
-			listener.Close()
 			return e
 		}
 		entry, e = control.NewWorkerServer(r)
@@ -138,20 +132,40 @@ func (r *Runtime) Start(ctx context.Context) error {
 		}
 		r.process.DataEndpoint = scheme + data.Addr().String()
 	}
+	if r.process.RPC != nil {
+		remote, err := controlgrpc.StartServer(ctx, *r.process.RPC, r, nil, nil)
+		if err != nil {
+			_ = server.Shutdown(context.Background())
+			if listener != nil {
+				listener.Close()
+			}
+			return err
+		}
+		r.remoteServer = remote
+	}
 	if entry != nil {
 		go func() { _ = entry.Serve(listener) }()
 	}
 	go func() {
-		if storage == nil {
-			<-server.Done()
-		} else {
-			select {
-			case <-server.Done():
-			case <-storage.server.Done():
-			}
+		var storageDone, remoteDone, controlDone <-chan struct{}
+		if storage != nil {
+			storageDone = storage.server.Done()
+		}
+		if r.remoteServer != nil {
+			remoteDone = r.remoteServer.Done()
+		}
+		if entry != nil {
+			controlDone = entry.Done()
+		}
+		select {
+		case <-server.Done():
+		case <-storageDone:
+		case <-remoteDone:
+		case <-controlDone:
 		}
 		close(r.stopped)
 	}()
+
 	return nil
 }
 func (r *Runtime) Done() <-chan struct{} { return r.stopped }
@@ -162,11 +176,14 @@ func (r *Runtime) Close(ctx context.Context) error {
 	r.closeOnce.Do(func() {
 		r.lifeMu.Lock()
 		r.retiring = true
-		server, storage, entry := r.httpServer, r.storageIPC, r.controlServer
+		server, storage, entry, remote := r.httpServer, r.storageIPC, r.controlServer, r.remoteServer
 		r.lifeMu.Unlock()
 		go func() {
 			var errs []error
 			errs = append(errs, r.closeEncoded(context.Background()))
+			if remote != nil {
+				errs = append(errs, remote.Close(context.Background()))
+			}
 			if entry != nil {
 				errs = append(errs, entry.Close(context.Background()))
 			}
@@ -218,6 +235,20 @@ func (r *Runtime) Info(context.Context) (broker.InstanceInfo, error) {
 		default:
 		}
 	}
+	if ready && r.remoteServer != nil {
+		select {
+		case <-r.remoteServer.Done():
+			ready = false
+		default:
+		}
+	}
+	if ready && r.controlServer != nil {
+		select {
+		case <-r.controlServer.Done():
+			ready = false
+		default:
+		}
+	}
 	info := broker.InstanceInfo{Contract: broker.Contract, ID: r.process.InstanceID, Ready: ready, DataEndpoint: r.process.DataEndpoint}
 	if ready && r.storageIPC != nil {
 		info.StorageSocket = r.config.StorageIPCSocket
@@ -264,5 +295,9 @@ func (r *Runtime) Replace(ctx context.Context, name string, expected dp.Version,
 	if !allowed || selection.Name != name {
 		return dp.Version{}, broker.ErrInvalid
 	}
-	return r.Manager.Replace(ctx, expected, selection)
+	v, err := r.Manager.Replace(ctx, expected, selection)
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return dp.Version{}, broker.ErrRejected
+	}
+	return v, err
 }

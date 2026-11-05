@@ -1,32 +1,36 @@
 # Remote Storage Gateway
 
-A gateway product assembled from a patched OpenList control plane, independently
-managed worker processes, and an optional independent VFS materializer.
+A gateway product with one executable for manager, patched OpenList control-plane
+and Worker roles, plus an optional independent native rclone VFS materializer.
 
 The generic [Data Plane](https://github.com/wignerStan/network-data-plane-worker)
 remains a separate repository. Gateway imports its Go module; this repository
 does not contain a second copy of its runtime, contracts, or Rust source.
 
+The canonical workspace is `/develop/storage/remote-storage-gateway`;
+`/develop/network/remote-storage-gateway` remains a compatibility symlink.
+
 ## Applications and module boundaries
 
 | Application | Source | Responsibility |
 | --- | --- | --- |
-| Control Plane | `go/controlplane`, patched OpenList | Desired configuration, exact plugin descriptors, process management and transfer decisions |
+| Manager | `go/manager`, patched `cmd/gateway-bundle` | Start and reap sibling CP/Worker processes through Infra supervision |
+| Control Plane | `go/controlplane`, patched OpenList | Desired configuration, exact plugin descriptors and transfer decisions |
 | Worker | `go/worker`, `go/worker/runtime`, `go/cmd/storage-worker` | Public TLS/reverse proxy, data ingress/egress and dynamic plugin execution |
 | VFS | Independent [`rclone`](https://github.com/wignerStan/rclone) module and patched native CLI | Optional local materialization through its ttrpc/shared-memory backend |
 
-When a Gateway process file is configured, OpenList runs in managed mode: legacy
+When `OPENLIST_GATEWAY_CONTROL_FILE` is configured, OpenList runs in managed mode: legacy
 provider initialization, queued payload tasks, media/index execution and auxiliary
 data listeners remain disabled. Existing identity, SQLite records and task history
 are preserved. Typed control APIs and DB-only administration stay available; the
 legacy SDKs remain linked, so this is execution isolation rather than dependency
 elimination.
 
-The importable Worker Box accepts typed configuration and starts a separate
-`storage-worker` executable. The Control Plane composes Infra's process
-supervisor rather than embedding payload runtimes. Metadata-only ttrpc ports
-provide readiness, descriptors, observed generations, replacement and transfer
-decisions. They have no file-body operation.
+The bundle manager uses Infra's dependency-ordered process group. It self-execs
+the same gateway ELF with `control-plane` and `worker` role arguments; child
+configuration arrives on stdin. The CP never starts a Worker or VFS process.
+Metadata-only ttrpc is local; authenticated gRPC is the cross-Pod control port.
+Both expose finite management/decision operations with no file-body operation.
 
 The Worker terminates public TLS and reverse proxies the OpenList management UI
 and API. It does not need another nginx process. Schema contributions belong to
@@ -54,7 +58,7 @@ about kernel or TLS copies.
 ## Independent rclone materialization
 
 VFS is a separate rclone-derived product and Go module. This repository contains
-no VFS implementation, filesystem wrapper or VFS executable. The Control Plane
+no VFS implementation, filesystem wrapper or VFS executable. The top-level manager
 imports the external module's Box to manage its native CLI process.
 
 ```text
@@ -78,7 +82,7 @@ enters the Worker. This is not a claim that both local directions use shared
 memory or that legacy native client chunks avoid copying.
 
 Cached mounts are read-only, with distinct cached `client` and raw
-`remote_client` assignments. CP starts Worker first, pins its observed IPC
+`remote_client` assignments. Manager starts CP, then Worker, pins its observed IPC
 incarnation, starts rclone, then optionally activates the exact client selection
 using generation compare-and-swap. Rclone retires before Worker. Native leases
 remain held until actual borrowers finish or exact process-exit recovery permits
@@ -86,10 +90,13 @@ reclamation; cancellation and disconnect do not imply release.
 
 ## Source and build
 
-OpenList and its UI are pristine upstream submodules with ordered, hash-checked
-patches under `.git-source-relationships`. The builder derives external source
-under `/tmp/trade-*` or `/var/tmp/trade-*`; it does not modify upstream checkouts.
-The UI is built from the admitted frontend and embedded into the CP binary.
+OpenList and its UI are upstream products recorded by closed Git v5
+`upstream_product_build` contracts. Their ignored `build/openlist` and
+`build/openlist-ui` directories contain disposable derivations. The OpenList
+package has one ordered, hash-checked patch per target, grouped by semantic
+family under `patches/openlist`; it has no patch-over-patch stack. Acquisition
+receipts bind immutable upstream commits and the final tree. The UI is built
+from the admitted frontend and embedded into the executable.
 
 The rclone SDK is an Infra Go package dependency, currently `v1.75.2`. Infra owns its
 patch inventory. The builder verifies module checksums, derives the patches in
@@ -99,38 +106,48 @@ Git submodule or commit pin.
 Use the selected, reviewed Infra and Data Plane sources explicitly:
 
 ```sh
-make all MISE=mise INFRA_ROOT=/path/to/reviewed/infra \
-  DATA_PLANE_ROOT=/develop/network/data-plane-worker \
-  RCLONE_ROOT=/develop/network/rclone \
-  BUILD_DIR=/tmp/trade-remote-gateway-build
-make test INFRA_ROOT=/path/to/reviewed/infra \
-  DATA_PLANE_ROOT=/develop/network/data-plane-worker
+make all GO=/opt/go1.27.3/bin/go NODE=/opt/node24.11.0/bin/node \
+  PNPM=/opt/pnpm11.28.9/bin/pnpm JOBS=2 \
+  NATIVE_SDK_ROOT=/build/native-sdk PKG_CONFIG=/usr/bin/pkg-config \
+  INFRA_ROOT=/path/to/reviewed/infra \
+  DATA_PLANE_ROOT=/path/to/reviewed/network-data-plane-worker \
+  RCLONE_ROOT=/path/to/reviewed/rclone \
+  BUILDBARN_ROOT=/path/to/reviewed/buildbarn-storage \
+  BUILD_DIR=/build/storage-gateway
 ```
 
-Development tools are managed by mise; `build/toolchain.json` declares build
-versions. Bootstrap also requires Git and jq. The generated development workspace
-selects independent local modules; package versions remain in their owners'
-`go.mod` files. Release builds require clean source and record measured source
-and artifact identities.
+The native entry point validates the executable versions pinned by
+`build/toolchain.json`. Mise is optional through `MISE=/path/to/mise`.
+Bootstrap also requires Git, Bash, coreutils and jq; native plugins require a C
+compiler and the canonical shared-memory SDK selected by `NATIVE_SDK_ROOT`;
+the build checks the producer receipt, header/archive hashes and selected
+pkg-config file. See the SDK install command in [build/README.md](build/README.md).
+`BUILD_DIR` may be any absolute directory outside the selected source
+repositories and module cache. `JOBS` defaults to 2 and `GOMEMLIMIT` to 768 MiB per
+Go process. Existing Go and pnpm caches are reused.
 
-`deploy/managed-gateway.yaml` runs the manager and its separate child processes in
-one container, with a separately named Deployment/Service and explicitly selected
-CP PVC. Reusing the legacy database requires retiring its previous writer and
-migrating legacy HTTP/S3 consumers; this profile does not replace their Services.
-It publishes only the Worker
-TLS port; CP and VFS bind loopback. Its readiness probe reaches the manager
-through the Worker and waits for completed activation and live children.
+The build derives exact sources, runs the upstream pnpm UI build with its frozen
+lockfile, embeds that measured UI, and compiles the product ELF, component
+executables and dynamic plugins with local Go. Infra `code/build/source`
+captures and verifies the source/dependency closure before and after native
+compilation. Official Huma and the current `go/patches/rclone` inventory are
+consumed directly. Receipts bind actual source/artifact hashes, SDK/compiler/link inputs and local
+execution. Set `WITH_RCLONE=1` to build and assemble the separate rclone executable
+through its owner's recipe; the default product does not require that optional
+artifact. See [Native product derivation](build/README.md) for stages, outputs
+and validation commands.
 
-Bazel builds Go binaries, native plugins, the embedded UI and OCI images through
-the shared Buildbarn executor and AC/CAS. `rules_img` assembles the Worker and
-CP-manager images; the independent rclone product owns its materializer image.
-The CP image includes separate child binaries and native artifacts. The rclone
-CLI is built once by its owning Bazel module and consumed as an action input.
-`make images` prepares checksummed source/toolchain inputs, then builds that same
-remote dependency graph. Remote Go compilation is offline and uses disposable
-action scratch space. It creates no persistent per-build Go or pnpm cache.
-Use the configured shared Bazel user root; do not override it per output directory.
-No Dockerfile builder daemon is used.
+`deploy/managed-gateway.yaml` runs the top-level manager and its separate child
+processes in one container, with a dedicated Deployment/Service and explicitly
+selected CP PVC. The public port belongs to Worker TLS; CP and VFS bind loopback.
+`deploy/microservices.yaml` separates roles into Kubernetes workloads using gRPC
+with mTLS workload identities. See [deployment.md](docs/deployment.md) for the two
+assemblies, scaling boundaries, identities and readiness.
+
+`make image-inputs` emits verified native artifact and public CA inputs for
+separate OCI assembly. Native Make targets do not invoke Bazel, Buildbarn or
+GitHub Actions. An input composition alone does not establish a built image or
+a production deployment.
 
 Validation receipts under `docs/validation` describe their exact revisions.
 Older receipts and image candidates are historical evidence; they do not imply

@@ -34,16 +34,19 @@ type upstream struct {
 	Commit string `json:"commit"`
 }
 type relationship struct {
-	Schema      string   `json:"schema_version"`
-	Kind        string   `json:"kind"`
-	Path        string   `json:"path"`
-	Owner       string   `json:"owner"`
-	Integration string   `json:"integration"`
-	Upstream    upstream `json:"upstream"`
-	Patches     []patch  `json:"patches"`
-	PublicAPI   string   `json:"public_api"`
-	ResultTree  *string  `json:"result_tree"`
-	Licenses    []string `json:"licenses"`
+	Schema             string   `json:"schema_version"`
+	Kind               string   `json:"kind"`
+	Path               string   `json:"path"`
+	Owner              string   `json:"owner"`
+	Integration        string   `json:"integration"`
+	Upstream           upstream `json:"upstream"`
+	Patches            []patch  `json:"patches,omitempty"`
+	PatchBundle        *string  `json:"patch_bundle,omitempty"`
+	BuildPath          *string  `json:"build_path,omitempty"`
+	DependencyManifest any      `json:"dependency_manifest,omitempty"`
+	PublicAPI          string   `json:"public_api"`
+	ResultTree         *string  `json:"result_tree"`
+	Licenses           []string `json:"licenses"`
 }
 type toolchain struct {
 	Go   string `json:"go"`
@@ -51,7 +54,13 @@ type toolchain struct {
 	PNPM string `json:"pnpm"`
 }
 type builder struct {
+	nativeSDKRoot, pkgConfig                           string
 	root, output, infra, dataPlane, materializer, mise string
+	buildbarn                                          string
+	goBinary, nodeBinary, pnpmBinary                   string
+	jobs                                               int
+	withRclone                                         bool
+	referenceRoot                                      string
 	ca                                                 string
 	release                                            bool
 	tools                                              toolchain
@@ -61,9 +70,10 @@ type builder struct {
 const rcloneModule = "github.com/rclone/rclone"
 
 type modulePatchSeries struct {
-	Schema  string  `json:"schema"`
-	Module  string  `json:"module"`
-	Patches []patch `json:"patches"`
+	Schema       string  `json:"schema"`
+	Module       string  `json:"module"`
+	Patches      []patch `json:"patches"`
+	BazelPatches []patch `json:"bazel_patches,omitempty"`
 }
 type moduleDownload struct {
 	Path, Version, Dir, Sum, GoModSum string
@@ -118,16 +128,19 @@ func (b *builder) rcloneSeries() (modulePatchSeries, error) {
 	} else if !errors.Is(e, fs.ErrNotExist) {
 		return series, e
 	}
-	if e := readJSON(filepath.Join(b.infra, "patches/rclone/series.json"), &series); e != nil {
+	if e := readJSON(filepath.Join(b.infra, "go/patches/rclone/series.json"), &series); e != nil {
 		return series, e
 	}
 	if series.Schema != "go-module-patch-series/v1" || series.Module != rcloneModule || len(series.Patches) == 0 {
 		return series, errors.New("invalid Infra rclone patch inventory")
 	}
 	for i, p := range series.Patches {
-		if p.Order != i+1 || !safeRelative(p.Path) || !strings.HasPrefix(p.Path, "patches/rclone/") || len(p.SHA256) != 64 {
+		if p.Order != i+1 || !safeRelative(p.Path) || strings.Contains(p.Path, "\\") || !strings.HasSuffix(p.Path, ".patch") || len(p.SHA256) != 64 {
 			return series, errors.New("invalid ordered rclone patch")
 		}
+		// Infra paths are relative to the inventory directory. Only the native
+		// semantic series applies here; Bazel annotations never patch Go source.
+		series.Patches[i].Path = filepath.Join("go/patches/rclone", p.Path)
 	}
 	return series, nil
 }
@@ -163,7 +176,7 @@ func (b *builder) fetchModule(version string) (moduleDownload, error) {
 	}
 	// Explicit module@version works outside a main module. Downloads cannot
 	// update the selected Infra or product go.mod/go.sum files.
-	raw, e := b.command(b.output, b.mise, "exec", "go@"+b.tools.Go, "--", "go", "mod", "download", "-json", rcloneModule+"@"+version)
+	raw, e := b.goCommand(b.output, nil, "mod", "download", "-json", rcloneModule+"@"+version)
 	if e != nil {
 		return moduleDownload{}, e
 	}
@@ -209,7 +222,7 @@ func (b *builder) verifyModuleSnapshot(version string, series modulePatchSeries)
 	if e != nil {
 		return receipt, e
 	}
-	inventory, e := hashFile(filepath.Join(b.infra, "patches/rclone/series.json"))
+	inventory, e := hashFile(filepath.Join(b.infra, "go/patches/rclone/series.json"))
 	if e != nil {
 		return receipt, e
 	}
@@ -288,7 +301,7 @@ func (b *builder) materializeRcloneModule() error {
 		if e != nil {
 			return e
 		}
-		inventory, e := hashFile(filepath.Join(b.infra, "patches/rclone/series.json"))
+		inventory, e := hashFile(filepath.Join(b.infra, "go/patches/rclone/series.json"))
 		if e != nil {
 			return e
 		}
@@ -311,12 +324,21 @@ func (b *builder) materializeRcloneModule() error {
 
 func main() {
 	b := builder{}
+	flag.StringVar(&b.referenceRoot, "source-references", "", "optional existing upstream Git object references; no source copies")
 	flag.StringVar(&b.root, "root", "..", "canonical monorepo root")
-	flag.StringVar(&b.output, "out", "/tmp/trade-remote-gateway-build", "external build directory")
+	flag.StringVar(&b.output, "out", filepath.Join(os.TempDir(), "storage-gateway-native-build"), "external build directory")
 	flag.StringVar(&b.infra, "infra-root", "/develop/infra", "explicit Infra source checkout (reviewed and clean for release)")
 	flag.StringVar(&b.dataPlane, "data-plane-root", "/develop/network/data-plane-worker", "explicit independently owned Data Plane module checkout")
 	flag.StringVar(&b.materializer, "rclone-root", "/develop/network/rclone", "independently derived rclone application and process module")
-	flag.StringVar(&b.mise, "mise", "mise", "mise executable")
+	flag.StringVar(&b.buildbarn, "buildbarn-root", "", "explicit BuildBarn source materializer module checkout")
+	flag.StringVar(&b.mise, "mise", "", "optional Mise executable for pinned toolchains")
+	flag.StringVar(&b.goBinary, "go", "go", "native Go executable")
+	flag.StringVar(&b.nativeSDKRoot, "native-sdk-root", "", "optional verified canonical shared-memory SDK prefix; defaults to pkg-config discovery")
+	flag.StringVar(&b.pkgConfig, "pkg-config", os.Getenv("PKG_CONFIG"), "pkg-config executable (default pkg-config)")
+	flag.StringVar(&b.nodeBinary, "node", "node", "native Node executable")
+	flag.StringVar(&b.pnpmBinary, "pnpm", "pnpm", "native pnpm executable")
+	flag.IntVar(&b.jobs, "jobs", 2, "maximum compiler parallelism")
+	flag.BoolVar(&b.withRclone, "with-rclone", false, "also compile the independent rclone executable")
 	flag.StringVar(&b.ca, "ca-bundle", "/etc/ssl/certs/ca-certificates.crt", "public runtime CA bundle")
 	flag.BoolVar(&b.release, "release", false, "require clean exact product and Infra source commits")
 	flag.Parse()
@@ -398,6 +420,12 @@ func buildEnvironment(overrides map[string]string) processexec.EnvPolicy {
 	for key, value := range overrides {
 		values[key] = value
 	}
+	// Search paths outside the captured native recipe must be absent, even
+	// when supplied as overrides. Empty GCC_EXEC_PREFIX changes cc1 lookup;
+	// an empty search-path component can also admit the working directory.
+	for _, key := range []string{"CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX"} {
+		delete(values, key)
+	}
 	return processexec.EnvClean(values)
 }
 
@@ -423,59 +451,94 @@ func (b *builder) git(dir string, args ...string) (string, error) {
 	return b.command(dir, "git", args...)
 }
 func (b *builder) verify(r relationship) error {
-	if r.Schema != "git-source-relationship/v1" || r.Integration != "submodule" || !safeRelative(r.Path) || !strings.HasPrefix(r.Path, "third_party/") {
-		return errors.New("invalid source relationship")
+	if r.Schema != "git-source-relationship/v5" || r.Kind != "upstream_product_build" || r.Integration != "build" || !safeRelative(r.Path) || !strings.HasPrefix(r.Path, "build/") || r.BuildPath == nil || *r.BuildPath != r.Path || r.ResultTree == nil || len(r.Upstream.Commit) != 40 || r.Upstream.URL == "" {
+		return errors.New("invalid upstream product relationship")
 	}
-	owner := b.root
-	source := filepath.Join(owner, r.Path)
-	entry, e := b.git(owner, "ls-files", "--stage", "--", r.Path)
-	if e != nil {
-		return e
+	if raw, err := hex.DecodeString(r.Upstream.Commit); err != nil || len(raw) != 20 || strings.ToLower(r.Upstream.Commit) != r.Upstream.Commit {
+		return errors.New("invalid immutable upstream commit")
 	}
-	fields := strings.Fields(entry)
-	if len(fields) != 4 || fields[0] != "160000" || fields[1] != r.Upstream.Commit || fields[2] != "0" || fields[3] != r.Path {
-		return fmt.Errorf("%s parent gitlink differs from admitted upstream", r.Path)
+	if _, err := b.git(b.root, "check-ignore", "--no-index", "--", r.Path+"/"); err != nil {
+		return errors.New("upstream product materialization must be ignored")
 	}
-	head, e := b.git(source, "rev-parse", "HEAD")
-	if e != nil {
-		return e
+	tracked, err := b.git(b.root, "ls-files", "--", r.Path)
+	if err != nil || tracked != "" {
+		return errors.New("upstream product must not be parent tracked")
 	}
-	if head != r.Upstream.Commit {
-		return fmt.Errorf("%s upstream commit mismatch", r.Path)
-	}
-	remote, e := b.git(source, "remote", "get-url", "origin")
-	if e != nil {
-		return e
-	}
-	if remote != r.Upstream.URL {
-		return fmt.Errorf("%s upstream URL mismatch", r.Path)
-	}
-	status, e := b.git(source, "status", "--porcelain", "--untracked-files=all")
-	if e != nil {
-		return e
-	}
-	if status != "" {
-		return fmt.Errorf("%s must remain pristine", r.Path)
-	}
-	for i, p := range r.Patches {
-		if p.Order != i+1 || !safeRelative(p.Path) || !strings.HasPrefix(p.Path, "patches/") {
-			return errors.New("invalid ordered patch path")
+	if r.PatchBundle == nil {
+		if len(r.Patches) != 0 {
+			return errors.New("patch list without package authority")
 		}
-		actual, e := hashFile(filepath.Join(owner, p.Path))
+		return nil
+	}
+	if *r.PatchBundle != "patches/"+filepath.Base(r.Path) {
+		return errors.New("wrong patch package")
+	}
+	resolved, err := b.packagePatches(*r.PatchBundle)
+	if err != nil {
+		return err
+	}
+	a, _ := json.Marshal(resolved)
+	c, _ := json.Marshal(r.Patches)
+	if string(a) != string(c) {
+		return errors.New("patch list differs from package order authority")
+	}
+	return nil
+}
+func (b *builder) packagePatches(bundle string) ([]patch, error) {
+	data, err := os.ReadFile(filepath.Join(b.root, bundle, "apply_order.txt"))
+	if err != nil || len(data) > 1<<20 {
+		return nil, errors.New("invalid patch package order")
+	}
+	var result []patch
+	seen := map[string]bool{}
+	targets := map[string]bool{}
+	for _, row := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Fields(row)
+		if len(fields) != 3 || fields[0] != fmt.Sprint(len(result)+1) || !safeRelative(fields[1]) || !strings.HasSuffix(fields[1], ".patch") || seen[fields[1]] {
+			return nil, errors.New("invalid semantic patch order")
+		}
+		seen[fields[1]] = true
+		path := filepath.Join(bundle, fields[1])
+		payload, err := os.ReadFile(filepath.Join(b.root, path))
+		if err != nil || len(payload) > 8<<20 {
+			return nil, errors.New("invalid semantic patch bytes")
+		}
+		hash, err := hashFile(filepath.Join(b.root, path))
+		if err != nil || hash != fields[2] {
+			return nil, errors.New("semantic patch hash mismatch")
+		}
+		if strings.Count(string(payload), "diff --git ") != 1 {
+			return nil, errors.New("semantic patch must own one target")
+		}
+		header := strings.Fields(strings.SplitN(string(payload), "\n", 2)[0])
+		if len(header) != 4 || !strings.HasPrefix(header[2], "a/") || header[3] != "b/"+strings.TrimPrefix(header[2], "a/") {
+			return nil, errors.New("rename/copy patch rejected")
+		}
+		target := strings.TrimPrefix(header[2], "a/")
+		if !safeRelative(target) || targets[target] || !strings.HasSuffix(fields[1], "/"+target+".patch") {
+			return nil, errors.New("duplicate or misplaced semantic patch target")
+		}
+		targets[target] = true
+		result = append(result, patch{Order: len(result) + 1, Path: path, SHA256: hash})
+	}
+	if len(result) == 0 {
+		return nil, errors.New("empty patch package")
+	}
+	if err = filepath.WalkDir(filepath.Join(b.root, bundle), func(path string, d fs.DirEntry, e error) error {
 		if e != nil {
 			return e
 		}
-		if actual != p.SHA256 {
-			return fmt.Errorf("patch hash mismatch: %s", p.Path)
+		if !d.IsDir() && strings.HasSuffix(path, ".patch") {
+			rel, e := filepath.Rel(filepath.Join(b.root, bundle), path)
+			if e != nil || !seen[rel] {
+				return errors.New("unlisted semantic patch")
+			}
 		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
-	if r.Kind == "patched_third_party" && (len(r.Patches) == 0 || r.ResultTree == nil) {
-		return errors.New("patched source needs patch stack and result tree")
-	}
-	if r.Kind == "upstream_submodule" && (len(r.Patches) != 0 || r.ResultTree != nil) {
-		return errors.New("pristine source cannot declare patches")
-	}
-	return nil
+	return result, nil
 }
 func (b *builder) materialize(r relationship, destination string) error {
 	if e := b.verify(r); e != nil {
@@ -489,21 +552,34 @@ func (b *builder) materialize(r relationship, destination string) error {
 	if e := os.MkdirAll(filepath.Dir(destination), 0755); e != nil {
 		return e
 	}
-	source := filepath.Join(b.root, r.Path)
-	shallow, e := b.git(source, "rev-parse", "--is-shallow-repository")
-	if e != nil {
-		return e
+	source := r.Upstream.URL
+	reference := ""
+	if b.referenceRoot != "" {
+		candidate := filepath.Join(b.referenceRoot, filepath.Base(r.Path))
+		if _, err := b.git(candidate, "cat-file", "-e", r.Upstream.Commit+"^{commit}"); err == nil {
+			source = candidate
+			reference = candidate
+		}
 	}
-	cloneArgs := []string{"clone", "--reference", source, "--dissociate", "--no-checkout", source, destination}
-	cloneMode := "reference-dissociated"
-	if shallow == "true" {
-		// Git forbids shallow repositories as reference alternates. A local
-		// clone preserves their declared shallow boundary without unshallowing.
-		cloneArgs = []string{"clone", "--no-checkout", source, destination}
-		cloneMode = "local-shallow"
+	cloneArgs := []string{"clone", "--no-checkout", source, destination}
+	cloneMode := "upstream"
+	if reference != "" {
+		shallow, err := b.git(reference, "rev-parse", "--is-shallow-repository")
+		if err != nil {
+			return err
+		}
+		if shallow == "true" {
+			cloneMode = "local-shallow"
+		} else {
+			cloneArgs = []string{"clone", "--reference", reference, "--dissociate", "--no-hardlinks", "--no-checkout", source, destination}
+			cloneMode = "reference-dissociated"
+		}
 	}
-	if _, e := b.git(b.root, cloneArgs...); e != nil {
-		return e
+	if _, err := b.git(b.root, cloneArgs...); err != nil {
+		return err
+	}
+	if _, err := b.git(destination, "remote", "set-url", "origin", r.Upstream.URL); err != nil {
+		return err
 	}
 	if _, e := b.git(destination, "checkout", "--detach", r.Upstream.Commit); e != nil {
 		return e
@@ -518,13 +594,6 @@ func (b *builder) materialize(r relationship, destination string) error {
 		return e
 	}
 	want := r.ResultTree
-	if want == nil {
-		t, e := b.git(source, "rev-parse", "HEAD^{tree}")
-		if e != nil {
-			return e
-		}
-		want = &t
-	}
 	if tree != *want {
 		return fmt.Errorf("derived tree mismatch for %s: got %s want %s", r.Path, tree, *want)
 	}
@@ -541,6 +610,7 @@ func (b *builder) recordSource(r relationship, tree, cloneMode string) error {
 	if e != nil {
 		return e
 	}
+	r.Patches = nil
 	return writeJSON(filepath.Join(b.output, "receipts", filepath.Base(r.Path)+"-source.json"), struct {
 		Relationship     relationship `json:"relationship"`
 		Tree             string       `json:"tree"`
@@ -550,7 +620,12 @@ func (b *builder) recordSource(r relationship, tree, cloneMode string) error {
 		SourceDirty      bool         `json:"source_dirty"`
 	}{r, tree, cloneMode, owner, commit, status != ""})
 }
-func (b *builder) sourcePath(name string) string { return filepath.Join(b.output, "source", name) }
+func (b *builder) sourcePath(name string) string {
+	if name == "rclone-module" {
+		return filepath.Join(b.output, "source", name)
+	}
+	return filepath.Join(b.root, "build", name)
+}
 func (b *builder) load(name string) (relationship, error) {
 	var r relationship
 	switch name {
@@ -561,8 +636,15 @@ func (b *builder) load(name string) (relationship, error) {
 	if e := readJSON(filepath.Join(b.root, ".git-source-relationships", name+".json"), &r); e != nil {
 		return r, e
 	}
-	if r.Path != "third_party/"+name {
+	if r.Path != "build/"+name || r.Schema != "git-source-relationship/v5" {
 		return r, fmt.Errorf("unexpected canonical path for %s", name)
+	}
+	if r.PatchBundle != nil {
+		var err error
+		r.Patches, err = b.packagePatches(*r.PatchBundle)
+		if err != nil {
+			return r, err
+		}
 	}
 	return r, nil
 }
@@ -608,20 +690,29 @@ func (b *builder) verifyDerived(r relationship) error {
 }
 func (b *builder) run(stage string) error {
 	var e error
-	for _, p := range []*string{&b.root, &b.output, &b.infra, &b.dataPlane, &b.materializer} {
+	if strings.TrimSpace(b.buildbarn) == "" {
+		return errors.New("select the BuildBarn source materializer module with -buildbarn-root (BUILDBARN_ROOT)")
+	}
+	for _, p := range []*string{&b.root, &b.output, &b.infra, &b.dataPlane, &b.materializer, &b.buildbarn} {
 		*p, e = filepath.Abs(*p)
 		if e != nil {
 			return e
 		}
 	}
-	if !strings.HasPrefix(b.output, "/tmp/trade-") && !strings.HasPrefix(b.output, "/var/tmp/trade-") {
-		return errors.New("build output must be /tmp/trade-* or /var/tmp/trade-*")
+	if e = validateOutput(b.output, b.root, b.infra, b.dataPlane, b.materializer, b.buildbarn); e != nil {
+		return e
+	}
+	if b.jobs < 1 || b.jobs > 16 {
+		return errors.New("jobs must be between 1 and 16")
+	}
+	if e = os.MkdirAll(b.output, 0755); e != nil {
+		return e
 	}
 	if e = readJSON(filepath.Join(b.root, "build/toolchain.json"), &b.tools); e != nil {
 		return e
 	}
 	if b.release {
-		for _, p := range []string{b.root, b.infra, b.dataPlane, b.materializer} {
+		for _, p := range []string{b.root, b.infra, b.dataPlane, b.materializer, b.buildbarn} {
 			s, e := b.git(p, "status", "--porcelain", "--untracked-files=all")
 			if e != nil {
 				return e
@@ -661,6 +752,8 @@ func (b *builder) run(stage string) error {
 			return e
 		}
 		return b.workspace()
+	case "prepare":
+		return b.prepareNative()
 	case "remote-inputs":
 		return b.remoteInputs()
 	case "verify-inputs":
@@ -669,13 +762,13 @@ func (b *builder) run(stage string) error {
 	case "module-source":
 		return b.materializeRcloneModule()
 	case "ui":
-		return b.remoteBuild("//:ui_dist")
-	case "cp", "plugin", "remote":
-		return b.collectRemote()
+		return b.buildUI()
+	case "cp", "plugin", "build":
+		return b.buildNative()
 	case "images":
-		return b.remoteImages()
+		return errors.New("image assembly is separate from native compilation; use inputs and the documented OCI recipe")
 	case "collect":
-		return b.collectRemote()
+		return b.buildNative()
 	case "test":
 		return b.compile(stage)
 	case "inputs":
@@ -700,53 +793,10 @@ type moduleJSON struct {
 	}
 }
 
-// sdkHuma admits the SDK owner's tracked module. A neighboring checkout or a
-// dependency's ignored replace directive cannot silently select schema code.
-func sdkHuma(root string) (string, error) {
-	var record relationship
-	if err := readJSON(filepath.Join(root, ".git-source-relationships/huma.json"), &record); err != nil {
-		return "", err
-	}
-	if record.Schema != "git-source-relationship/v1" || record.Kind != "third_party_implementation" || record.Integration != "tracked" || record.Path != "third_party/huma" || record.Owner == "" {
-		return "", errors.New("SDK Huma requires its tracked source relationship")
-	}
-	directory := filepath.Join(root, record.Path)
-	actual, err := filepath.EvalSymlinks(directory)
-	if err != nil || actual != filepath.Clean(directory) {
-		return "", errors.New("SDK Huma source must be the declared owned directory")
-	}
-	parse := func(path string) (*modfile.File, error) {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		return modfile.Parse(path, data, nil)
-	}
-	owner, err := parse(filepath.Join(root, "go/go.mod"))
-	if err != nil {
-		return "", err
-	}
-	const module = "github.com/danielgtaylor/huma/v2"
-	declared := false
-	for _, replacement := range owner.Replace {
-		if replacement.Old.Path == module && replacement.New.Version == "" && filepath.Clean(filepath.Join(root, "go", replacement.New.Path)) == directory {
-			declared = true
-		}
-	}
-	if !declared {
-		return "", errors.New("SDK Huma source is not declared by the owner go.mod")
-	}
-	selected, err := parse(filepath.Join(directory, "go.mod"))
-	if err != nil {
-		return "", err
-	}
-	if selected.Module == nil || selected.Module.Mod.Path != module {
-		return "", errors.New("SDK Huma module identity mismatch")
-	}
-	return directory, nil
-}
-
 func (b *builder) workspace() error {
+	if _, err := officialHuma(b.infra); err != nil {
+		return err
+	}
 	// Discover module identities from go.mod through Go itself. Only required
 	// first-party modules join the workspace, never adjacent legacy forks.
 	available := map[string]string{}
@@ -760,7 +810,7 @@ func (b *builder) workspace() error {
 		if d.Name() != "go.mod" {
 			return nil
 		}
-		raw, e := b.command(filepath.Dir(path), b.mise, "exec", "go@"+b.tools.Go, "--", "go", "mod", "edit", "-json")
+		raw, e := b.goCommand(filepath.Dir(path), nil, "mod", "edit", "-json")
 		if e != nil {
 			return e
 		}
@@ -774,11 +824,6 @@ func (b *builder) workspace() error {
 	if err != nil {
 		return err
 	}
-	huma, e := sdkHuma(b.infra)
-	if e != nil {
-		return e
-	}
-	available["github.com/danielgtaylor/huma/v2"] = huma
 	// A derived module is an admitted source, not a global module-cache edit.
 	admitted, e := b.sources()
 	if e != nil {
@@ -791,7 +836,7 @@ func (b *builder) workspace() error {
 		} else if e != nil {
 			return e
 		}
-		raw, e := b.command(dir, b.mise, "exec", "go@"+b.tools.Go, "--", "go", "mod", "edit", "-json")
+		raw, e := b.goCommand(dir, nil, "mod", "edit", "-json")
 		if e != nil {
 			return e
 		}
@@ -814,7 +859,7 @@ func (b *builder) workspace() error {
 	}
 	available[rcloneModule] = b.rcloneModulePath()
 	workerDir := filepath.Join(b.root, "go")
-	raw, e := b.command(workerDir, b.mise, "exec", "go@"+b.tools.Go, "--", "go", "mod", "edit", "-json")
+	raw, e := b.goCommand(workerDir, nil, "mod", "edit", "-json")
 	if e != nil {
 		return e
 	}
@@ -835,6 +880,11 @@ func (b *builder) workspace() error {
 		return e
 	}
 	available["github.com/wignerStan/rclone/go"] = materializerDir
+	buildbarnDir, e := b.externalModule(b.buildbarn, "github.com/wignerStan/buildbarn-storage/go")
+	if e != nil {
+		return e
+	}
+	available["github.com/wignerStan/buildbarn-storage/go"] = buildbarnDir
 	available[workerModule.Module.Path] = workerDir
 	queue := []string{filepath.Join(b.root, "go"), b.sourcePath("openlist")}
 	used := map[string]bool{}
@@ -848,7 +898,7 @@ func (b *builder) workspace() error {
 		}
 		used[dir] = true
 		dirs = append(dirs, dir)
-		raw, e := b.command(dir, b.mise, "exec", "go@"+b.tools.Go, "--", "go", "mod", "edit", "-json")
+		raw, e := b.goCommand(dir, nil, "mod", "edit", "-json")
 		if e != nil {
 			return e
 		}
@@ -871,16 +921,16 @@ func (b *builder) workspace() error {
 	if e = os.WriteFile(work, []byte("go "+b.tools.Go+"\n"), 0644); e != nil {
 		return e
 	}
-	args := []string{"exec", "go@" + b.tools.Go, "--", "go", "work", "edit"}
+	args := []string{"work", "edit"}
 	for _, dir := range dirs {
 		args = append(args, "-use="+dir)
 	}
 	args = append(args, replacements...)
 	args = append(args, work)
-	if _, e := b.command(b.output, b.mise, args...); e != nil {
+	if _, e := b.goCommand(b.output, nil, args...); e != nil {
 		return e
 	}
-	return writeJSON(filepath.Join(b.output, "receipts/workspace.json"), map[string]any{"modules": dirs, "infra_root": b.infra, "gateway_module": filepath.Join(b.root, "go"), "data_plane_module": coreDir, "rclone_module": materializerDir})
+	return writeJSON(filepath.Join(b.output, "receipts/workspace.json"), map[string]any{"modules": dirs, "infra_root": b.infra, "gateway_module": filepath.Join(b.root, "go"), "data_plane_module": coreDir, "rclone_module": materializerDir, "buildbarn_module": buildbarnDir})
 }
 
 // externalModule admits an explicitly selected independent checkout by module
@@ -963,11 +1013,19 @@ func copyTree(src, dst string) error {
 		return closeErr
 	})
 }
-func treeDigest(root string) (string, error) {
+func treeDigest(root string, exclude ...string) (string, error) {
 	var paths []string
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, e error) error {
 		if e != nil {
 			return e
+		}
+		if d.IsDir() {
+			rel, _ := filepath.Rel(root, p)
+			for _, skip := range exclude {
+				if rel == skip {
+					return filepath.SkipDir
+				}
+			}
 		}
 		if !d.IsDir() {
 			if !d.Type().IsRegular() {
@@ -994,7 +1052,7 @@ func treeDigest(root string) (string, error) {
 }
 func (b *builder) compile(stage string) error {
 	if stage != "test" {
-		return errors.New("product compilation requires Buildbarn")
+		return fmt.Errorf("unknown native compile stage %q", stage)
 	}
 	r, err := b.load("openlist")
 	if err != nil {
@@ -1006,16 +1064,11 @@ func (b *builder) compile(stage string) error {
 	if err = b.verifyDerived(r); err != nil {
 		return err
 	}
-	args := []string{"exec", "go@" + b.tools.Go, "--", "go", "test", "-race", "./clientplugin", "./pluginentry", "./pkg/gowebdav", "./pkg/storage/s3session", "./internal/controlplane/...", "./server"}
-	env := map[string]string{"GOWORK": filepath.Join(b.output, "go.work"), "CGO_ENABLED": "1", "CGO_CFLAGS": "-I" + filepath.Join(b.infra, "rust/crates/interop/native-plugin-protocol/include") + " -I" + filepath.Join(b.infra, "c/plugin-interop/include")}
-	spec := processexec.NewSpec(b.mise, args...).WithTimeout(30 * time.Minute).WithEnv(buildEnvironment(env))
-	spec.Dir, spec.MaxStdout, spec.MaxStderr = b.sourcePath("openlist"), 8<<20, 8<<20
-	result, err := processexec.RunContext(context.Background(), spec)
-	if err != nil {
-		return fmt.Errorf("derived tests failed: %w\n%s%s", err, result.Stdout, result.Stderr)
+	text, err := b.goCommand(b.sourcePath("openlist"), b.nativeEnvironment(), "test", "-p="+fmt.Sprint(b.parallelism()), "-race", "./clientplugin", "./pluginentry", "./pkg/gowebdav", "./pkg/storage/s3session", "./internal/controlplane/...", "./server")
+	if text != "" {
+		fmt.Println(text)
 	}
-	fmt.Print(string(result.Stdout))
-	return nil
+	return err
 }
 
 func (b *builder) provenanceDigest() (string, error) {
@@ -1023,13 +1076,17 @@ func (b *builder) provenanceDigest() (string, error) {
 	// Both native artifacts depend on the product's admitted sources and build
 	// recipe. A backend patch alone must invalidate the advertised build ID.
 	for _, name := range []string{"go", ".git-source-relationships", "patches", "build"} {
-		digest, e := treeDigest(filepath.Join(b.root, name))
+		exclude := []string(nil)
+		if name == "build" {
+			exclude = []string{"openlist", "openlist-ui"}
+		}
+		digest, e := treeDigest(filepath.Join(b.root, name), exclude...)
 		if e != nil {
 			return "", e
 		}
 		fmt.Fprintf(h, "%s %s\n", name, digest)
 	}
-	for _, name := range []string{"Makefile", "BUILD.bazel", "MODULE.bazel", ".bazelrc"} {
+	for _, name := range []string{"Makefile"} {
 		recipe, e := hashFile(filepath.Join(b.root, name))
 		if e != nil {
 			return "", e
@@ -1041,19 +1098,11 @@ func (b *builder) provenanceDigest() (string, error) {
 		return "", e
 	}
 	fmt.Fprintf(h, "infra %s\n", infra)
-	huma, e := sdkHuma(b.infra)
+	huma, e := officialHuma(b.infra)
 	if e != nil {
 		return "", e
 	}
-	humaHash, e := treeDigest(huma)
-	if e != nil {
-		return "", e
-	}
-	relationshipHash, e := hashFile(filepath.Join(b.infra, ".git-source-relationships/huma.json"))
-	if e != nil {
-		return "", e
-	}
-	fmt.Fprintf(h, "infra/huma %s %s\n", humaHash, relationshipHash)
+	fmt.Fprintf(h, "official-huma %s\n", huma)
 	// Infra owns the filesystem adapter and its patched upstream. Bind actual
 	// selected inputs as well as its commit so dirty development snapshots and
 	// backend-only patch updates cannot advertise an unchanged build identity.
@@ -1066,7 +1115,7 @@ func (b *builder) provenanceDigest() (string, error) {
 		return "", e
 	}
 	fmt.Fprintf(h, "infra/module %s@%s\n", rcloneModule, version)
-	for _, name := range []string{"patches/rclone/series.json", "go/go.mod", "go/go.sum"} {
+	for _, name := range []string{"go/patches/rclone/series.json", "go/go.mod", "go/go.sum"} {
 		digest, e := hashFile(filepath.Join(b.infra, name))
 		if e != nil {
 			return "", e
@@ -1078,6 +1127,11 @@ func (b *builder) provenanceDigest() (string, error) {
 		return "", e
 	}
 	fmt.Fprintf(h, "infra/go %s\n", storage)
+	native, e := treeDigest(filepath.Join(b.infra, "c/interop/plugins"))
+	if e != nil {
+		return "", e
+	}
+	fmt.Fprintf(h, "infra/c/interop/plugins %s\n", native)
 	for _, patch := range rclone.Patches {
 		digest, e := hashFile(filepath.Join(b.infra, patch.Path))
 		if e != nil {
@@ -1095,6 +1149,25 @@ func (b *builder) provenanceDigest() (string, error) {
 			return "", e
 		}
 		fmt.Fprintf(h, "data-plane/go %s\n", digest)
+	}
+	// Manager links both external process bindings even when no materializer
+	// executable is bundled. Bind their selected source bytes to its build ID.
+	for _, input := range []struct{ root, module, label string }{
+		{b.materializer, "github.com/wignerStan/rclone/go", "rclone/go"},
+		{b.buildbarn, "github.com/wignerStan/buildbarn-storage/go", "buildbarn/go"},
+	} {
+		if input.root == "" {
+			continue
+		}
+		dir, e := b.externalModule(input.root, input.module)
+		if e != nil {
+			return "", e
+		}
+		digest, e := treeDigest(dir)
+		if e != nil {
+			return "", e
+		}
+		fmt.Fprintf(h, "%s %s\n", input.label, digest)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
@@ -1124,35 +1197,8 @@ func copyInput(src, dst string) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	return os.Rename(dst+".tmp", dst)
-}
-
-func (b *builder) imageInputs() error {
-	compositions := map[string][]string{"gateway": {"storage-worker", "client-openlist.so", "client-rclone.so", "transfer-reapi.so", "ca-certificates.crt"}, "control-plane": {"openlist-control-plane", "storage-worker", "rclone", "client-openlist.so", "client-rclone.so", "transfer-reapi.so", "ca-certificates.crt"}}
-	for _, composition := range []string{"gateway", "control-plane"} {
-		dir := filepath.Join(b.output, "image-inputs", composition)
-		if e := os.MkdirAll(dir, 0755); e != nil {
-			return e
-		}
-		manifest := map[string]string{}
-		for _, name := range compositions[composition] {
-			src := filepath.Join(b.output, "bin", name)
-			if name == "ca-certificates.crt" {
-				src = b.ca
-			}
-			dst := filepath.Join(dir, name)
-			if e := copyInput(src, dst); e != nil {
-				return e
-			}
-			hash, e := hashFile(dst)
-			if e != nil {
-				return e
-			}
-			manifest[name] = hash
-		}
-		if e := writeJSON(filepath.Join(dir, "inputs.json"), manifest); e != nil {
-			return e
-		}
+	if e = os.Chmod(dst+".tmp", info.Mode().Perm()); e != nil {
+		return e
 	}
-	return nil
+	return os.Rename(dst+".tmp", dst)
 }

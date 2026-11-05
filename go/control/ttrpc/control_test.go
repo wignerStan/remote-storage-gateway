@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,13 +11,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/ttrpc"
 	"github.com/wignerStan/infra/go/config/schema"
-	carrier "github.com/wignerStan/infra/go/network/rpc/ttrpc"
+	rpcttrpc "github.com/wignerStan/infra/go/network/rpc/client/ttrpc"
+	actionsv1 "github.com/wignerStan/infra/go/network/rpc/protocols/actions"
 	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
 	dp "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
 	"github.com/wignerStan/remote-storage-gateway/go/contracts/control/broker"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func socket(t *testing.T, s *Server) string {
@@ -108,29 +111,29 @@ func TestWorkerControlPreservesExactDescriptorAndRejectsPayloadOperations(t *tes
 		t.Fatal(e)
 	}
 	defer client.Close(context.Background())
-	wrong, e := carrier.Dial(context.Background(), path, carrier.Protocol{Service: broker.DecisionRPCService}, limits())
+	wrong, e := rpcttrpc.Dial(context.Background(), path, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
-	defer wrong.Close(context.Background())
-	if _, e = wrong.Call(context.Background(), infoMethod, []byte("{}")); !errors.Is(e, carrier.ErrNotFound) {
+	defer wrong.Close()
+	if _, e = rawCall(context.Background(), wrong, broker.DecisionRPCService, infoMethod, []byte("{}")); status.Code(e) != codes.Unimplemented {
 		t.Fatal("worker socket admitted foreign protobuf service", e)
 	}
 	got, e := client.Descriptor(context.Background(), record.Digest)
 	if e != nil || !bytes.Equal(got.Bytes, record.Bytes) {
 		t.Fatal("descriptor exact bytes lost", e)
 	}
-	wire, e := carrier.Dial(context.Background(), path, carrier.Protocol{Service: broker.WorkerRPCService}, limits())
+	wire, e := rpcttrpc.Dial(context.Background(), path, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
-	defer wire.Close(context.Background())
+	defer wire.Close()
 	for _, method := range []string{"worker.open", "worker.read", "worker.put", "worker.exec"} {
-		if _, e := wire.Call(context.Background(), method, []byte(`{}`)); e == nil {
+		if _, e := rawCall(context.Background(), wire, broker.WorkerRPCService, method, []byte(`{}`)); e == nil {
 			t.Fatalf("payload operation admitted: %s", method)
 		}
 	}
-	if _, e = wire.Call(context.Background(), infoMethod, []byte(`{"body":"object-data"}`)); e == nil {
+	if _, e = rawCall(context.Background(), wire, broker.WorkerRPCService, infoMethod, []byte(`{"body":"object-data"}`)); e == nil {
 		t.Fatal("unknown payload field admitted")
 	}
 	if _, e = client.Replace(context.Background(), "one", dp.Version{}, dp.Selection{Name: "two"}); e == nil || impl.updates.Load() != 0 {
@@ -166,12 +169,12 @@ func TestDecisionBindsTrustedPrincipalAndRejectsClaimedIdentity(t *testing.T) {
 	if _, e = client.Decide(context.Background(), in); e != nil {
 		t.Fatal(e)
 	}
-	wire, e := carrier.Dial(context.Background(), path, carrier.Protocol{Service: broker.DecisionRPCService}, limits())
+	wire, e := rpcttrpc.Dial(context.Background(), path, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
-	defer wire.Close(context.Background())
-	if _, e = wire.Call(context.Background(), decideMethod, []byte(`{"method":"/x.Service/Call","authority":"worker.invalid","principal":"forged"}`)); e == nil {
+	defer wire.Close()
+	if _, e = rawCall(context.Background(), wire, broker.DecisionRPCService, decideMethod, []byte(`{"method":"/x.Service/Call","authority":"worker.invalid","principal":"forged"}`)); e == nil {
 		t.Fatal("serialized principal assertion admitted")
 	}
 	in.Metadata = map[string]string{"authorization": "Bearer private"}
@@ -181,4 +184,10 @@ func TestDecisionBindsTrustedPrincipalAndRejectsClaimedIdentity(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("invalid request reached decision service: %d", calls.Load())
 	}
+}
+
+func rawCall(ctx context.Context, wire *ttrpc.Client, service, method string, input []byte) ([]byte, error) {
+	reply := new(actionsv1.CallReply)
+	err := wire.Call(ctx, actionsService, "Call", &actionsv1.CallRequest{Binding: binding(service, method), Input: input}, reply)
+	return reply.Output, err
 }

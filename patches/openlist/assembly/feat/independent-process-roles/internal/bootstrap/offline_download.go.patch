@@ -1,0 +1,20 @@
+diff --git a/internal/bootstrap/offline_download.go b/internal/bootstrap/offline_download.go
+index 0f9fa7ce7c0d1084a2c3be8b55e9eb484f1031c8..3af31aed762e1af1aebf77c054bb54fa3934df20 100644
+--- a/internal/bootstrap/offline_download.go
++++ b/internal/bootstrap/offline_download.go
+@@ -1,11 +1,15 @@
+ package bootstrap
+ 
+ import (
++	"github.com/OpenListTeam/OpenList/v4/internal/conf"
+ 	"github.com/OpenListTeam/OpenList/v4/internal/offline_download/tool"
+ 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+ )
+ 
+ func InitOfflineDownloadTools() {
++	if conf.GatewayManaged() {
++		return
++	}
+ 	for k, v := range tool.Tools {
+ 		res, err := v.Init()
+ 		if err != nil {

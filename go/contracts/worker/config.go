@@ -1,7 +1,10 @@
 // Package worker owns passive product worker configuration.
 package worker
 
-import dp "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
+import (
+	dp "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
+	cpconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/control"
+)
 
 type Mount struct {
 	Name         string `json:"name"`
@@ -33,6 +36,8 @@ type RuntimeConfig struct {
 
 // ProcessConfig adds child-control metadata to the same runtime JSON shape.
 type ProcessConfig struct {
+	RemoteBroker *cpconfig.RemoteWorker `json:"remote_broker,omitempty"`
+	RPC          *cpconfig.RPCServer    `json:"rpc,omitempty"`
 	RuntimeConfig
 	InstanceID    string `json:"instance_id,omitempty"`
 	ControlSocket string `json:"control_socket,omitempty"`

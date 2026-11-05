@@ -1,58 +1,19 @@
 {
-  "schema_version": "git-source-relationship/v1",
-  "kind": "patched_third_party",
-  "path": "third_party/openlist",
+  "schema_version": "git-source-relationship/v5",
+  "kind": "upstream_product_build",
+  "path": "build/openlist",
   "owner": "openlistteam",
-  "integration": "submodule",
+  "integration": "build",
   "upstream": {
     "url": "https://github.com/OpenListTeam/OpenList.git",
     "commit": "e72822f5390f4272c9fe9da8cabba3c1a270182f"
   },
-  "patches": [
-    {
-      "order": 1,
-      "path": "patches/openlist/0001-preserve-control-plane-and-object-identity.patch",
-      "sha256": "ea16fd6d3b36c323e2526249806b5020eb988503720e082c3eef2066b19c0d2e"
-    },
-    {
-      "order": 2,
-      "path": "patches/openlist/0002-build-selected-native-client-adapters.patch",
-      "sha256": "cf5c62be2b155539ccb93d6bebbc019bfb475da7979adfcb867449a44186b675"
-    },
-    {
-      "order": 3,
-      "path": "patches/openlist/0003-extract-shared-s3-session-kernel.patch",
-      "sha256": "7bdf0f95253f052ce4769c9684499388cd808ccbc21f64c230620748c03941af"
-    },
-    {
-      "order": 4,
-      "path": "patches/openlist/0004-publish-schemas-at-native-plugin-entry.patch",
-      "sha256": "ebc7a16d208648aa9c34dc99792db461d025d6d94ce741cde1aa09085e1a6f4b"
-    },
-    {
-      "order": 5,
-      "path": "patches/openlist/0005-assemble-independent-gateway-processes.patch",
-      "sha256": "44ea9527d17a70c82bd9c1b587b22c566baa3ca29e8c25d1f9ffa50056832754"
-    },
-    {
-      "order": 6,
-      "path": "patches/openlist/0006-isolate-managed-control-plane-execution.patch",
-      "sha256": "53af7767e9b205c27514a84624108c56ebd4b876385edcab878999a1ff5bf55a"
-    },
-    {
-      "order": 7,
-      "path": "patches/openlist/0007-follow-infra-capability-family-imports.patch",
-      "sha256": "80190ff44d074f07cb5eb326d3044410aba8478c64dcafa295c812e0a5d4a918"
-    },
-    {
-      "order": 8,
-      "path": "patches/openlist/0008-adopt-owned-schema-and-openapi-facets.patch",
-      "sha256": "e4334ccb1e3f13f626be603b3db8592ec1e0006f832537572d8435ade8fec0f9"
-    }
-  ],
+  "dependency_manifest": null,
+  "patch_bundle": "patches/openlist",
   "public_api": "Worker client/v1 native plugin, shared S3 initializer, context-aware WebDAV kernel, managed metadata-only OpenList control-plane HTTP API",
-  "result_tree": "a4364f78aa26009b6a783a86cb3b0a5dde7ac3b0",
+  "result_tree": "829af6cc26b82abbe1f2643a515afeb4952b91f4",
+  "build_path": "build/openlist",
   "licenses": [
-    "third_party/openlist/LICENSE"
+    "build/openlist/LICENSE"
   ]
 }

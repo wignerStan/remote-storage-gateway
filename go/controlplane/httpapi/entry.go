@@ -40,9 +40,13 @@ type ReplaceBody struct {
 	Selection dp.Selection `json:"selection"`
 }
 type Output[T any] struct{ Body T }
-type Entry struct{ manager *controlplane.Manager }
+type Registry interface {
+	Instances() []controlplane.Instance
+	Worker(string) (broker.WorkerControl, error)
+}
+type Entry struct{ manager Registry }
 
-func NewEntry(m *controlplane.Manager) *Entry { return &Entry{m} }
+func NewEntry(m Registry) *Entry { return &Entry{m} }
 func (e *Entry) Instances(context.Context, *Empty) (*Output[[]controlplane.Instance], error) {
 	if e.manager == nil {
 		return nil, reject(503)
@@ -104,6 +108,12 @@ func (e *Entry) Replace(ctx context.Context, in *ReplaceInput) (*Output[dp.Versi
 	if err != nil {
 		if errors.Is(err, broker.ErrInvalid) {
 			return nil, reject(400)
+		}
+		if errors.Is(err, broker.ErrRejected) {
+			return nil, &Error{409, "desired worker state rejected"}
+		}
+		if errors.Is(err, broker.ErrUnavailable) {
+			return nil, reject(503)
 		}
 		return nil, reject(502)
 	}

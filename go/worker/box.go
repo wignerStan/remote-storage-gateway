@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -24,6 +25,7 @@ type ProxyEnvironment map[string]string
 
 type Options struct {
 	ProxyEnvironment ProxyEnvironment
+	Arguments        []string
 	Executable       string
 	Config           config.ProcessConfig
 	ReadyTimeout     time.Duration
@@ -50,6 +52,15 @@ type Box struct {
 }
 
 func New(o Options) (*Box, error) {
+	if len(o.Arguments) > 8 {
+		return nil, broker.ErrInvalid
+	}
+	for _, a := range o.Arguments {
+		if len(a) > 256 || strings.ContainsAny(a, "\x00\r\n") {
+			return nil, broker.ErrInvalid
+		}
+	}
+	o.Arguments = append([]string(nil), o.Arguments...)
 	if !filepath.IsAbs(o.Executable) || o.ReadyTimeout < 0 || o.ReadyTimeout > 2*time.Minute || o.StopTimeout < 0 || o.StopTimeout > 10*time.Minute {
 		return nil, broker.ErrInvalid
 	}
@@ -174,7 +185,7 @@ func (b *Box) Start(ctx context.Context) error {
 		return broker.ErrInvalid
 	}
 	defer clear(payload)
-	command := processexec.NewStartSpec(o.Executable, "--config=-").WithStdin(bytes.NewReader(payload))
+	command := processexec.NewStartSpec(o.Executable, append(o.Arguments, "--config=-")...).WithStdin(bytes.NewReader(payload))
 	for key, value := range o.ProxyEnvironment {
 		command = command.WithExtraEnv(key, value)
 	}
@@ -282,4 +293,47 @@ func (b *Box) Close(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// ProcessSpec exposes this admitted process plan to an assembly-owned Infra
+// group. The group owns the child; this Box has not started an independent owner.
+func (b *Box) ProcessSpec() (supervisor.Spec, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state.Phase != "new" || b.closing {
+		return supervisor.Spec{}, broker.ErrUnavailable
+	}
+	o := b.options
+	if e := privateSocket(o.Config.ControlSocket); e != nil {
+		return supervisor.Spec{}, e
+	}
+	payload, e := json.Marshal(o.Config)
+	if e != nil {
+		return supervisor.Spec{}, broker.ErrInvalid
+	}
+	command := processexec.NewStartSpec(o.Executable, append(append([]string(nil), o.Arguments...), "--config=-")...)
+	if o.Executable == "/proc/self/exe" {
+		command, e = supervisor.SelfCommand(append(append([]string(nil), o.Arguments...), "--config=-")...)
+		if e != nil {
+			return supervisor.Spec{}, e
+		}
+	}
+	command = command.WithStdin(bytes.NewReader(payload))
+	for key, value := range o.ProxyEnvironment {
+		command = command.WithExtraEnv(key, value)
+	}
+	return supervisor.Spec{Command: command, ReadyTimeout: o.ReadyTimeout, Ready: func(ctx context.Context, child *supervisor.Child) error {
+		attempt, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+		client, e := control.DialWorker(attempt, o.Config.ControlSocket)
+		if e != nil {
+			return e
+		}
+		defer client.Close(context.Background())
+		info, e := client.Info(attempt)
+		if e != nil || !info.Ready || info.ID != o.Config.InstanceID || o.Config.StorageIPCSocket != "" && (info.StorageSocket != o.Config.StorageIPCSocket || info.OfferSocket != o.Config.StorageOfferSocket || info.Incarnation == "") {
+			return broker.ErrUnavailable
+		}
+		return nil
+	}}, nil
 }

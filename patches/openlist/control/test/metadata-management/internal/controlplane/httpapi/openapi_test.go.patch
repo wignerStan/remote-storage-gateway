@@ -1,0 +1,119 @@
+diff --git a/internal/controlplane/httpapi/openapi_test.go b/internal/controlplane/httpapi/openapi_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d7ef2c2e571d4e7dc2d0f540c887158d1e9d644
+--- /dev/null
++++ b/internal/controlplane/httpapi/openapi_test.go
+@@ -0,0 +1,113 @@
++package httpapi_test
++
++import (
++	"bytes"
++	"encoding/json"
++	"github.com/OpenListTeam/OpenList/v4/internal/controlplane/httpapi"
++	schemaapi "github.com/wignerStan/infra/go/network/http/openapi"
++	openapigin "github.com/wignerStan/infra/go/network/http/openapi/gin"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	cp "github.com/OpenListTeam/OpenList/v4/internal/controlplane"
++)
++
++func TestGeneratedManagementOpenAPIMatchesTypedRoutes(t *testing.T) {
++	registry, e := cp.New(cp.Config{Targets: []cp.Target{{Name: "offline", Kind: "rclone", Endpoint: "http://127.0.0.1:1"}}})
++	if e != nil {
++		t.Fatal(e)
++	}
++	engine := fixtureAPI(registry)
++	response := request(t, engine, "GET", "/openapi.json", "")
++	if response.Code != 200 {
++		t.Fatal("OpenAPI unavailable", response.Code)
++	}
++	document := bytes.TrimSpace(response.Body.Bytes())
++	var spec struct {
++		OpenAPI    string                                `json:"openapi"`
++		Paths      map[string]map[string]json.RawMessage `json:"paths"`
++		Components struct {
++			Schemas map[string]json.RawMessage `json:"schemas"`
++		} `json:"components"`
++	}
++	if e = json.Unmarshal(document, &spec); e != nil {
++		t.Fatal(e)
++	}
++	if spec.OpenAPI != "3.1.0" || len(spec.Paths) != 11 {
++		t.Fatalf("generated API incomplete: version=%s paths=%d", spec.OpenAPI, len(spec.Paths))
++	}
++	expected := map[string]string{"/targets": "get", "/targets/{target}/manifest": "get", "/targets/{target}/observed": "get", "/targets/{target}/clients/{name}": "post", "/targets/{target}/descriptors/{digest}": "get", "/targets/{target}/version": "get", "/targets/{target}/stats": "get", "/targets/{target}/jobs": "get", "/targets/{target}/jobs/{id}": "get", "/targets/{target}/jobs/{id}/stop": "post", "/targets/{target}/probe": "get"}
++	for path, method := range expected {
++		if len(spec.Paths[path][method]) == 0 {
++			t.Fatal("operation missing from generated contract", method, path)
++		}
++	}
++	body := spec.Components.Schemas["StopRequest"]
++	if !bytes.Contains(body, []byte(`"execute_id"`)) || !bytes.Contains(body, []byte(`"minLength":1`)) || !bytes.Contains(body, []byte(`"maxLength":128`)) {
++		t.Fatalf("typed request constraints absent: %s", body)
++	}
++	response = request(t, engine, "GET", "/openapi.json", "")
++	if response.Code != 200 || !bytes.Equal(bytes.TrimSpace(response.Body.Bytes()), document) {
++		t.Fatal("served OpenAPI differs from registered typed contract", response.Code)
++	}
++	engine2 := fixtureAPI(registry)
++	second := bytes.TrimSpace(request(t, engine2, "GET", "/openapi.json", "").Body.Bytes())
++	if !bytes.Equal(document, second) {
++		t.Fatal("identical typed registration generated nondeterministic OpenAPI")
++	}
++}
++
++func TestTypedManagementValidationPreservesStatusAndRedaction(t *testing.T) {
++	registry, e := cp.New(cp.Config{Targets: []cp.Target{{Name: "offline", Kind: "rclone", Endpoint: "http://127.0.0.1:1"}}})
++	if e != nil {
++		t.Fatal(e)
++	}
++	engine := router(registry)
++	for _, body := range []string{`{"execute_id":""}`, `{"execute_id":"first","execute_id":"second"}`, `{"execute_id":"valid","password":"never-return-this"}`, `{"execute_id":"` + strings.Repeat("x", 129) + `"}`, strings.Repeat(" ", cp.MaxMetadata) + `{}`} {
++		response := request(t, engine, "POST", "/targets/offline/jobs/7/stop", body)
++		if response.Code != http.StatusBadRequest || strings.Contains(response.Body.String(), "never-return-this") || !strings.HasPrefix(response.Header().Get("Content-Type"), "application/json") {
++			t.Fatalf("validation changed status/envelope or echoed invalid values: %d %s", response.Code, response.Body)
++		}
++		var payload struct {
++			Code int `json:"code"`
++			Data any `json:"data"`
++		}
++		if json.Unmarshal(response.Body.Bytes(), &payload) != nil || payload.Code != 400 || payload.Data != nil {
++			t.Fatal("validation envelope changed", response.Body)
++		}
++	}
++	q := httptest.NewRequest("POST", "/api/admin/control/targets/offline/jobs/7/stop", strings.NewReader(`{"execute_id":"first","execute_id":"second"}`))
++	q.Header.Set("Content-Type", "application/json; charset=utf-8")
++	utf8Response := httptest.NewRecorder()
++	engine.ServeHTTP(utf8Response, q)
++	if utf8Response.Code != 400 {
++		t.Fatal("JSON media parameters bypassed duplicate-key rejection", utf8Response.Code)
++	}
++	response := request(t, engine, "GET", "/targets/offline/jobs/0", "")
++	if response.Code != 400 {
++		t.Fatal("typed path minimum was not enforced", response.Code)
++	}
++}
++
++func TestNamedManagementEntryUnavailablePreservesSanitizedEnvelope(t *testing.T) {
++	entry := httpapi.NewEntry(nil, io.EOF)
++	table, err := schemaapi.Compose(httpapi.APIConfig(), entry.RegisterRoutes)
++	if err != nil {
++		t.Fatal(err)
++	}
++	engine, err := openapigin.New(table, openapigin.Options{Prefix: "/api/admin/control", OpenAPIPath: "/openapi", SchemasPath: "/schemas", Errors: httpapi.ErrorPolicy()})
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	for _, path := range []string{"/targets", "/targets/offline/manifest", "/targets/offline/version", "/targets/offline/probe", "/targets/offline/descriptors/digest"} {
++		response := request(t, engine, "GET", path, "")
++		var payload httpapi.APIError
++		if response.Code != 503 || json.Unmarshal(response.Body.Bytes(), &payload) != nil || payload.Code != 503 || payload.Message != http.StatusText(503) || payload.Data != nil {
++			t.Fatal("unavailable entry changed status or exposed cause", path, response.Code, response.Body)
++		}
++	}
++}

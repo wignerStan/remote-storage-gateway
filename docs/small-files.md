@@ -58,6 +58,41 @@ credentials. Select an immutable versioned archive path and replace the client
 generation when publishing a new archive. Do not overwrite an archive while its
 index and members are being served.
 
+## Source archive view
+
+Add `"source_view": true` to an `archive-*` public configuration to preserve
+source file types and executable permissions. This optional field is available
+for all three archive providers. It is absent from ordinary provider schemas.
+The shared Infra archive reader then returns typed modes for every member and
+directory. The default archive profile retains its original behavior and rejects
+symlinks.
+
+The source profile admits real ZIP symlink entries, keeps their logical names,
+and serves the link target as ordinary bounded member bytes. It never follows a
+link or interprets an ordinary `.rclonelink` filename as a link. Special files
+are rejected and privileged permission bits are discarded. Source link bodies
+are limited to 4096 bytes; complete reads retain the existing CRC checks.
+
+Expose the archive client through an explicit mount `remote_client` assignment
+and consume that namespace with the BuildBarn materializer's `source_view`
+profile. The materializer requests `Endpoint.FileModes` in the Worker storage
+IPC Hello; Worker validates the typed modes and keeps arbitrary provider
+metadata out of the replies. Link content continues through the existing shared
+memory byte channel. The materializer filters logical source paths, validates
+the selected link graph, and presents read-only native files. The Gateway's
+ordinary WebDAV adapter does not perform that source link projection.
+
+An old Worker or a provider without typed modes fails the source profile. It
+does not silently turn an executable or link into an ordinary file. A new
+archive requires a new immutable object path, a successful archive candidate
+admission and a generation-CAS client replacement. Existing storage IPC
+sessions become stale after replacement and require a new materializer session.
+Retain the old object while any old generation still has active readers or an
+operator rollback needs it. Automatic archive retention and deletion are not
+provided by this binding.
+
+## Packed cache bounds
+
 The independent VFS process accepts these optional bounds:
 
 | Configuration | Default | Meaning |
@@ -83,8 +118,15 @@ including cache admission pressure. Real missing files, conditional responses
 and invalid ranges retain their normal statuses. Once streaming has begun, the
 entry preserves the committed response and never replays provider I/O.
 
+## Publication
+
 Creating an archive is a separate, explicit batch operation. Upstream
 [`rclone archive create`](https://rclone.org/commands/rclone_archive_create/)
-can publish ZIP to a remote. The Gateway does not silently pack/delete existing
+can write ZIP to a remote and permits replacing an existing destination. That
+write is not an immutable-object, atomic-snapshot or retention guarantee. The
+source publication profile must first complete a local archive, upload under a
+new versioned path, verify that object and only then replace the admitted client
+generation. A mutable input tree must be frozen by its owner while it is being
+packed. The Gateway does not silently pack/delete existing
 objects or turn a mutable directory into a writable ZIP filesystem. For selective
 cloud reads see the upstream [archive backend](https://rclone.org/archive/).

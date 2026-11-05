@@ -1,0 +1,96 @@
+diff --git a/server/controlplane_test.go b/server/controlplane_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..65ce1d2ff9cd669048f59f22163fba5fffc0530b
+--- /dev/null
++++ b/server/controlplane_test.go
+@@ -0,0 +1,90 @@
++package server
++
++import (
++	"context"
++	"encoding/json"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/OpenListTeam/OpenList/v4/internal/conf"
++	"github.com/OpenListTeam/OpenList/v4/internal/controlplane"
++	"github.com/OpenListTeam/OpenList/v4/internal/model"
++	"github.com/OpenListTeam/OpenList/v4/server/middlewares"
++	"github.com/gin-gonic/gin"
++)
++
++func TestControlManagementRegisteredInsideExistingAdminBoundary(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	old := conf.Conf
++	defer func() { conf.Conf = old }()
++	conf.Conf = conf.DefaultConfig(t.TempDir())
++	p := filepath.Join(t.TempDir(), "control-targets")
++	b, _ := json.Marshal(controlplane.Config{Targets: []controlplane.Target{{Name: "backup", Kind: "rclone", Endpoint: "http://127.0.0.1:1"}}})
++	if e := os.WriteFile(p, b, 0600); e != nil {
++		t.Fatal(e)
++	}
++	conf.Conf.ControlTargetsFile = p
++	e := gin.New()
++	group := e.Group("/api/admin", func(c *gin.Context) {
++		role := model.GUEST
++		if c.GetHeader("X-Test-Administrator") == "yes" {
++			role = model.ADMIN
++		}
++		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), conf.UserKey, &model.User{Role: role}))
++	}, middlewares.AuthAdmin)
++	admin(e, group)
++	for _, allowed := range []bool{false, true} {
++		q := httptest.NewRequest("GET", "/api/admin/control/targets", nil)
++		if allowed {
++			q.Header.Set("X-Test-Administrator", "yes")
++		}
++		w := httptest.NewRecorder()
++		e.ServeHTTP(w, q)
++		var body struct {
++			Code int             `json:"code"`
++			Data json.RawMessage `json:"data"`
++		}
++		if er := json.Unmarshal(w.Body.Bytes(), &body); er != nil {
++			t.Fatal(er, w.Body)
++		}
++		if !allowed && body.Code != 403 {
++			t.Fatal("existing administrator middleware was bypassed", w.Code, w.Body)
++		}
++		if allowed && (body.Code != 200 || !strings.Contains(string(body.Data), `"name":"backup"`)) {
++			t.Fatal("registered management route unavailable", w.Code, w.Body)
++		}
++	}
++	for _, metadataPath := range []string{"/openapi.json", "/schemas/StopRequest.json"} {
++		for _, allowed := range []bool{false, true} {
++			q := httptest.NewRequest("GET", "/api/admin/control"+metadataPath, nil)
++			if allowed {
++				q.Header.Set("X-Test-Administrator", "yes")
++			}
++			w := httptest.NewRecorder()
++			e.ServeHTTP(w, q)
++			if allowed {
++				if w.Code != 200 || (metadataPath == "/openapi.json" && !strings.Contains(w.Body.String(), `"openapi":"3.1.0"`)) || (metadataPath != "/openapi.json" && !strings.Contains(w.Body.String(), `"execute_id"`)) {
++					t.Fatal("administrator generated OpenAPI unavailable", w.Code, w.Body)
++				}
++			} else {
++				var denied struct {
++					Code int `json:"code"`
++				}
++				json.Unmarshal(w.Body.Bytes(), &denied)
++				if denied.Code != 403 {
++					t.Fatal("schema route bypassed administrator authorization", w.Code, w.Body)
++				}
++			}
++		}
++	}
++	registered := false
++	for _, route := range e.Routes() {
++		registered = registered || route.Method == "GET" && route.Path == "/api/admin/control/targets"
++	}
++	if !registered {
++		t.Fatal("typed management operation not registered in Gin administrator group")
++	}
++}

@@ -1,0 +1,248 @@
+diff --git a/server/managed_test.go b/server/managed_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae7d92921eba06d6bfa8863ec5ecbbb497a51916
+--- /dev/null
++++ b/server/managed_test.go
+@@ -0,0 +1,242 @@
++package server_test
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http/httptest"
++	"net/url"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/OpenListTeam/OpenList/v4/cmd/flags"
++	"github.com/OpenListTeam/OpenList/v4/internal/bootstrap"
++	"github.com/OpenListTeam/OpenList/v4/internal/bootstrap/data"
++	"github.com/OpenListTeam/OpenList/v4/internal/conf"
++	"github.com/OpenListTeam/OpenList/v4/internal/db"
++	"github.com/OpenListTeam/OpenList/v4/internal/driver"
++	"github.com/OpenListTeam/OpenList/v4/internal/fs"
++	"github.com/OpenListTeam/OpenList/v4/internal/model"
++	"github.com/OpenListTeam/OpenList/v4/internal/offline_download/tool"
++	"github.com/OpenListTeam/OpenList/v4/internal/op"
++	"github.com/OpenListTeam/OpenList/v4/internal/search"
++	"github.com/OpenListTeam/OpenList/v4/internal/task"
++	"github.com/OpenListTeam/OpenList/v4/server"
++	"github.com/OpenListTeam/tache"
++	"github.com/gin-gonic/gin"
++)
++
++var constructors, initializations, detailCalls atomic.Int32
++
++type managedProbeDriver struct {
++	driver.Driver
++	storage model.Storage
++}
++
++func (d *managedProbeDriver) Config() driver.Config {
++	return driver.Config{Name: "ManagedExecutionProbe", DefaultRoot: "/"}
++}
++func (d *managedProbeDriver) GetAddition() driver.Additional { return &struct{}{} }
++func (d *managedProbeDriver) GetStorage() *model.Storage     { return &d.storage }
++func (d *managedProbeDriver) SetStorage(s model.Storage)     { d.storage = s }
++func (d *managedProbeDriver) Init(context.Context) error     { initializations.Add(1); return nil }
++func (d *managedProbeDriver) Drop(context.Context) error     { return nil }
++func (d *managedProbeDriver) GetDetails(context.Context) (*model.StorageDetails, error) {
++	detailCalls.Add(1)
++	return &model.StorageDetails{}, nil
++}
++
++type managedProbeTool struct {
++	tool.Tool
++	calls *atomic.Int32
++}
++
++func (t managedProbeTool) Init() (string, error)      { t.calls.Add(1); return "probe", nil }
++func (t managedProbeTool) Items() []model.SettingItem { return nil }
++func (t managedProbeTool) IsReady() bool              { return false }
++
++func TestManagedModeKeepsSQLiteMetadataWithoutLegacyExecution(t *testing.T) {
++	t.Setenv("OPENLIST_ADMIN_PASSWORD", "")
++	oldConf, oldURL, oldTools, oldManager := conf.Conf, conf.URL, tool.Tools, server.GatewayControl
++	oldDev, oldDebug := flags.Dev, flags.Debug
++	defer func() {
++		conf.Conf, conf.URL, tool.Tools, server.GatewayControl = oldConf, oldURL, oldTools, oldManager
++		flags.Dev, flags.Debug = oldDev, oldDebug
++		op.RegisterSettingItemHook(conf.SearchIndex, func(i *model.SettingItem) error { return search.Init(i.Value) })
++		op.Cache.ClearAll()
++	}()
++	flags.Dev, flags.Debug = false, false
++	dir := t.TempDir()
++	conf.Conf = conf.DefaultConfig(dir)
++	conf.URL = &url.URL{}
++	conf.Conf.Scheme.HttpPort = -1
++	conf.Conf.Scheme.HttpsPort = -1
++	conf.Conf.S3.Enable = true
++	conf.Conf.S3.Port = 0
++	conf.Conf.FTP.Enable = true
++	conf.Conf.FTP.Listen = "127.0.0.1:0"
++	conf.Conf.SFTP.Enable = true
++	conf.Conf.SFTP.Listen = "127.0.0.1:0"
++	bootstrap.InitDB()
++	defer db.Close()
++	op.Cache.ClearAll()
++	op.RegisterDriver(func() driver.Driver { constructors.Add(1); return &managedProbeDriver{} })
++	// Legacy mode still initializes providers; this in-memory fixture also proves
++	// the managed metadata list does not probe a previously available provider.
++	id, e := op.CreateStorage(context.Background(), model.Storage{Driver: "ManagedExecutionProbe", MountPath: "/retained", Addition: "{}"})
++	if e != nil {
++		t.Fatal(e)
++	}
++	if initializations.Load() == 0 {
++		t.Fatal("legacy provider behavior accidentally disabled")
++	}
++	before, e := db.GetStorageById(id)
++	if e != nil {
++		t.Fatal(e)
++	}
++	processes := filepath.Join(dir, "processes.json")
++	if e = os.WriteFile(processes, []byte(`{"workers":[]}`), 0600); e != nil {
++		t.Fatal(e)
++	}
++	conf.Conf.GatewayControlFile = processes
++	constructors.Store(0)
++	initializations.Store(0)
++	detailCalls.Store(0)
++	var toolCalls, settingEffects atomic.Int32
++	tool.Tools = tool.ToolsManager{"probe": managedProbeTool{calls: &toolCalls}}
++	op.RegisterSettingItemHook(conf.SearchIndex, func(*model.SettingItem) error { settingEffects.Add(1); return nil })
++	if e = db.SaveSettingItems([]model.SettingItem{{Key: conf.SearchIndex, Value: "persisted-probe"}}); e != nil {
++		t.Fatal(e)
++	}
++	pending := fs.FileTransferTask{TaskData: fs.TaskData{TaskExtension: task.TaskExtension{Base: tache.Base{ID: "retained-pending", State: tache.StatePending}}, SrcStorageMp: "/retained", DstStorageMp: "/retained", SrcActualPath: "source", DstActualPath: "destination"}}
++	queued, e := json.Marshal([]fs.FileTransferTask{pending})
++	if e != nil {
++		t.Fatal(e)
++	}
++	if e = db.CreateTaskData(&model.TaskItem{Key: "copy", PersistData: string(queued)}); e != nil {
++		t.Fatal(e)
++	}
++	conf.Conf.Tasks.Copy.TaskPersistant = true
++	if e = os.MkdirAll(conf.Conf.TempDir, 0700); e != nil {
++		t.Fatal(e)
++	}
++	sentinel := filepath.Join(conf.Conf.TempDir, "unowned-existing")
++	if e = os.WriteFile(sentinel, []byte("preserve"), 0600); e != nil {
++		t.Fatal(e)
++	}
++	data.InitData()
++	admin := &model.User{Username: "managed-admin", Role: model.ADMIN, BasePath: "/", Authn: "[]"}
++	admin.SetPassword("fixture-password")
++	if e = op.CreateUser(admin); e != nil {
++		t.Fatal(e)
++	}
++	const token = "managed-metadata-test-token"
++	if e = op.SaveSettingItem(&model.SettingItem{Key: conf.Token, Value: token}); e != nil {
++		t.Fatal(e)
++	}
++	if settingEffects.Load() != 0 {
++		t.Fatal("persisted initSettings executed payload effect hook")
++	}
++	bootstrap.Start()
++	defer func() { conf.Conf.GatewayControlFile = processes; bootstrap.Shutdown(time.Second) }()
++	if !conf.StoragesLoaded {
++		t.Fatal("managed identity routes still waiting for legacy storage load")
++	}
++	if fs.CopyTaskManager != nil || fs.UploadTaskManager != nil || tool.DownloadTaskManager != nil {
++		t.Fatal("managed boot created payload task workers")
++	}
++	for _, kind := range []string{"s3", "ftp", "sftp"} {
++		if bootstrap.IsRunning(kind) {
++			t.Fatalf("managed boot started %s listener", kind)
++		}
++	}
++	if constructors.Load() != 0 || initializations.Load() != 0 || toolCalls.Load() != 0 {
++		t.Fatal("managed boot constructed or initialized a provider/tool")
++	}
++	// A route gate alone is insufficient: effect-owner calls also refuse changes
++	// before database writes, including callers outside the HTTP router.
++	changed := *before
++	changed.Remark = "forbidden"
++	if _, e = op.CreateStorage(context.Background(), model.Storage{Driver: "ManagedExecutionProbe", MountPath: "/must-not-create"}); !errors.Is(e, op.ErrManagedGateway) {
++		t.Fatal(e)
++	}
++	for _, invoke := range []func() error{func() error { return op.LoadStorage(context.Background(), *before) }, func() error { return op.UpdateStorage(context.Background(), changed) }, func() error { return op.EnableStorage(context.Background(), id) }, func() error { return op.DisableStorage(context.Background(), id) }, func() error { return op.DeleteStorageById(context.Background(), id) }} {
++		if e = invoke(); !errors.Is(e, op.ErrManagedGateway) {
++			t.Fatal("legacy effect owner admitted mutation", e)
++		}
++	}
++	engine := gin.New()
++	server.Init(engine)
++	request := func(method, path, body string, authorized bool) *httptest.ResponseRecorder {
++		q := httptest.NewRequest(method, path, strings.NewReader(body))
++		q.Header.Set("Content-Type", "application/json")
++		if authorized {
++			q.Header.Set("Authorization", token)
++		}
++		w := httptest.NewRecorder()
++		engine.ServeHTTP(w, q)
++		return w
++	}
++	for _, route := range []string{"/api/admin/storage/create", "/api/admin/storage/update", "/api/admin/storage/enable", "/api/admin/storage/load_all", "/api/admin/setting/set_aria2", "/api/admin/index/build", "/api/admin/scan/start", "/api/admin/media/scan/start", "/api/transcode/worker/claim", "/api/fs/mkdir", "/api/fs/add_offline_download", "/api/admin/driver/info"} {
++		if w := request("POST", route, `{"driver":"ManagedExecutionProbe","mount_path":"/forbidden"}`, true); w.Code != 404 {
++			t.Fatalf("payload route admitted %s: %d %s", route, w.Code, w.Body)
++		}
++	}
++	for _, route := range []string{"/dav/retained/file", "/d/file", "/p/file", "/tc/job/token/master.m3u8", "/@emby/Videos/1/stream"} {
++		if w := request("GET", route, "", true); w.Code != 404 {
++			t.Fatalf("payload frontend admitted %s: %d", route, w.Code)
++		}
++	}
++	for _, route := range []string{"/api/admin/storage/list", "/api/admin/storage/get?id=" + strconv.Itoa(int(id)), "/api/admin/user/list", "/api/admin/control/targets"} {
++		w := request("GET", route, "", true)
++		var response struct {
++			Code int `json:"code"`
++		}
++		if json.Unmarshal(w.Body.Bytes(), &response) != nil || response.Code != 200 {
++			t.Fatalf("metadata route unavailable %s: %d %s", route, w.Code, w.Body)
++		}
++	}
++	if w := request("GET", "/api/admin/control/openapi.json", "", true); w.Code != 200 || !strings.Contains(w.Body.String(), `"openapi":"3.1.0"`) {
++		t.Fatal("typed control schema unavailable", w.Code, w.Body)
++	}
++	w := request("GET", "/api/admin/control/openapi.json", "", false)
++	var denied struct {
++		Code int `json:"code"`
++	}
++	json.Unmarshal(w.Body.Bytes(), &denied)
++	if denied.Code == 200 || strings.Contains(w.Body.String(), `"openapi"`) {
++		t.Fatal("managed schema bypassed identity", w.Code, w.Body)
++	}
++	if w = request("GET", "/ping", "", false); w.Code != 200 {
++		t.Fatal("managed readiness unavailable", w.Code)
++	}
++	if constructors.Load() != 0 || initializations.Load() != 0 || detailCalls.Load() != 0 || toolCalls.Load() != 0 || settingEffects.Load() != 0 {
++		t.Fatal("metadata routes or boot executed legacy payload runtime")
++	}
++	after, e := db.GetStorageById(id)
++	if e != nil || after.Remark != before.Remark || after.MountPath != before.MountPath || after.Disabled != before.Disabled {
++		t.Fatal("managed mode changed retained storage row", e)
++	}
++	history, e := db.GetTaskDataByType("copy")
++	if e != nil || history.PersistData != string(queued) {
++		t.Fatal("managed boot restored/rewrote queued history", e)
++	}
++	if b, e := os.ReadFile(sentinel); e != nil || string(b) != "preserve" {
++		t.Fatal("managed boot cleaned an unowned payload cache")
++	}
++	bootstrap.Shutdown(time.Second) // nil task managers are intentionally uncreated.
++	// Empty processes file selection retains the original standalone tool path.
++	conf.Conf.GatewayControlFile = ""
++	bootstrap.InitOfflineDownloadTools()
++	if toolCalls.Load() != 1 {
++		t.Fatal("legacy tool initialization no longer works")
++	}
++	if _, e = op.HandleSettingItemHook(&model.SettingItem{Key: conf.SearchIndex, Value: "fixture"}); e != nil || settingEffects.Load() != 1 {
++		t.Fatal("legacy effect hook no longer works", e)
++	}
++}

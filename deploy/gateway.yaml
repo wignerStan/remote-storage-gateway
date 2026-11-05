@@ -21,7 +21,20 @@ spec:
       initContainers:
         - name: private-files
           image: docker.io/library/debian@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
-          command: ["/bin/sh", "-ec", "cp /input/* /private/; chmod 0600 /private/*; chown 1001:1001 /private/*"]
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              umask 077
+              # Reclaim only this init-owned emptyDir before retrying copies.
+              chown 0:0 /private
+              chmod 00700 /private
+              rm -f /private/*
+              cp /input/* /private/
+              chmod 0600 /private/*
+              # Hand off files before the directory loses root traversal.
+              chown 1001:1001 /private/*
+              chown 1001:1001 /private
           securityContext:
             runAsUser: 0
             readOnlyRootFilesystem: true

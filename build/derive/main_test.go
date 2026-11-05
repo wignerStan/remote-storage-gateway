@@ -14,7 +14,8 @@ func fixture(t *testing.T) (*builder, relationship) {
 	t.Helper()
 	root := t.TempDir()
 	b := &builder{root: root, output: filepath.Join(root, "output")}
-	source := filepath.Join(root, "third_party/fixture")
+	source := filepath.Join(root, "references/fixture")
+	b.referenceRoot = filepath.Join(root, "references")
 	if e := os.MkdirAll(source, 0755); e != nil {
 		t.Fatal(e)
 	}
@@ -42,7 +43,7 @@ func fixture(t *testing.T) (*builder, relationship) {
 	git("add", "provider.txt")
 	tree := git("write-tree")
 	diff := git("diff", "--cached", "--binary", "--full-index") + "\n"
-	p := filepath.Join(root, "patches/fixture/0001.patch")
+	p := filepath.Join(root, "patches/fixture/client/feat/update/provider.txt.patch")
 	if e := os.MkdirAll(filepath.Dir(p), 0755); e != nil {
 		t.Fatal(e)
 	}
@@ -53,7 +54,10 @@ func fixture(t *testing.T) (*builder, relationship) {
 	if _, e := b.git(root, "init"); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := b.git(root, "update-index", "--add", "--cacheinfo", "160000,"+commit+",third_party/fixture"); e != nil {
+	if e := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("/build/\n/references/\n"), 0644); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := b.git(root, "add", ".gitignore"); e != nil {
 		t.Fatal(e)
 	}
 	for _, pair := range [][2]string{{"user.name", "Fixture"}, {"user.email", "fixture@example.invalid"}} {
@@ -68,7 +72,13 @@ func fixture(t *testing.T) (*builder, relationship) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	r := relationship{Schema: "git-source-relationship/v1", Kind: "patched_third_party", Path: "third_party/fixture", Integration: "submodule", Upstream: upstream{URL: "https://example.invalid/upstream.git", Commit: commit}, Patches: []patch{{Order: 1, Path: "patches/fixture/0001.patch", SHA256: hash}}, ResultTree: &tree}
+	bundle := "patches/fixture"
+	buildPath := "build/fixture"
+	if e := os.WriteFile(filepath.Join(root, bundle, "apply_order.txt"), []byte("1 client/feat/update/provider.txt.patch "+hash+"\n"), 0644); e != nil {
+		t.Fatal(e)
+	}
+	r := relationship{Schema: "git-source-relationship/v5", Kind: "upstream_product_build", Path: buildPath, BuildPath: &buildPath, PatchBundle: &bundle, Integration: "build", Upstream: upstream{URL: "https://example.invalid/upstream.git", Commit: commit}, Patches: []patch{{Order: 1, Path: "patches/fixture/client/feat/update/provider.txt.patch", SHA256: hash}}, ResultTree: &tree}
+
 	return b, r
 }
 
@@ -82,7 +92,7 @@ func TestPatchReplayPreservesPristineSource(t *testing.T) {
 	if e != nil || string(got) != "patched\n" {
 		t.Fatalf("derived content %q %v", got, e)
 	}
-	got, e = os.ReadFile(filepath.Join(b.root, r.Path, "provider.txt"))
+	got, e = os.ReadFile(filepath.Join(b.referenceRoot, "fixture", "provider.txt"))
 	if e != nil || string(got) != "upstream\n" {
 		t.Fatalf("upstream modified %q %v", got, e)
 	}
@@ -98,7 +108,7 @@ func TestPatchReplayPreservesPristineSource(t *testing.T) {
 }
 
 func TestPatchAdmissionRejectsTamperAndDirtyUpstreamBeforeClone(t *testing.T) {
-	for _, name := range []string{"hash", "order", "traversal", "dirty", "parent-pin"} {
+	for _, name := range []string{"hash", "order", "traversal", "tracked-output", "upstream-pin"} {
 		t.Run(name, func(t *testing.T) {
 			b, r := fixture(t)
 			switch name {
@@ -108,20 +118,26 @@ func TestPatchAdmissionRejectsTamperAndDirtyUpstreamBeforeClone(t *testing.T) {
 				r.Patches[0].Order = 2
 			case "traversal":
 				r.Patches[0].Path = "patches/../../outside.patch"
-			case "dirty":
-				if e := os.WriteFile(filepath.Join(b.root, r.Path, "provider.txt"), []byte("dirty"), 0644); e != nil {
+			case "tracked-output":
+				path := filepath.Join(b.root, r.Path)
+				if e := os.MkdirAll(path, 0755); e != nil {
 					t.Fatal(e)
 				}
-			case "parent-pin":
-				if _, e := b.git(b.root, "update-index", "--add", "--cacheinfo", "160000,"+strings.Repeat("f", 40)+",third_party/fixture"); e != nil {
+				if e := os.WriteFile(filepath.Join(path, "injected"), []byte("tracked"), 0644); e != nil {
 					t.Fatal(e)
 				}
+				if _, e := b.git(b.root, "add", "--force", r.Path); e != nil {
+					t.Fatal(e)
+				}
+			case "upstream-pin":
+				r.Upstream.Commit = "malformed"
+
 			}
 			destination := b.sourcePath("fixture")
 			if e := b.materialize(r, destination); e == nil {
 				t.Fatal("invalid input accepted")
 			}
-			if _, e := os.Lstat(destination); !os.IsNotExist(e) {
+			if _, e := os.Lstat(filepath.Join(destination, ".git")); !os.IsNotExist(e) {
 				t.Fatal("materialized before input admission")
 			}
 		})
@@ -187,7 +203,7 @@ func TestAssetCopyRejectsSymlinkAndDigestTracksContent(t *testing.T) {
 
 func TestBuildWorkspaceOverridesAmbientWorkspace(t *testing.T) {
 	t.Setenv("GOWORK", "/tmp/ambient-workspace-that-must-not-be-used/go.work")
-	b := &builder{output: t.TempDir()}
+	b := &builder{output: t.TempDir(), withRclone: true}
 	got, e := b.command(t.TempDir(), "/usr/bin/printenv", "GOWORK")
 	if e != nil || got != "off" {
 		t.Fatalf("ambient workspace leaked: %q %v", got, e)
@@ -196,7 +212,7 @@ func TestBuildWorkspaceOverridesAmbientWorkspace(t *testing.T) {
 
 func TestShallowSourceUsesExplicitLocalClone(t *testing.T) {
 	b, r := fixture(t)
-	if e := os.WriteFile(filepath.Join(b.root, r.Path, ".git/shallow"), []byte(r.Upstream.Commit+"\n"), 0644); e != nil {
+	if e := os.WriteFile(filepath.Join(b.referenceRoot, "fixture", ".git/shallow"), []byte(r.Upstream.Commit+"\n"), 0644); e != nil {
 		t.Fatal(e)
 	}
 	if e := b.materialize(r, b.sourcePath("fixture")); e != nil {
@@ -222,12 +238,12 @@ func TestShallowSourceUsesExplicitLocalClone(t *testing.T) {
 }
 
 func TestImageCompositionsContainEmbeddedCPAndIndependentPlugins(t *testing.T) {
-	b := &builder{output: t.TempDir()}
+	b := &builder{output: t.TempDir(), withRclone: true}
 	dir := filepath.Join(b.output, "bin")
 	if e := os.MkdirAll(dir, 0755); e != nil {
 		t.Fatal(e)
 	}
-	for _, name := range []string{"storage-worker", "rclone", "transfer-reapi.so", "client-openlist.so", "client-rclone.so", "openlist-control-plane"} {
+	for _, name := range []string{"gateway", "storage-worker", "rclone", "transfer-reapi.so", "client-openlist.so", "client-rclone.so", "openlist-control-plane"} {
 		if e := os.WriteFile(filepath.Join(dir, name), []byte(name), 0644); e != nil {
 			t.Fatal(e)
 		}
@@ -236,17 +252,27 @@ func TestImageCompositionsContainEmbeddedCPAndIndependentPlugins(t *testing.T) {
 	if e := os.WriteFile(b.ca, []byte("public trust"), 0644); e != nil {
 		t.Fatal(e)
 	}
-	if e := b.imageInputs(); e != nil {
+	expected := map[string]string{}
+	for _, name := range []string{"gateway", "storage-worker", "rclone", "transfer-reapi.so", "client-openlist.so", "client-rclone.so", "openlist-control-plane"} {
+		expected[name], _ = hashFile(filepath.Join(dir, name))
+	}
+	expected["ca-certificates.crt"], _ = hashFile(b.ca)
+	if e := b.copyImageCompositions(filepath.Join(b.output, "image-inputs"), expected); e != nil {
 		t.Fatal(e)
 	}
-	for _, composition := range []string{"gateway", "control-plane"} {
+	for _, composition := range []string{"gateway", "control-plane", "bundle"} {
 		var manifest map[string]string
 		if e := readJSON(filepath.Join(b.output, "image-inputs", composition, "inputs.json"), &manifest); e != nil {
 			t.Fatal(e)
 		}
-		want := map[string]int{"gateway": 5, "control-plane": 7}[composition]
+		want := map[string]int{"gateway": 5, "control-plane": 2, "bundle": 6}[composition]
 		if len(manifest) != want {
 			t.Fatalf("%s has %d inputs", composition, len(manifest))
+		}
+		if composition == "bundle" {
+			if manifest["gateway"] == "" || manifest["storage-worker"] != "" || manifest["openlist-control-plane"] != "" {
+				t.Fatal("bundle is not a single gateway ELF")
+			}
 		}
 		for name, digest := range manifest {
 			actual, e := hashFile(filepath.Join(b.output, "image-inputs", composition, name))
@@ -266,13 +292,13 @@ func moduleFixture(t *testing.T) (*builder, string, modulePatchSeries) {
 			t.Fatal(e)
 		}
 	}
-	for _, root := range []string{filepath.Join(b.infra, "go/storage/cloud"), filepath.Join(b.infra, "go/storage/vfs"), filepath.Join(b.infra, "patches/rclone")} {
+	for _, root := range []string{filepath.Join(b.infra, "go/storage/vfs/remote"), filepath.Join(b.infra, "go/storage/vfs"), filepath.Join(b.infra, "go/patches/rclone")} {
 		if e := os.MkdirAll(root, 0755); e != nil {
 			t.Fatal(e)
 		}
 	}
 	body := "diff --git a/provider.txt b/provider.txt\n--- a/provider.txt\n+++ b/provider.txt\n@@ -1 +1 @@\n-upstream\n+patched\n"
-	patchPath := filepath.Join(b.infra, "patches/rclone/0001.patch")
+	patchPath := filepath.Join(b.infra, "go/patches/rclone/0001.patch")
 	if e := os.WriteFile(patchPath, []byte(body), 0644); e != nil {
 		t.Fatal(e)
 	}
@@ -280,8 +306,8 @@ func moduleFixture(t *testing.T) (*builder, string, modulePatchSeries) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	series := modulePatchSeries{Schema: "go-module-patch-series/v1", Module: rcloneModule, Patches: []patch{{Order: 1, Path: "patches/rclone/0001.patch", SHA256: hash}}}
-	if e = writeJSON(filepath.Join(b.infra, "patches/rclone/series.json"), series); e != nil {
+	series := modulePatchSeries{Schema: "go-module-patch-series/v1", Module: rcloneModule, Patches: []patch{{Order: 1, Path: "0001.patch", SHA256: hash}}}
+	if e = writeJSON(filepath.Join(b.infra, "go/patches/rclone/series.json"), series); e != nil {
 		t.Fatal(e)
 	}
 	selectVersion(t, b, cache, "v1.75.2")
@@ -400,17 +426,17 @@ func TestModuleAndPatchTamperingFailBeforeMaterialization(t *testing.T) {
 					t.Fatal(e)
 				}
 			case "patch":
-				if e := os.WriteFile(filepath.Join(b.infra, series.Patches[0].Path), []byte("unreviewed"), 0644); e != nil {
+				if e := os.WriteFile(filepath.Join(b.infra, "go/patches/rclone", series.Patches[0].Path), []byte("unreviewed"), 0644); e != nil {
 					t.Fatal(e)
 				}
 			case "order":
 				series.Patches[0].Order = 2
-				if e := writeJSON(filepath.Join(b.infra, "patches/rclone/series.json"), series); e != nil {
+				if e := writeJSON(filepath.Join(b.infra, "go/patches/rclone/series.json"), series); e != nil {
 					t.Fatal(e)
 				}
 			case "path":
 				series.Patches[0].Path = "patches/../escape.patch"
-				if e := writeJSON(filepath.Join(b.infra, "patches/rclone/series.json"), series); e != nil {
+				if e := writeJSON(filepath.Join(b.infra, "go/patches/rclone/series.json"), series); e != nil {
 					t.Fatal(e)
 				}
 			case "version-in-series":
@@ -418,7 +444,7 @@ func TestModuleAndPatchTamperingFailBeforeMaterialization(t *testing.T) {
 				var raw map[string]any
 				json.Unmarshal(data, &raw)
 				raw["version"] = "v9.9.9"
-				if e := writeJSON(filepath.Join(b.infra, "patches/rclone/series.json"), raw); e != nil {
+				if e := writeJSON(filepath.Join(b.infra, "go/patches/rclone/series.json"), raw); e != nil {
 					t.Fatal(e)
 				}
 			}
@@ -477,12 +503,15 @@ func TestNativeBuildIdentityTracksBackendPatchesAndRecipe(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
-	productInputs := map[string]string{"go/client.go": "package client\n", ".git-source-relationships/openlist.json": "product source\n", "patches/openlist/0001.patch": "OpenList patch\n", "build/toolchain.json": "tools\n", "Makefile": "flags\n", "BUILD.bazel": "actions\n", "MODULE.bazel": "modules\n", ".bazelrc": "remote\n"}
-	infraInputs := map[string]string{"go/storage/cloud/backend.go": "package cloud\n", "go/storage/vfs/cache.go": "package vfs\n", "third_party/huma/schema.go": "package huma\n"}
+	productInputs := map[string]string{"go/client.go": "package client\n", "go/go.mod": "module github.com/wignerStan/remote-storage-gateway/go\n\ngo 1.27.3\n\nrequire (\n github.com/wignerStan/rclone/go v0.1.1\n github.com/wignerStan/buildbarn-storage/go v0.1.0\n)\n", ".git-source-relationships/openlist.json": "product source\n", "patches/openlist/0001.patch": "OpenList patch\n", "build/toolchain.json": "tools\n", "Makefile": "flags\n"}
+	infraInputs := map[string]string{"go/storage/vfs/remote/backend.go": "package remote\n", "go/storage/vfs/cache.go": "package vfs\n", "go/schema.go": "package schema\n", "c/interop/plugins/bridge.c": "/* canonical ABI */\n"}
+	b.materializer, b.buildbarn = t.TempDir(), t.TempDir()
+	rcloneInputs := map[string]string{"go/go.mod": "module github.com/wignerStan/rclone/go\n\ngo 1.27.3\n", "go/box/config.go": "package box\n"}
+	buildbarnInputs := map[string]string{"go/go.mod": "module github.com/wignerStan/buildbarn-storage/go\n\ngo 1.27.3\n", "go/vfs/rclone/mount/config.go": "package box\n"}
 	for _, input := range []struct {
 		root   string
 		values map[string]string
-	}{{b.root, productInputs}, {b.infra, infraInputs}} {
+	}{{b.root, productInputs}, {b.infra, infraInputs}, {b.materializer, rcloneInputs}, {b.buildbarn, buildbarnInputs}} {
 		for name, content := range input.values {
 			path := filepath.Join(input.root, name)
 			if e := os.MkdirAll(filepath.Dir(path), 0755); e != nil {
@@ -493,7 +522,7 @@ func TestNativeBuildIdentityTracksBackendPatchesAndRecipe(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"go/go.mod", "go/go.sum", "patches/rclone/series.json", "patches/rclone/0001.patch"} {
+	for _, name := range []string{"go/go.mod", "go/go.sum", "go/patches/rclone/series.json", "go/patches/rclone/0001.patch"} {
 		data, e := os.ReadFile(filepath.Join(b.infra, name))
 		if e != nil {
 			t.Fatal(e)
@@ -511,7 +540,7 @@ func TestNativeBuildIdentityTracksBackendPatchesAndRecipe(t *testing.T) {
 	for _, input := range []struct {
 		label, root string
 		values      map[string]string
-	}{{"product", b.root, productInputs}, {"infra", b.infra, infraInputs}} {
+	}{{"product", b.root, productInputs}, {"infra", b.infra, infraInputs}, {"rclone", b.materializer, rcloneInputs}, {"buildbarn", b.buildbarn, buildbarnInputs}} {
 		for name, original := range input.values {
 			t.Run(input.label+"/"+name, func(t *testing.T) {
 				path := filepath.Join(input.root, name)
@@ -555,46 +584,99 @@ func TestDataPlaneRemainsIndependentVersionedModule(t *testing.T) {
 
 func fixtureHuma(t *testing.T, root string) string {
 	t.Helper()
-	write := func(relative, body string) {
-		t.Helper()
-		p := filepath.Join(root, relative)
-		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
 	original, _ := os.ReadFile(filepath.Join(root, "go/go.mod"))
 	if len(original) == 0 {
 		original = []byte("module fixture/sdk\n\ngo 1.27.3\n")
 	}
-	write("go/go.mod", string(original)+"\nreplace github.com/danielgtaylor/huma/v2 => ../third_party/huma\n")
-	write(".git-source-relationships/huma.json", `{"schema_version":"git-source-relationship/v1","kind":"third_party_implementation","path":"third_party/huma","owner":"fixture.schema","integration":"tracked","upstream":{"url":"https://example.invalid/huma","commit":"0000000000000000000000000000000000000000"},"patches":[],"public_api":"Fixture schema API","result_tree":null,"licenses":[]}`)
-	write("third_party/huma/go.mod", "module github.com/danielgtaylor/huma/v2\n\ngo 1.27.3\n")
-	write("third_party/huma/schema.go", "package huma\n")
-	return filepath.Join(root, "third_party/huma")
+	if err := os.MkdirAll(filepath.Join(root, "go"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go/go.mod"), append(original, []byte("\nrequire github.com/danielgtaylor/huma/v2 v2.40.0\n")...), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return "v2.40.0"
 }
-func TestSDKSchemaSourceRequiresOwnedDeclaredModule(t *testing.T) {
+func TestSDKSchemaSourceUsesOfficialModule(t *testing.T) {
 	root := t.TempDir()
-	module := fixtureHuma(t, root)
-	got, err := sdkHuma(root)
-	if err != nil || got != module {
+	want := fixtureHuma(t, root)
+	got, err := officialHuma(root)
+	if err != nil || got != want {
 		t.Fatal(got, err)
 	}
-	if err = os.WriteFile(filepath.Join(module, "go.mod"), []byte("module adjacent/wrong\n"), 0644); err != nil {
+	file := filepath.Join(root, "go/go.mod")
+	original, err := os.ReadFile(file)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = sdkHuma(root); err == nil {
-		t.Fatal("wrong module identity admitted")
-	}
-	if err = os.WriteFile(filepath.Join(module, "go.mod"), []byte("module github.com/danielgtaylor/huma/v2\n"), 0644); err != nil {
+	if err = os.WriteFile(file, append(original, []byte("\nreplace github.com/danielgtaylor/huma/v2 => ../third_party/huma\n")...), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(filepath.Join(root, "go/go.mod"), []byte("module fixture/sdk\n"), 0644); err != nil {
+	if _, err = officialHuma(root); err == nil {
+		t.Fatal("retired local schema implementation admitted")
+	}
+	if err = os.WriteFile(file, []byte("module fixture/sdk\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = sdkHuma(root); err == nil {
-		t.Fatal("undeclared neighboring source admitted")
+	if _, err = officialHuma(root); err == nil {
+		t.Fatal("unversioned schema implementation admitted")
+	}
+}
+func TestNativeOutputDoesNotRequireHistoricalTmpPrefix(t *testing.T) {
+	parent := t.TempDir()
+	source := filepath.Join(parent, "source")
+	if err := os.MkdirAll(source, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateOutput(filepath.Join(parent, "native-output"), source); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateOutput(filepath.Join(source, "output"), source); err == nil {
+		t.Fatal("output inside selected source accepted")
+	}
+	link := filepath.Join(parent, "linked-source")
+	if err := os.Symlink(source, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateOutput(filepath.Join(link, "output"), source); err == nil {
+		t.Fatal("symlink output inside selected source accepted")
+	}
+}
+
+func TestBuildRecipeDigestExcludesDisposableProductsOnly(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"remote-go-action.sh", "openlist/source.go", "openlist-ui/node_modules/dep.js"} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("first"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := treeDigest(root, "openlist", "openlist-ui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(root, "openlist/source.go"), []byte("generated"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	next, err := treeDigest(root, "openlist", "openlist-ui")
+	if err != nil || next != first {
+		t.Fatal("disposable materialization changed build recipe identity", err)
+	}
+	if err = os.WriteFile(filepath.Join(root, "remote-go-action.sh"), []byte("changed-recipe"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	next, err = treeDigest(root, "openlist", "openlist-ui")
+	if err != nil || next == first {
+		t.Fatal("changed build recipe kept identity", err)
+	}
+}
+
+func TestNativeEnvironmentUsesDeclaredProvenance(t *testing.T) {
+	t.Setenv("GOFLAGS", "-buildvcs=true")
+	b := &builder{}
+	if got := b.nativeEnvironment()["GOFLAGS"]; got != "-buildvcs=false" {
+		t.Fatalf("source capture and compilation must use declared provenance: %q", got)
 	}
 }
