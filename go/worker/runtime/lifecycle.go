@@ -8,8 +8,6 @@ import (
 	"io"
 	"net"
 	"net/url"
-	"os"
-	"path/filepath"
 
 	"github.com/wignerStan/infra/go/network/proxy/l7"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
@@ -74,20 +72,12 @@ func (r *Runtime) Start(ctx context.Context) error {
 	var listener net.Listener
 	var entry *control.Server
 	if r.process.ControlSocket != "" {
-		p := r.process.ControlSocket
-		parent, e := os.Stat(filepath.Dir(p))
-		if e != nil || !filepath.IsAbs(p) || len(p) > 107 || r.process.InstanceID == "" || !parent.IsDir() || parent.Mode().Perm()&0077 != 0 {
+		if r.process.InstanceID == "" {
 			return broker.ErrInvalid
 		}
-		if _, e = os.Lstat(p); !os.IsNotExist(e) {
-			return broker.ErrInvalid
-		}
-		listener, e = net.Listen("unix", p)
+		var e error
+		listener, e = control.ListenPrivateUnix("unix", r.process.ControlSocket)
 		if e != nil {
-			return e
-		}
-		if e = os.Chmod(p, 0600); e != nil {
-			listener.Close()
 			return e
 		}
 		entry, e = control.NewWorkerServer(r)
@@ -305,5 +295,9 @@ func (r *Runtime) Replace(ctx context.Context, name string, expected dp.Version,
 	if !allowed || selection.Name != name {
 		return dp.Version{}, broker.ErrInvalid
 	}
-	return r.Manager.Replace(ctx, expected, selection)
+	v, err := r.Manager.Replace(ctx, expected, selection)
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return dp.Version{}, broker.ErrRejected
+	}
+	return v, err
 }

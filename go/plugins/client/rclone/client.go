@@ -9,15 +9,17 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"strings"
 
-	"github.com/wignerStan/infra/go/storage/cloud"
+	rclonestore "github.com/wignerStan/infra/go/storage/blob/rclone"
 	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 )
 
 type Client struct {
-	store    *cloud.Store
-	readOnly bool
+	store       *rclonestore.Filesystem
+	readOnly    bool
+	unknownSize bool
 }
 
 func failure(err error) error {
@@ -41,8 +43,13 @@ func failure(err error) error {
 	}
 }
 
-func info(entry cloud.Entry) port.ObjectInfo {
-	return port.ObjectInfo{Path: entry.Path, Size: entry.Size, IsDir: entry.IsDir, ModTime: entry.ModTime}
+func info(entry rclonestore.Entry) port.ObjectInfo {
+	result := port.ObjectInfo{Path: entry.Path, Size: entry.Size, IsDir: entry.IsDir, ModTime: entry.ModTime, ContentType: entry.ContentType, Metadata: entry.Metadata}
+	if entry.Mode != nil {
+		mode := uint32(*entry.Mode)
+		result.Mode = &mode
+	}
+	return result
 }
 
 func (c *Client) Stat(ctx context.Context, ref port.ObjectRef) (port.ObjectInfo, error) {
@@ -59,15 +66,29 @@ func (c *Client) List(ctx context.Context, request port.ListRequest) (port.ListR
 	if request.Limit == 0 {
 		request.Limit = 100
 	}
+	directory, err := namespacePath(request.Path, true)
+	if err != nil {
+		return port.ListResult{}, err
+	}
 	after := ""
 	if request.Cursor != "" {
-		raw, err := base64.RawURLEncoding.DecodeString(request.Cursor)
-		if err != nil || len(raw) > 4096 {
+		if len(request.Cursor) > base64.RawURLEncoding.EncodedLen(4096) {
 			return port.ListResult{}, port.ErrInvalid
 		}
-		after = string(raw)
+		raw, err := base64.RawURLEncoding.Strict().DecodeString(request.Cursor)
+		if err != nil {
+			return port.ListResult{}, port.ErrInvalid
+		}
+		after, err = namespacePath(string(raw), false)
+		parent := path.Dir(after)
+		if parent == "." {
+			parent = ""
+		}
+		if err != nil || after != string(raw) || parent != directory {
+			return port.ListResult{}, port.ErrInvalid
+		}
 	}
-	entries, err := c.store.List(ctx, request.Path)
+	entries, err := c.store.List(ctx, directory)
 	if err != nil {
 		return port.ListResult{}, failure(err)
 	}
@@ -104,6 +125,9 @@ func (r readBody) Close() error { return failure(r.body.Close()) }
 
 func (c *Client) Put(ctx context.Context, request port.PutRequest) (port.PutResult, error) {
 	if c.readOnly {
+		return port.PutResult{}, port.ErrUnsupported
+	}
+	if request.Size == -1 && !c.unknownSize {
 		return port.PutResult{}, port.ErrUnsupported
 	}
 	entry, err := c.store.Put(ctx, request.Path, request.Body, request.Size, request.ContentType, request.Metadata)

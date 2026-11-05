@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
 
-	"github.com/wignerStan/infra/go/storage/cloud"
+	"github.com/rclone/rclone/fs"
+	rclonestore "github.com/wignerStan/infra/go/storage/blob/rclone"
 	port "github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/client"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor"
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
@@ -55,26 +57,32 @@ type DriveConfiguration struct {
 type S3ArchivePublicConfig struct {
 	S3PublicConfig
 	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+	SourceView  bool   `json:"source_view,omitempty"`
 }
 type S3ArchiveConfiguration struct {
 	S3Configuration
 	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+	SourceView  bool   `json:"source_view,omitempty"`
 }
 type WebDAVArchivePublicConfig struct {
 	WebDAVPublicConfig
 	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+	SourceView  bool   `json:"source_view,omitempty"`
 }
 type WebDAVArchiveConfiguration struct {
 	WebDAVConfiguration
 	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+	SourceView  bool   `json:"source_view,omitempty"`
 }
 type DriveArchivePublicConfig struct {
 	DrivePublicConfig
 	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+	SourceView  bool   `json:"source_view,omitempty"`
 }
 type DriveArchiveConfiguration struct {
 	DriveConfiguration
 	ArchivePath string `json:"archive_path" minLength:"1" maxLength:"4096"`
+	SourceView  bool   `json:"source_view,omitempty"`
 }
 
 // Factory retains the descriptor published by the plugin entry. Configuration
@@ -108,7 +116,13 @@ func credential(ctx context.Context, resolver port.SecretResolver, name string, 
 	if secret != nil {
 		defer secret.Close()
 	}
+	if canceled := ctx.Err(); canceled != nil {
+		return "", canceled
+	}
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", failure(err)
+		}
 		if !required && errors.Is(err, port.ErrNotFound) {
 			return "", nil
 		}
@@ -131,17 +145,30 @@ func endpoint(value string) bool {
 // Prepare decodes the operator-supplied public configuration and resolves only
 // the secrets declared by the exact plugin descriptor before backend admission.
 func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Candidate, error) {
-	if err := admission.Validate(f.Descriptor()); err != nil {
+	if f == nil || ctx == nil {
 		return nil, port.ErrInvalid
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	published := f.Descriptor()
+	if err := admission.Validate(published); err != nil || published.PluginID != PluginID || published.Contract != port.Contract || published.Runtime != "go" {
+		return nil, port.ErrInvalid
+	}
+	implementation, found := published.Implementation(input.ImplementationID)
+	if !found {
+		return nil, port.ErrUnsupported
 	}
 	values := map[string]string{}
 	var root string
+	var expectedSecrets map[string]bool
 	backend := strings.TrimPrefix(input.ImplementationID, "archive-")
 	archived := backend != input.ImplementationID
 	if archived && input.ImplementationID != "archive-s3" && input.ImplementationID != "archive-webdav" && input.ImplementationID != "archive-drive" {
 		return nil, port.ErrUnsupported
 	}
 	var archivePath string
+	var sourceView bool
 	switch backend {
 	case "s3":
 		var config S3PublicConfig
@@ -151,29 +178,21 @@ func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Ca
 			decode = admission.StrictJSON(input.Public, &ac)
 			config = ac.S3PublicConfig
 			archivePath = ac.ArchivePath
+			sourceView = ac.SourceView
 		} else {
 			decode = admission.StrictJSON(input.Public, &config)
 		}
-		if decode != nil || config.Region == "" || config.Bucket == "" || strings.Contains(config.Bucket, "/") || config.Endpoint != "" && !endpoint(config.Endpoint) {
+		bucket, bucketErr := namespacePath(config.Bucket, false)
+		prefix, rootErr := namespacePath(config.Root, true)
+		if decode != nil || config.Region == "" || bucketErr != nil || bucket != config.Bucket || path.Base(bucket) != bucket || rootErr != nil || config.Endpoint != "" && !endpoint(config.Endpoint) {
 			return nil, port.ErrInvalid
 		}
-		access, err := credential(ctx, input.Secrets, "access_key_id", true)
-		if err != nil {
-			return nil, err
+		values = map[string]string{"provider": "Other", "env_auth": "false", "region": config.Region, "endpoint": config.Endpoint, "force_path_style": strconv.FormatBool(config.ForcePathStyle), "upload_concurrency": "1", "chunk_size": "5Mi"}
+		root = bucket
+		if prefix != "" {
+			root += "/" + prefix
 		}
-		secret, err := credential(ctx, input.Secrets, "secret_access_key", true)
-		if err != nil {
-			return nil, err
-		}
-		token, err := credential(ctx, input.Secrets, "session_token", false)
-		if err != nil {
-			return nil, err
-		}
-		values = map[string]string{"provider": "Other", "env_auth": "false", "access_key_id": access, "secret_access_key": secret, "session_token": token, "region": config.Region, "endpoint": config.Endpoint, "force_path_style": strconv.FormatBool(config.ForcePathStyle), "upload_concurrency": "1", "chunk_size": "5Mi"}
-		root = config.Bucket
-		if config.Root != "" {
-			root += "/" + config.Root
-		}
+		expectedSecrets = map[string]bool{"access_key_id": true, "secret_access_key": true, "session_token": false}
 	case "webdav", "webdav-streaming":
 		backend = "webdav"
 		var config WebDAVPublicConfig
@@ -183,22 +202,21 @@ func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Ca
 			decode = admission.StrictJSON(input.Public, &ac)
 			config = ac.WebDAVPublicConfig
 			archivePath = ac.ArchivePath
+			sourceView = ac.SourceView
 		} else {
 			decode = admission.StrictJSON(input.Public, &config)
 		}
-		if decode != nil || !endpoint(config.URL) {
+		var rootErr error
+		root, rootErr = namespacePath(config.Root, true)
+		if decode != nil || !endpoint(config.URL) || rootErr != nil {
 			return nil, port.ErrInvalid
-		}
-		password, err := credential(ctx, input.Secrets, "password", false)
-		if err != nil {
-			return nil, err
 		}
 		vendor := "other"
 		if input.ImplementationID == "webdav-streaming" {
 			vendor = "rclone"
 		}
-		values = map[string]string{"url": config.URL, "user": config.Username, "pass": password, "vendor": vendor}
-		root = config.Root
+		values = map[string]string{"url": config.URL, "user": config.Username, "vendor": vendor}
+		expectedSecrets = map[string]bool{"password": false}
 	case "drive":
 		var config DrivePublicConfig
 		var decode error
@@ -207,52 +225,81 @@ func (f *Factory) Prepare(ctx context.Context, input port.PluginConfig) (port.Ca
 			decode = admission.StrictJSON(input.Public, &ac)
 			config = ac.DrivePublicConfig
 			archivePath = ac.ArchivePath
+			sourceView = ac.SourceView
 		} else {
 			decode = admission.StrictJSON(input.Public, &config)
 		}
-		if decode != nil {
+		var rootErr error
+		root, rootErr = namespacePath(config.Root, true)
+		if decode != nil || rootErr != nil {
 			return nil, port.ErrInvalid
 		}
-		token, err := credential(ctx, input.Secrets, "token", true)
-		if err != nil || !json.Valid([]byte(token)) {
-			return nil, port.ErrInvalid
-		}
-		secret, err := credential(ctx, input.Secrets, "client_secret", false)
-		if err != nil {
-			return nil, err
-		}
-		values = map[string]string{"root_folder_id": config.RootFolderID, "client_id": config.ClientID, "client_secret": secret, "token": token}
-		root = config.Root
+		values = map[string]string{"root_folder_id": config.RootFolderID, "client_id": config.ClientID}
+		expectedSecrets = map[string]bool{"token": true, "client_secret": false}
 	default:
 		return nil, port.ErrUnsupported
 	}
-	var archive *cloud.ArchiveOptions
+	var archive *rclonestore.ArchiveOptions
 	if archived {
-		if archivePath == "" || backend == "webdav-streaming" {
+		archive = &rclonestore.ArchiveOptions{Path: archivePath, SourceView: sourceView}
+	}
+	options := rclonestore.FilesystemOptions{Archive: archive}
+	if rclonestore.ValidateFilesystemOptions(options) != nil || !declaresSecrets(implementation, expectedSecrets) {
+		return nil, port.ErrInvalid
+	}
+	// Resolve in a stable order, only after all public admission checks. These
+	// names must match the implementation's published write-only schema fields.
+	for _, name := range []string{"access_key_id", "secret_access_key", "session_token", "password", "token", "client_secret"} {
+		required, declared := expectedSecrets[name]
+		if !declared {
+			continue
+		}
+		value, err := credential(ctx, input.Secrets, name, required)
+		if err != nil {
+			return nil, err
+		}
+		if name == "token" && !json.Valid([]byte(value)) {
 			return nil, port.ErrInvalid
 		}
-		archive = &cloud.ArchiveOptions{Path: archivePath}
+		if name == "password" {
+			name = "pass"
+		}
+		values[name] = value
 	}
-	store, err := cloud.New(ctx, cloud.Config{Backend: backend, Root: root, Parameters: values, Archive: archive})
+	store, err := rclonestore.OpenFilesystem(ctx, func(owned context.Context) (fs.Fs, error) {
+		return openBackend(owned, backend, root, values)
+	}, options)
 	if err != nil {
 		return nil, failure(err)
 	}
-	return &candidate{client: &Client{store: store, readOnly: archived}}, nil
+	return &candidate{client: &Client{store: store, readOnly: archived, unknownSize: !archived && input.ImplementationID != "webdav"}}, nil
 }
 
 type candidate struct {
-	mu                            sync.Mutex
-	client                        *Client
-	validated, published, aborted bool
+	mu                                        sync.Mutex
+	client                                    *Client
+	validated, validating, published, aborted bool
 }
 
 func (c *candidate) Validate(ctx context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.aborted || c.published {
+	if c.aborted || c.published || c.validating {
+		c.mu.Unlock()
 		return port.ErrInvalid
 	}
+	c.validating = true
+	c.validated = false
+	c.mu.Unlock()
 	_, err := c.client.List(ctx, port.ListRequest{Path: "/", Limit: 1})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.validating = false
+	if c.aborted {
+		if err != nil {
+			return err
+		}
+		return port.ErrInvalid
+	}
 	if err == nil {
 		c.validated = true
 	}
@@ -261,7 +308,7 @@ func (c *candidate) Validate(ctx context.Context) error {
 func (c *candidate) Publish() (port.Client, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.validated || c.published || c.aborted {
+	if !c.validated || c.validating || c.published || c.aborted {
 		return nil, port.ErrInvalid
 	}
 	c.published = true
@@ -269,10 +316,11 @@ func (c *candidate) Publish() (port.Client, error) {
 }
 func (c *candidate) Abort(ctx context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.published {
+		c.mu.Unlock()
 		return port.ErrInvalid
 	}
 	c.aborted = true
+	c.mu.Unlock()
 	return c.client.Close(ctx)
 }

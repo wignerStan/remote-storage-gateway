@@ -57,6 +57,9 @@ func testFactory(t *testing.T) *Factory {
 		{ID: "webdav", ConfigSchema: fixtureSchema[WebDAVConfiguration](t), Capabilities: []string{"stat", "list", "open", "put", "delete", "range", "list-pagination"}},
 		{ID: "webdav-streaming", ConfigSchema: fixtureSchema[WebDAVConfiguration](t), Capabilities: append([]string(nil), capabilities...)},
 		{ID: "drive", ConfigSchema: fixtureSchema[DriveConfiguration](t), Capabilities: append([]string(nil), capabilities...)},
+		{ID: "archive-s3", ConfigSchema: fixtureSchema[S3ArchiveConfiguration](t), Capabilities: []string{"stat", "list", "open", "range", "list-pagination"}},
+		{ID: "archive-webdav", ConfigSchema: fixtureSchema[WebDAVArchiveConfiguration](t), Capabilities: []string{"stat", "list", "open", "range", "list-pagination"}},
+		{ID: "archive-drive", ConfigSchema: fixtureSchema[DriveArchiveConfiguration](t), Capabilities: []string{"stat", "list", "open", "range", "list-pagination"}},
 	}})
 }
 func passwordResolver() port.SecretResolver {

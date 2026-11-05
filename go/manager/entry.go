@@ -10,6 +10,7 @@ import (
 func Run(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("manager", flag.ContinueOnError)
 	path := flags.String("config", "", "private bundle configuration file")
+	check := flags.Bool("check-config", false, "validate bundle assignments without starting processes")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -23,6 +24,9 @@ func Run(ctx context.Context, args []string) error {
 	defer m.Close(context.Background())
 	if len(m.config.ControlPlanes) == 0 || len(m.config.Workers) == 0 {
 		return fmt.Errorf("bundle requires independent control-plane and worker roles")
+	}
+	if *check {
+		return nil
 	}
 	startup, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	err = m.Start(startup)

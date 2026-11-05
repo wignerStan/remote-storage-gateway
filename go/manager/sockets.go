@@ -37,7 +37,8 @@ func (m *Manager) admitSockets() error {
 		}
 	}
 	for _, s := range m.config.Materializers {
-		paths[s.Config.ControlSocket] = true
+		_, socket, _ := s.assignment()
+		paths[socket] = true
 	}
 	for p := range paths {
 		if p != "" {

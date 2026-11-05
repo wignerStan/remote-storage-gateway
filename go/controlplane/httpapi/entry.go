@@ -109,6 +109,12 @@ func (e *Entry) Replace(ctx context.Context, in *ReplaceInput) (*Output[dp.Versi
 		if errors.Is(err, broker.ErrInvalid) {
 			return nil, reject(400)
 		}
+		if errors.Is(err, broker.ErrRejected) {
+			return nil, &Error{409, "desired worker state rejected"}
+		}
+		if errors.Is(err, broker.ErrUnavailable) {
+			return nil, reject(503)
+		}
 		return nil, reject(502)
 	}
 	return &Output[dp.Version]{v}, nil

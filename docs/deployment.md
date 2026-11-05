@@ -16,8 +16,9 @@ stdin. The CP receives metadata-only configuration; it imports no process box.
 
 Startup waits for CP readiness, then Worker readiness, then optional independent
 native rclone materializers. One Worker loads multiple approved `.so` plugins.
-Multiple CPs can manage distinct usages through explicit assignments; overlapping
-writers still use Worker generation CAS. The manager never makes a transfer
+Multiple CPs can manage distinct usages through explicit assignments. The manager
+rejects duplicate Worker assignments and reused CP data directories. Desired
+state still uses Worker generation CAS. The manager never makes a transfer
 decision. Shutdown retires VFS first, then drains Workers, then stops CPs. Any
 unexpected core role exit retires its group; an outer service/container owner
 restarts the complete bundle. It does not silently revive a partial generation.
@@ -35,7 +36,21 @@ in [gateway-runtime.md](gateway-runtime.md), including exact approved artifact
 and descriptor digests. `runtime_directory` must be a private child of the mounted
 runtime volume. Never put provider credentials in public config.
 
-`deploy/managed-gateway.yaml` selects `//:bundle_image` and this manager command.
+Validate the same-host assembly before starting it:
+
+```sh
+gateway manager --config /run/control-secrets/bundle.json --check-config
+```
+
+This checks role assignments, matching local control/broker/data endpoints,
+finite transfer policy, distinct CP data directories and materializer wiring.
+It does not start a child, contact providers or create runtime directories.
+Artifact admission, credentials, sockets and actual readiness are checked by
+their owning runtime during startup. A complete bundle assigns every local
+Worker to exactly one CP; standalone supervision without a local CP remains
+available to an external controller.
+
+`deploy/managed-gateway.yaml` selects an explicit `BUNDLE_IMAGE` and this manager command.
 The public route ends at Worker TLS. CP management and optional VFS listeners
 stay private. The CP SQLite PVC has exactly one writer.
 
@@ -93,11 +108,17 @@ must not share their database file across replicas.
 
 ## Build and evidence
 
-`make all` uses the existing shared Buildbarn Go/UI graph. `make images` includes
-`//:bundle_image`, separate Worker and CP images and the independent rclone image;
-OCI assembly uses `rules_img`. Source inputs and toolchains use the shared
-AC/CAS, with no per-task Bazel user root or persistent private compiler cache.
+Follow the [native build instructions](../build/README.md) for local Go and
+Node/pnpm compilation. The native entry prepares current source dependencies,
+embeds the source-built UI and emits real ELF/DSO artifacts and input receipts.
+Optional rclone is built through its independent repository. No Bazel command or
+GitHub Actions workflow is part of this entry. Historical OCI recipes and
+candidate receipts are retained as history, not current native build evidence.
 
 A successful source build alone does not prove a live deployment. Validate the
 actual executable identity/PIDs, CP database readiness, public TLS/authentication,
 child-failure cleanup and remote mTLS denial paths before replacing a service.
+The template's public `/ping` probe verifies the Worker-to-CP management route;
+it is not an independent signal that optional VFS activation has completed.
+The Manager's internal readiness joins all configured roles and retires the
+bundle on role failure.

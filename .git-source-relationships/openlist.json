@@ -11,7 +11,7 @@
   "dependency_manifest": null,
   "patch_bundle": "patches/openlist",
   "public_api": "Worker client/v1 native plugin, shared S3 initializer, context-aware WebDAV kernel, managed metadata-only OpenList control-plane HTTP API",
-  "result_tree": "a0aeb5f267daacdf9498bf7c2d5637805bc59124",
+  "result_tree": "829af6cc26b82abbe1f2643a515afeb4952b91f4",
   "build_path": "build/openlist",
   "licenses": [
     "build/openlist/LICENSE"
