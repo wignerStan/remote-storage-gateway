@@ -140,3 +140,53 @@ func TestOCIAdmissionRejectsChangedOrSymlinkCLIAndPreservesPreviousInputs(t *tes
 		})
 	}
 }
+
+// Clear both sides of an otherwise coherent owner binding. Matching empty
+// strings must not turn an owner into the packager's optional expected="" case.
+func TestOCIAdmissionRejectsMissingOwnerIdentityEvenWhenReceiptsAgree(t *testing.T) {
+	for _, kind := range []string{"commit", "digest", "malformed-digest"} {
+		t.Run(kind, func(t *testing.T) {
+			b := ociFixture(t)
+			var owner rcloneNativeOwner
+			ownerPath := filepath.Join(b.rcloneBuild, "receipts/rclone.json")
+			if err := readJSON(ownerPath, &owner); err != nil {
+				t.Fatal(err)
+			}
+			inputPath := filepath.Join(b.rcloneBuild, "build-inputs/manifest.json")
+			var inputs remoteInputManifest
+			if err := readJSON(inputPath, &inputs); err != nil {
+				t.Fatal(err)
+			}
+			actionPath := filepath.Join(b.rcloneBuild, "receipts/rclone.build.json")
+			var action map[string]string
+			if err := readJSON(actionPath, &action); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "commit" {
+				owner.Product.Commit = ""
+				inputs.Config["product_commit"] = ""
+			} else {
+				digest := ""
+				if kind == "malformed-digest" {
+					digest = "sha256:not-a-content-digest"
+				}
+				owner.BuildDigest = digest
+				inputs.Config["rclone_digest"] = digest
+				action["native_build_digest"] = digest
+			}
+			if err := writeJSON(inputPath, inputs); err != nil {
+				t.Fatal(err)
+			}
+			owner.InputManifestSHA256, _ = hashFile(inputPath)
+			if err := writeJSON(ownerPath, owner); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeJSON(actionPath, action); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := b.ociSelection(true); err == nil {
+				t.Fatal("missing/malformed independent owner identity admitted")
+			}
+		})
+	}
+}

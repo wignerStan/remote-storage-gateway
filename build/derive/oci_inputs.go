@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/mod/semver"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -56,6 +58,17 @@ type rcloneNativeOwner struct {
 	Source              json.RawMessage   `json:"source"`
 }
 
+func ociHex(value string, size int) bool {
+	if len(value) != size || strings.ToLower(value) != value {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+func ociCommit(value string) bool { return ociHex(value, 40) || ociHex(value, 64) }
+func ociDigest(value string) bool {
+	return strings.HasPrefix(value, "sha256:") && ociHex(strings.TrimPrefix(value, "sha256:"), 64)
+}
 func measureOCIFile(name string) (ociFile, error) {
 	info, err := os.Lstat(name)
 	if err != nil {
@@ -94,7 +107,7 @@ func (b *builder) ociSelection(verifySource bool) (ociAssembly, error) {
 	if err = readJSONLimit(gatewayManifest, &gatewayInputs, 128<<20); err != nil {
 		return result, err
 	}
-	if gatewayInputs.Schema != "storage-gateway/build-inputs/v1" || len(gatewayInputs.Files) == 0 || len(gatewayInputs.Config["product_commit"]) != 40 || gatewayInputs.Config["gateway_digest"] == "" || gatewayInputs.Config["rclone_version"] == "" {
+	if gatewayInputs.Schema != "storage-gateway/build-inputs/v1" || len(gatewayInputs.Files) == 0 || !ociCommit(gatewayInputs.Config["product_commit"]) || !ociDigest(gatewayInputs.Config["gateway_digest"]) || !semver.IsValid(gatewayInputs.Config["rclone_version"]) {
 		return result, errors.New("invalid Gateway owner source manifest")
 	}
 	// Reuse the native release contract against its original manifest, not the
@@ -156,7 +169,7 @@ func (b *builder) ociSelection(verifySource bool) (ociAssembly, error) {
 	if err != nil {
 		return result, err
 	}
-	if owner.Schema != "rclone-native-build/v1" || owner.Execution != "local-go" || owner.GoVersion != "1.27.3" || owner.Product.Dirty != "" || owner.Binary != cli.Path || owner.SHA256 != cli.SHA256 || owner.InputManifestSHA256 != result.Rclone.Inputs.SHA256 || materializerInputs.Schema != "rclone/build-inputs/v1" || len(materializerInputs.Files) == 0 || owner.Product.Commit != materializerInputs.Config["product_commit"] || owner.BuildDigest != materializerInputs.Config["rclone_digest"] || action.Schema != "rclone/native-build/v1" || action.SHA256 != cli.SHA256 || action.BuildDigest != owner.BuildDigest || action.GoVersion != owner.GoVersion || action.Version != gatewayInputs.Config["rclone_version"] || action.Version != materializerInputs.Config["rclone_version"] {
+	if !ociCommit(owner.Product.Commit) || !ociDigest(owner.BuildDigest) || !semver.IsValid(action.Version) || owner.Schema != "rclone-native-build/v1" || owner.Execution != "local-go" || owner.GoVersion != "1.27.3" || owner.Product.Dirty != "" || owner.Binary != cli.Path || owner.SHA256 != cli.SHA256 || owner.InputManifestSHA256 != result.Rclone.Inputs.SHA256 || materializerInputs.Schema != "rclone/build-inputs/v1" || len(materializerInputs.Files) == 0 || owner.Product.Commit != materializerInputs.Config["product_commit"] || owner.BuildDigest != materializerInputs.Config["rclone_digest"] || action.Schema != "rclone/native-build/v1" || action.SHA256 != cli.SHA256 || action.BuildDigest != owner.BuildDigest || action.GoVersion != owner.GoVersion || action.Version != gatewayInputs.Config["rclone_version"] || action.Version != materializerInputs.Config["rclone_version"] {
 		return result, errors.New("independent rclone owner, action, source manifest or ELF differ")
 	}
 	var moduleSource map[string]any
