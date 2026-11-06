@@ -55,6 +55,7 @@ type toolchain struct {
 }
 type builder struct {
 	nativeSDKRoot, pkgConfig                           string
+	gatewayBuild, gatewaySource, rcloneBuild           string
 	root, output, infra, dataPlane, materializer, mise string
 	buildbarn                                          string
 	goBinary, nodeBinary, pnpmBinary                   string
@@ -341,6 +342,9 @@ func main() {
 	flag.BoolVar(&b.withRclone, "with-rclone", false, "also compile the independent rclone executable")
 	flag.StringVar(&b.ca, "ca-bundle", "/etc/ssl/certs/ca-certificates.crt", "public runtime CA bundle")
 	flag.BoolVar(&b.release, "release", false, "require clean exact product and Infra source commits")
+	flag.StringVar(&b.gatewayBuild, "gateway-native-build", "", "completed original Gateway native build directory for OCI-only assembly")
+	flag.StringVar(&b.gatewaySource, "gateway-native-source", "", "clean source checkout recorded by the original Gateway build")
+	flag.StringVar(&b.rcloneBuild, "rclone-native-build", "", "completed independent rclone native build directory for OCI-only assembly")
 	flag.Parse()
 	if flag.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "expected one stage: source, ui, cp, plugin, test, inputs")
@@ -689,6 +693,9 @@ func (b *builder) verifyDerived(r relationship) error {
 	return nil
 }
 func (b *builder) run(stage string) error {
+	if stage == "oci-inputs" {
+		return b.ociInputs()
+	}
 	var e error
 	if strings.TrimSpace(b.buildbarn) == "" {
 		return errors.New("select the BuildBarn source materializer module with -buildbarn-root (BUILDBARN_ROOT)")
