@@ -165,3 +165,55 @@ manifest/checksums and rebases the ordered patch inventory. Rebuild and verify
 source UI, ELFs, native plugins and optional VFS together whenever a cross-owner
 contract changes. Published versions and PR promotion remain owned by their
 repositories, not by the build recipe.
+
+## OCI from completed native owners
+
+The supported OCI-only entry is `make images`. It does not depend on `all`,
+rebuild the UI/programs or select the historical top-level remote Go graph.
+It uses the product-owned `build/oci` Bazel module, `rules_img` 0.3.23, and the
+unified Incus Buildbarn executor/CAS. No alternate builder or private cache is
+started.
+
+Select the original completed seven-artifact Gateway build, its clean exact
+source checkout, and an independently completed rclone owner build/source:
+
+```sh
+make images \
+  GO=/path/to/go BAZEL=/path/to/bazel \
+  BUILD_DIR=/external/native-gateway-build \
+  OCI_GOWORK=/external/native-gateway-build/bootstrap/go.work \
+  OCI_BUILD_DIR=/external/oci-assembly \
+  GATEWAY_NATIVE_BUILD=/external/native-gateway-build \
+  GATEWAY_NATIVE_SOURCE=/sources/original-gateway \
+  RCLONE_NATIVE_BUILD=/external/native-rclone-build \
+  RCLONE_ROOT=/sources/original-rclone
+```
+
+`make oci-inputs` performs
+only admission and emits `OCI_BUILD_DIR/oci-inputs/assembly.json`. Both entries
+require reviewed clean source checkouts. The Go workspace selects the current
+Infra build/source capability; it does not modify an original owner receipt.
+The ordinary native build and independent rclone build retain their own
+source/module and native SDK publication requirements.
+
+Admission preserves the Gateway's original `independent_rclone: false` receipt
+and the independent CLI's separate receipt, source, digest and `local-go`
+execution. It checks every native artifact, both captured source manifests and
+the CLI owner/action records. A later CLI is compatible with the linked Box API
+only when every captured API file still matches its actual selected source.
+The assembly receipt is distinct from a native release. No `WITH_RCLONE=1`
+receipt is fabricated and no binary or UI build is implied by image assembly.
+
+The OCI module references the admitted program files directly; only the two
+small original owner receipts and the assembly manifest are staged. Each image
+contains those provenance records and the public CA. Bundle contains one
+manager/self-exec ELF, the independent CLI and all three native plugins; Worker,
+CP and VFS also have independent images. The manager's control/worker roles and
+TLS configuration remain operator-owned inputs. Image construction does not
+apply a workload or change any endpoint/pool.
+
+Bazel's `oci_tarball` output group exports the built images. Keep the execution log,
+manifest/config/layer digests, exact program hashes, owner receipts and build
+source identity. A warm CAS hit or remote OCI action must not be reported as a
+remote native compilation. Reproducible image archives follow the normal cold
+artifact retention policy; CAS/AC still share the Incus-local hot storage.
