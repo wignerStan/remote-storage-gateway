@@ -223,6 +223,11 @@ func (m *Manager) Start(ctx context.Context) (err error) {
 			m.beginClose()
 		}
 	}()
+	// Cancellation must be admitted before filesystem changes, including bundles
+	// without children (which never call the supervisor's context checks).
+	if err = startup.Err(); err != nil {
+		return err
+	}
 	if m.config.RuntimeDirectory != "" {
 		if err = control.PreparePrivateDirectory(m.config.RuntimeDirectory); err != nil {
 			return err
@@ -271,6 +276,9 @@ func (m *Manager) Start(ctx context.Context) (err error) {
 		if err != nil {
 			return fmt.Errorf("materializer %s: %w", id, err)
 		}
+	}
+	if err = startup.Err(); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	m.ready = true
