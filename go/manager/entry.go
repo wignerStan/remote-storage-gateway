@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -33,6 +34,12 @@ func Run(ctx context.Context, args []string) error {
 	cancel()
 	if err != nil {
 		return err
+	}
+	// Publish only after the manager has completed every role's startup and
+	// materializer activation. A child's open listener is an earlier lifecycle
+	// phase and cannot stand in for the bundle's own readiness.
+	if _, err := fmt.Fprintln(os.Stdout, "storage-gateway manager ready"); err != nil {
+		return fmt.Errorf("publish manager readiness: %w", err)
 	}
 	// Any failed role retires the bundle; the host/container owner restarts it.
 	tick := time.NewTicker(100 * time.Millisecond)

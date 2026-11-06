@@ -21,24 +21,29 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/wignerStan/network-data-plane-worker/go/contracts/plugin/descriptor/admission"
+	storageipc "github.com/wignerStan/network-data-plane-worker/go/contracts/storageipc"
 	dp "github.com/wignerStan/network-data-plane-worker/go/contracts/worker"
+	rclonebox "github.com/wignerStan/rclone/go/box"
 	cpconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/control"
+	"github.com/wignerStan/remote-storage-gateway/go/contracts/control/broker"
 	workerconfig "github.com/wignerStan/remote-storage-gateway/go/contracts/worker"
+	control "github.com/wignerStan/remote-storage-gateway/go/control/ttrpc"
 	bundle "github.com/wignerStan/remote-storage-gateway/go/manager"
 	"golang.org/x/net/webdav"
 )
 
-// These are acceptance tests of the installed, remotely built product. They
-// deliberately never build a replacement executable or plugin on the test host.
+// These acceptance tests consume installed source-built owner artifacts. They
+// never synthesize a replacement executable, plugin or UI inside the fixture.
 func TestGatewayBundleAcceptance(t *testing.T) {
 	binary, plugin := os.Getenv("REMOTE_GATEWAY_BUNDLE_BIN"), os.Getenv("REMOTE_GATEWAY_OPENLIST_PLUGIN")
 	if binary == "" || plugin == "" {
-		t.Skip("actual bundle acceptance requires REMOTE_GATEWAY_BUNDLE_BIN and REMOTE_GATEWAY_OPENLIST_PLUGIN from the Buildbarn/Incus producer; no local build fallback")
+		t.Skip("bundle acceptance requires installed REMOTE_GATEWAY_BUNDLE_BIN and REMOTE_GATEWAY_OPENLIST_PLUGIN owner artifacts; no fixture build fallback")
 	}
 	for _, path := range []string{binary, plugin} {
 		if !filepath.IsAbs(path) {
@@ -129,52 +134,192 @@ func TestGatewayBundleAcceptance(t *testing.T) {
 			t.Fatalf("approved descriptor bytes changed: status=%d bytes=%d", status, len(body))
 		}
 
-		// Hold a real provider read in flight while SIGTERM retires the manager.
-		// Reaping alone is insufficient: the admitted exchange must finish first.
-		type readResult struct {
-			status int
-			body   []byte
-			err    error
+		f.drainSlowRead(t, p, children)
+	})
+
+	t.Run("same_ELF_control_worker_and_independent_VFS_tiny_files", func(t *testing.T) {
+		rcloneBinary := os.Getenv("REMOTE_GATEWAY_RCLONE_BIN")
+		if rcloneBinary == "" {
+			t.Skip("requires the independently source-built rclone owner artifact")
 		}
-		read := make(chan readResult, 1)
-		go func() {
-			request, _ := http.NewRequest(http.MethodGet, f.publicURL+"/dav/files/slow", nil)
-			request.SetBasicAuth("operator", bundlePassword)
-			response, err := f.client.Do(request)
-			if err != nil {
-				read <- readResult{err: err}
-				return
+		if info, e := os.Stat(rcloneBinary); !filepath.IsAbs(rcloneBinary) || e != nil || !info.Mode().IsRegular() {
+			t.Fatalf("invalid rclone owner artifact %q: %v", rcloneBinary, e)
+		}
+		f := newBundleFixture(t, binary, artifact)
+		f.enableMaterializer(t, rcloneBinary)
+		const files, concurrency = 128, 8
+		contents := make(map[string][]byte, files)
+		directory := filepath.Join(f.dir, "origin", "tiny")
+		if e := os.Mkdir(directory, 0700); e != nil {
+			t.Fatal(e)
+		}
+		for i := range files {
+			name := fmt.Sprintf("file-%03d", i)
+			contents[name] = []byte(fmt.Sprintf("bundle-tiny-%03d:%s\n", i, strings.Repeat("x", i%32+1)))
+			if e := os.WriteFile(filepath.Join(directory, name), contents[name], 0600); e != nil {
+				t.Fatal(e)
 			}
-			body, err := io.ReadAll(response.Body)
-			response.Body.Close()
-			read <- readResult{response.StatusCode, body, err}
-		}()
-		select {
-		case <-f.readStarted:
-		case <-time.After(10 * time.Second):
-			t.Fatal("provider streaming read did not start")
 		}
-		if err = p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			t.Fatal(err)
+		p := f.start(t)
+		children := f.ready(t, p)
+		f.assertDatabase(t)
+		if len(children) != 3 || children["vfs"] == 0 {
+			t.Fatalf("manager, CP, Worker and VFS did not form four independent processes: %+v", children)
 		}
-		select {
-		case <-p.done:
-			t.Fatal("bundle exited before the admitted provider read drained")
-		case <-time.After(150 * time.Millisecond):
-		}
-		f.releaseRead()
-		select {
-		case result := <-read:
-			if result.err != nil || result.status != http.StatusOK || !bytes.Equal(result.body, f.payload) {
-				t.Fatalf("SIGTERM truncated admitted provider read: status=%d bytes=%d error=%v", result.status, len(result.body), result.err)
+		t.Logf("four processes manager=%d control-plane=%d worker=%d independent-vfs=%d", p.cmd.Process.Pid, children["control-plane"], children["worker"], children["vfs"])
+		// The real CP is metadata-only; direct object routes remain absent and cannot
+		// reach the origin. Public object traffic still enters the Worker's TLS port.
+		before := f.originReads.Load()
+		for _, path := range []string{"/dav/files/tiny/file-000", "/api/fs/get", "/api/fs/list"} {
+			method := http.MethodGet
+			if strings.HasPrefix(path, "/api/fs/") {
+				method = http.MethodPost
 			}
-		case <-time.After(15 * time.Second):
-			t.Fatal("admitted provider read failed to drain")
+			status, _ := f.request(t, method, f.controlURL+path, true)
+			if status != http.StatusNotFound {
+				t.Fatalf("CP exposed object route %s: %d", path, status)
+			}
 		}
-		if err := p.wait(t, 35*time.Second); err != nil {
-			t.Fatalf("SIGTERM exit: %v; %s", err, p.diagnostics())
+		for name := range contents {
+			status, _ := f.request(t, http.MethodHead, f.publicURL+"/dav/files/tiny/"+name, true)
+			if status != http.StatusOK {
+				t.Fatalf("tiny metadata %s: %d", name, status)
+			}
+		}
+		if got := f.originReads.Load(); got != before {
+			t.Fatalf("metadata caused origin body reads: before=%d after=%d", before, got)
+		}
+		pass := func() {
+			t.Helper()
+			jobs := make(chan string, files)
+			failures := make(chan error, files)
+			var joined sync.WaitGroup
+			for range concurrency {
+				joined.Add(1)
+				go func() {
+					defer joined.Done()
+					for name := range jobs {
+						request, e := http.NewRequestWithContext(t.Context(), http.MethodGet, f.publicURL+"/dav/files/tiny/"+name, nil)
+						if e != nil {
+							failures <- e
+							continue
+						}
+						request.SetBasicAuth("operator", bundlePassword)
+						response, e := f.client.Do(request)
+						if e != nil {
+							failures <- e
+							continue
+						}
+						body, readErr := io.ReadAll(io.LimitReader(response.Body, 4096))
+						closeErr := response.Body.Close()
+						if response.StatusCode != http.StatusOK || readErr != nil || closeErr != nil || !bytes.Equal(body, contents[name]) {
+							failures <- fmt.Errorf("tiny %s: status=%d bytes=%d read=%v close=%v", name, response.StatusCode, len(body), readErr, closeErr)
+						}
+					}
+				}()
+			}
+			for name := range contents {
+				jobs <- name
+			}
+			close(jobs)
+			joined.Wait()
+			close(failures)
+			for e := range failures {
+				t.Error(e)
+			}
+			if t.Failed() {
+				t.FailNow()
+			}
+		}
+		pass()
+		cold := f.originReads.Load()
+		if cold-before != files {
+			t.Fatalf("cold pass origin reads=%d; expected one each for %d distinct files", cold-before, files)
+		}
+		pass()
+		if after := f.originReads.Load(); after != cold {
+			t.Fatalf("hot pass bypassed the independent cache: before=%d after=%d", cold, after)
+		}
+		if f.originActive.Load() != 0 || f.originPeak.Load() > concurrency {
+			t.Fatalf("origin work escaped capacity: active=%d peak=%d limit=%d", f.originActive.Load(), f.originPeak.Load(), concurrency)
+		}
+		t.Logf("tiny-files=%d cold-origin-GETs=%d hot-extra-origin-GETs=0 peak=%d limit=%d", files, cold-before, f.originPeak.Load(), concurrency)
+		status, body := f.request(t, http.MethodGet, f.publicURL+"/remote-dav/files/tiny/file-000", true)
+		if status != http.StatusOK || !bytes.Equal(body, contents["file-000"]) || f.originReads.Load() != cold+1 {
+			t.Fatal("raw alias failed to bypass the independent cache")
+		}
+		// Replacement of the raw generation must also invalidate a cached hit. The
+		// old materializer cannot resurrect its former grant or fall back to raw I/O.
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		manager, e := control.DialWorker(ctx, f.config.Workers[0].Config.ControlSocket)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer manager.Close(context.Background())
+		states, e := manager.Observed(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		var raw dp.Version
+		for _, state := range states {
+			if state.Name == "origin" && state.Accepting {
+				raw = state.Version
+			}
+		}
+		if raw.Generation == 0 {
+			t.Fatal("raw origin generation was not observed")
+		}
+		selection := f.config.Workers[0].Config.Worker.Clients[0]
+		replacement, e := manager.Replace(ctx, "origin", raw, selection)
+		if e != nil || replacement == raw {
+			t.Fatalf("raw generation replacement: %+v %v", replacement, e)
+		}
+		beforeRetiredRead := f.originReads.Load()
+		status, body = f.request(t, http.MethodGet, f.publicURL+"/dav/files/tiny/file-000", true)
+		if status != http.StatusServiceUnavailable || string(body) != "Client unavailable\n" || f.originReads.Load() != beforeRetiredRead {
+			t.Fatalf("retired raw session did not retain the unavailable contract: status=%d body=%q reads=%d", status, body, f.originReads.Load()-beforeRetiredRead)
+		}
+		status, body = f.request(t, http.MethodGet, f.publicURL+"/remote-dav/files/tiny/file-000", true)
+		if status != http.StatusOK || !bytes.Equal(body, contents["file-000"]) || f.originReads.Load() != beforeRetiredRead+1 {
+			t.Fatal("fresh raw generation did not remain independently usable")
+		}
+		status, _ = f.request(t, http.MethodGet, f.publicURL+"/healthz", false)
+		if status != http.StatusNoContent {
+			t.Fatalf("Worker became unhealthy after raw replacement: %d", status)
+		}
+		status, body = f.request(t, http.MethodGet, f.controlURL+"/ping", false)
+		if status != http.StatusOK || string(body) != "pong" {
+			t.Fatalf("CP became unhealthy after raw replacement: status=%d body=%q", status, body)
+		}
+		if e := p.cmd.Process.Signal(syscall.SIGTERM); e != nil {
+			t.Fatal(e)
+		}
+		if e := p.wait(t, 35*time.Second); e != nil {
+			t.Fatalf("four-process bundle SIGTERM: %v; %s", e, p.diagnostics())
 		}
 		f.assertRetired(t, children)
+	})
+
+	t.Run("same_ELF_control_worker_and_independent_VFS_cold_SIGTERM_drain", func(t *testing.T) {
+		rcloneBinary := os.Getenv("REMOTE_GATEWAY_RCLONE_BIN")
+		if rcloneBinary == "" {
+			t.Skip("requires the independently source-built rclone owner artifact")
+		}
+		if info, e := os.Stat(rcloneBinary); !filepath.IsAbs(rcloneBinary) || e != nil || !info.Mode().IsRegular() {
+			t.Fatalf("invalid rclone owner artifact %q: %v", rcloneBinary, e)
+		}
+		f := newBundleFixture(t, binary, artifact)
+		f.enableMaterializer(t, rcloneBinary)
+		p := f.start(t)
+		children := f.ready(t, p)
+		if children["vfs"] == 0 || len(children) != 3 {
+			t.Fatalf("independent VFS process absent: %+v", children)
+		}
+		// Readiness warms only object. The first slow request therefore traverses
+		// Worker -> native VFS -> Worker IPC/shared-memory -> actual origin.
+		f.drainSlowRead(t, p, children)
+		t.Logf("four-process cold VFS read completed through SIGTERM before all children and owned sockets retired")
 	})
 
 	t.Run("worker_startup_failure_reaps_control_plane", func(t *testing.T) {
@@ -229,15 +374,66 @@ func TestGatewayBundleAcceptance(t *testing.T) {
 	}
 }
 
+func (f *bundleFixture) drainSlowRead(t *testing.T, p *bundleProcess, children map[string]int) {
+	t.Helper()
+	// Hold a real provider read in flight while SIGTERM retires the manager.
+	// Reaping alone is insufficient: the admitted exchange must finish first.
+	type readResult struct {
+		status int
+		body   []byte
+		err    error
+	}
+	read := make(chan readResult, 1)
+	go func() {
+		request, _ := http.NewRequest(http.MethodGet, f.publicURL+"/dav/files/slow", nil)
+		request.SetBasicAuth("operator", bundlePassword)
+		response, err := f.client.Do(request)
+		if err != nil {
+			read <- readResult{err: err}
+			return
+		}
+		body, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		read <- readResult{response.StatusCode, body, err}
+	}()
+	select {
+	case <-f.readStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("provider streaming read did not start")
+	}
+	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.done:
+		t.Fatal("bundle exited before the admitted provider read drained")
+	case <-time.After(150 * time.Millisecond):
+	}
+	f.releaseRead()
+	select {
+	case result := <-read:
+		if result.err != nil || result.status != http.StatusOK || !bytes.Equal(result.body, f.payload) {
+			t.Fatalf("SIGTERM truncated admitted provider read: status=%d bytes=%d error=%v", result.status, len(result.body), result.err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("admitted provider read failed to drain")
+	}
+	if err := p.wait(t, 35*time.Second); err != nil {
+		t.Fatalf("SIGTERM exit: %v; %s", err, p.diagnostics())
+	}
+	f.assertRetired(t, children)
+}
+
 const bundlePassword = "bundle-private-ingress-password"
 
 type bundleFixture struct {
-	dir, binary, publicURL, controlURL string
-	config                             bundle.Config
-	client                             *http.Client
-	payload                            []byte
-	readStarted                        chan struct{}
-	releaseRead                        func()
+	dir, binary, publicURL, controlURL    string
+	config                                bundle.Config
+	client                                *http.Client
+	payload                               []byte
+	readStarted                           chan struct{}
+	releaseRead                           func()
+	originReads, originActive, originPeak atomic.Int32
 }
 
 func newBundleFixture(t *testing.T, binary string, artifact dp.Artifact) *bundleFixture {
@@ -262,6 +458,16 @@ func newBundleFixture(t *testing.T, binary string, artifact dp.Artifact) *bundle
 	}
 	dav := &webdav.Handler{FileSystem: webdav.Dir(originDir), LockSystem: webdav.NewMemLS()}
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			f.originReads.Add(1)
+			active := f.originActive.Add(1)
+			defer f.originActive.Add(-1)
+			for peak := f.originPeak.Load(); active > peak; peak = f.originPeak.Load() {
+				if f.originPeak.CompareAndSwap(peak, active) {
+					break
+				}
+			}
+		}
 		if r.Header.Get("Authorization") != "" {
 			t.Error("Worker ingress credentials leaked to origin")
 		}
@@ -322,6 +528,71 @@ func newBundleFixture(t *testing.T, binary string, artifact dp.Artifact) *bundle
 	dataDir := filepath.Join(dir, "cp")
 	f.config = bundle.Config{RuntimeDirectory: runDir, ControlPlanes: []bundle.ControlPlaneSpec{{ID: "bundle-cp", DataDirectory: dataDir, ConfigFile: filepath.Join(dataDir, "config.json"), ReadyURL: f.controlURL + "/ping", Control: cpconfig.Config{Workers: []cpconfig.WorkerEndpoint{{ID: process.InstanceID, ControlSocket: controlSocket, DataEndpoint: f.publicURL}}}}}, Workers: []bundle.WorkerSpec{{Config: process}}}
 	return f
+}
+
+func (f *bundleFixture) enableMaterializer(t *testing.T, executable string) {
+	t.Helper()
+	worker := &f.config.Workers[0].Config
+	run := f.config.RuntimeDirectory
+	worker.BrokerSocket = filepath.Join(run, "broker")
+	worker.StorageIPCSocket = filepath.Join(run, "storage-ipc")
+	worker.StorageOfferSocket = filepath.Join(run, "storage-offer")
+	auth := filepath.Join(f.dir, "cache-password")
+	if e := os.WriteFile(auth, []byte("independent-vfs-private-password"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	worker.Worker.SecretFiles["cache-auth"] = auth
+	worker.ClientSecretRefs = []string{"cache-auth"}
+	cached := worker.Worker.Clients[0]
+	cached.Name = "cached"
+	worker.Worker.Clients = append(worker.Worker.Clients, cached)
+	worker.Mounts[0].Client, worker.Mounts[0].RemoteClient = "cached", "origin"
+	listener, e := net.Listen("tcp", "127.0.0.1:0")
+	if e != nil {
+		t.Fatal(e)
+	}
+	address := listener.Addr().String()
+	listener.Close()
+	cached.Public, e = json.Marshal(map[string]string{"address": "http://" + address + "/dav/", "username": "cache-user"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	cached.SecretRefs = map[string]string{"password": "cache-auth"}
+	f.config.Materializers = []bundle.MaterializerSpec{{Executable: executable, ActivateClient: &cached, Config: rclonebox.ProcessConfig{
+		InstanceID: "bundle-vfs", ControlSocket: filepath.Join(run, "vfs"), Listen: address,
+		Remote:        storageipc.Endpoint{Socket: worker.StorageIPCSocket, OfferSocket: worker.StorageOfferSocket, Namespace: "files", ExpectedWorkerID: worker.InstanceID},
+		LocalUsername: "cache-user", LocalPasswordFile: auth, Directory: filepath.Join(f.dir, "cache"),
+		MaxBytes: 8 << 20, MaxAgeSeconds: 60, MaxCacheEntries: 256, MaxOpenFiles: 8, MaxDirectoryEntries: 256, MaxConcurrentRequests: 8,
+	}}}
+	plane := &f.config.ControlPlanes[0]
+	plane.Control.Workers[0].BrokerSocket = worker.BrokerSocket
+	plane.Control.Rules = []cpconfig.Rule{{InstanceID: worker.InstanceID, Authority: "storage-ipc", SourceID: "files", TargetID: "origin", Decision: broker.Decision{
+		RouteID: "bundle-materialize", WorkerDataEndpoint: worker.DataEndpoint, ApprovedUpstreamID: "origin", TTLSeconds: 120,
+		MaxMessageBytes: 256 << 10, MaxInflightBytes: 8 * (256 << 10), Methods: []string{storageipc.AuthorizeMethod},
+	}}}
+}
+
+func (f *bundleFixture) materializerActivated() bool {
+	if len(f.config.Materializers) == 0 {
+		return true
+	}
+	// Before activation this public route reads the raw origin on every call.
+	// The first VFS call may warm the existing object; a subsequent exact read
+	// with no origin GET witnesses the manager's real cached-route publication.
+	// These probes precede the separately measured tiny-file baseline.
+	before := f.originReads.Load()
+	request, err := http.NewRequest(http.MethodGet, f.publicURL+"/dav/files/object", nil)
+	if err != nil {
+		return false
+	}
+	request.SetBasicAuth("operator", bundlePassword)
+	response, err := f.client.Do(request)
+	if err != nil {
+		return false
+	}
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, int64(len(f.payload)+1)))
+	closeErr := response.Body.Close()
+	return response.StatusCode == http.StatusOK && readErr == nil && closeErr == nil && bytes.Equal(body, f.payload) && f.originReads.Load() == before
 }
 
 type bundleGatedWriter struct {
@@ -428,6 +699,9 @@ func bundleChildren(parent int) map[string]int {
 			seen[pid] = true
 			cmdline, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 			args := bytes.Split(cmdline, []byte{0})
+			if len(args) > 2 && string(args[1]) == "serve" && string(args[2]) == "managed-vfs" {
+				out["vfs"] = pid
+			}
 			if len(args) > 1 && (string(args[1]) == "worker" || string(args[1]) == "control-plane") {
 				out[string(args[1])] = pid
 			}
@@ -436,12 +710,32 @@ func bundleChildren(parent int) map[string]int {
 	return out
 }
 
+// The entry emits this complete bounded record after Manager.Start succeeds.
+// A healthy child HTTP endpoint alone does not witness that parent phase.
+func (p *bundleProcess) managerStarted() bool {
+	file, err := os.Open(p.logPath)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, 64<<10))
+	if err != nil {
+		return false
+	}
+	for _, line := range bytes.SplitAfter(body, []byte("\n")) {
+		if bytes.Equal(line, []byte("storage-gateway manager ready\n")) {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *bundleFixture) ready(t *testing.T, p *bundleProcess) map[string]int {
 	t.Helper()
 	deadline := time.After(80 * time.Second)
 	for {
 		children := bundleChildren(p.cmd.Process.Pid)
-		if len(children) == 2 {
+		if p.managerStarted() && len(children) == 2+len(f.config.Materializers) && f.materializerActivated() {
 			// The Worker must not exist before CP /ping is genuinely ready.
 			status, body := f.request(t, http.MethodGet, f.controlURL+"/ping", false)
 			if status != http.StatusOK || string(body) != "pong" {
@@ -462,9 +756,16 @@ func (f *bundleFixture) ready(t *testing.T, p *bundleProcess) map[string]int {
 							t.Fatalf("roles share PID: %s=%d", role, pid)
 						}
 						seen[pid] = true
+						expected := installed
+						if role == "vfs" {
+							expected, err = os.Stat(f.config.Materializers[0].Executable)
+							if err != nil {
+								t.Fatal(err)
+							}
+						}
 						actual, err := os.Stat(fmt.Sprintf("/proc/%d/exe", pid))
-						if err != nil || !os.SameFile(installed, actual) {
-							t.Fatalf("%s PID %d did not self-exec installed ELF: %v", role, pid, err)
+						if err != nil || !os.SameFile(expected, actual) {
+							t.Fatalf("%s PID %d did not execute its admitted owner artifact: %v", role, pid, err)
 						}
 					}
 					actual, err := os.Stat(fmt.Sprintf("/proc/%d/exe", p.cmd.Process.Pid))
@@ -539,6 +840,17 @@ func (f *bundleFixture) assertRetired(t *testing.T, children map[string]int) {
 			if _, err := os.Lstat(path); !os.IsNotExist(err) {
 				t.Errorf("owned UDS survived retirement: %s: %v", path, err)
 			}
+		}
+	}
+	for _, materializer := range f.config.Materializers {
+		if _, err := os.Lstat(materializer.Config.ControlSocket); !os.IsNotExist(err) {
+			t.Errorf("materializer UDS survived retirement: %v", err)
+		}
+		listener, err := net.Listen("tcp", materializer.Config.Listen)
+		if err != nil {
+			t.Errorf("materializer listener survived retirement: %v", err)
+		} else {
+			listener.Close()
 		}
 	}
 	// Released listeners can be rebound; no daemon remains behind the parent.

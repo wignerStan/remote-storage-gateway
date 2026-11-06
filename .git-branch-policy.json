@@ -1,19 +1,5 @@
 {
-  "schema_version": "git-branch-policy/v2",
-  "reserved_type_prefixes": [
-    "build",
-    "chore",
-    "ci",
-    "docs",
-    "feat",
-    "fix",
-    "migrate",
-    "perf",
-    "refactor",
-    "revert",
-    "style",
-    "test"
-  ],
+  "schema_version": "git-branch-policy/v3",
   "release_lanes": {
     "testing": {
       "stage": "alpha",
@@ -32,5 +18,21 @@
     "testing",
     "develop",
     "main"
+  ],
+  "repository_owner": "repo",
+  "owners": {},
+  "types": [
+    "build",
+    "chore",
+    "ci",
+    "docs",
+    "feat",
+    "fix",
+    "migrate",
+    "perf",
+    "refactor",
+    "revert",
+    "style",
+    "test"
   ]
 }
